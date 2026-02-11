@@ -1,0 +1,65 @@
+name: real_pickplace_image
+
+# Đường dẫn đến data (relative to my_pickplace/)
+dataset_path: data/pickplace_demos
+
+# Image configuration (D455 output)
+image_shape: [3, 240, 320]  # [C, H, W] - RGB
+
+# Shape metadata
+shape_meta:
+  obs:
+    # Wrist camera observation
+    wrist_camera:
+      shape: ${task.image_shape}
+      type: rgb
+
+    # Robot end-effector pose (full 6 DOF)
+    robot_eef_pose:
+      shape: [6]  # [x, y, z, rx, ry, rz]
+      type: low_dim
+
+    # Gripper state
+    gripper_state:
+      shape: [1]  # 0.0 (closed) ~ 1.0 (open)
+      type: low_dim
+
+  # Action space: 6D pose + gripper
+  action:
+    shape: [7]  # [x, y, z, rx, ry, rz, gripper]
+
+# Hardware configuration - THAY ĐỔI THEO SETUP CỦA BẠN
+env:
+  # UR5e settings
+  robot_ip: "150.65.146.87"       # IP robot UR5e
+
+  # Gripper settings
+  gripper_port: "/dev/ttyUSB0"    # ← Thay bằng port gripper
+  gripper_id: 7
+  gripper_position_open: 2048     # ← Calibrate theo gripper
+  gripper_position_close: 3200    # ← Calibrate theo gripper
+
+  # Control parameters
+  frequency: 10                   # Data collection frequency (Hz)
+  max_pos_speed: 0.25             # Max linear speed (m/s)
+  max_rot_speed: 0.4              # Max angular speed (rad/s)
+
+  # Camera settings
+  camera_serial: null             # null = auto-detect first camera
+  camera_resolution: [1280, 720]  # Capture resolution
+  camera_fps: 30
+  enable_depth: false             # Disable depth (như repo gốc)
+
+  # Safety - workspace limits (meters)
+  workspace_limits:
+    x_min: -0.5
+    x_max: 0.5
+    y_min: -0.5
+    y_max: 0.5
+    z_min: 0.02    # Minimum 2cm above table
+    z_max: 0.4
+
+# Dataset parameters
+n_obs_steps: 2
+n_action_steps: 8
+horizon: 16

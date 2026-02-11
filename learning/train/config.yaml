@@ -1,0 +1,47 @@
+# Diffusion Policy Training Configuration for Pick-Place Task
+
+# Dataset
+dataset_path: "data/fix_pose_data/dataset.zarr"  # Updated to new high-quality dataset
+obs_horizon: 2        # Number of observation frames
+pred_horizon: 16      # Number of action steps to predict
+action_horizon: 8     # Number of action steps to execute
+image_size: [216, 288]  # Center crop from 480x640, matches original diffusion_policy
+exclude_episodes: [44,45] # Episodes to exclude from training (last episode was incomplete)
+
+# Model architecture
+action_dim: 7         # Robot pose (x, y, z, rx, ry, rz) + gripper (1)
+state_dim: 7          # Robot pose (6) + gripper (1)
+vision_feature_dim: 512  # Increased from 256 for better visual features
+state_feature_dim: 128   # Increased from 64
+num_diffusion_iters: 100  # Number of diffusion training steps (DDPM)
+num_inference_steps: 16   # Number of inference steps (DDIM - 6x faster)
+use_resnet: true          # Use ResNet18 encoder (true) or custom CNN (false)
+
+# Training
+num_epochs: 3000  # Adjusted for 21 high-quality episodes
+batch_size: 64
+learning_rate: 5.0e-5  # Lower LR to prevent overfitting
+weight_decay: 1.0e-5   # More regularization
+ema_decay: 0.999      # Exponential moving average decay
+seed: 42
+
+# Data
+val_ratio: 0.1        # Validation split ratio
+num_workers: 4        # DataLoader workers
+
+# Checkpointing
+output_dir: "train/checkpoints"
+save_every: 50        # Save checkpoint every N epochs
+
+# Logging
+use_wandb: false      # Set to true to enable W&B logging
+wandb_project: "pickplace-diffusion"
+wandb_entity: null    # Your W&B username/team
+
+# Notes:
+# - obs_horizon=2: Use last 2 camera frames for temporal information
+# - pred_horizon=16: Predict 16 future actions (~1.6s at 10Hz)
+# - action_horizon=8: Execute first 8 actions, then replan
+# - num_diffusion_iters=100: Balance between quality and inference speed
+# - For faster training, reduce batch_size if GPU memory is limited
+# - For better results, increase num_epochs and use learning rate scheduling
