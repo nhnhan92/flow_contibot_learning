@@ -10,8 +10,14 @@ Usage:
 import time
 import click
 import ctypes
-from ctypes import c_int, c_uint, Structure, POINTER, byref
+import os
+import sys
+FILE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PARENT_DIR = os.path.dirname(FILE_DIR)
+sys.path.insert(0, PARENT_DIR)
 
+from ctypes import c_int, c_uint, Structure, POINTER, byref
+from flowbot.plot_helper import plot_helper
 
 # spnav event types
 SPNAV_EVENT_MOTION = 1

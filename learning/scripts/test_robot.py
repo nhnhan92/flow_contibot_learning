@@ -4,7 +4,7 @@ Test UR5e Robot Connection via RTDE
 
 Usage:
     cd ~/Desktop/my_pickplace
-    python scripts/test_robot.py --robot_ip 150.65.146.87
+    python scripts/test_robot.py --robot_ip 192.168.10.20
 """
 
 import sys

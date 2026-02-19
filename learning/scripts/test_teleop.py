@@ -29,13 +29,14 @@ import os
 import time
 import click
 import numpy as np
-
 # Add paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PICKPLACE_DIR = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, PICKPLACE_DIR)
+import scipy.spatial.transform as st
 
 from custom.spacemouse import SpaceMouse
+from custom.ur5e_rtde import UR5eRobot
 
 
 def print_status(tcp_pose, target_pose, speed_scale):
@@ -50,23 +51,16 @@ def print_status(tcp_pose, target_pose, speed_scale):
 
 
 @click.command()
-@click.option('--robot_ip', required=True, help='UR5e IP address')
-@click.option('--frequency', default=50, help='Control frequency (Hz)')
-@click.option('--max_pos_speed', default=0.15, help='Max linear speed (m/s)')
-@click.option('--max_rot_speed', default=0.3, help='Max angular speed (rad/s)')
+@click.option('--robot_ip',default = '192.168.11.20', required=False, help='UR5e IP address')
+@click.option('--frequency', default=10, help='Control frequency (Hz)')
+@click.option('--max_pos_speed', default=0.05, help='Max linear speed (m/s)')
+@click.option('--max_rot_speed', default=0.1, help='Max angular speed (rad/s)')
 @click.option('--speed_scale', default=0.5, help='Speed scaling factor (0.1-1.0)')
 def main(robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale):
     print("="*60)
     print("       UR5e TELEOPERATION TEST (SpaceMouse)")
     print("="*60)
-
-    # Import RTDE
-    try:
-        from rtde_control import RTDEControlInterface
-        from rtde_receive import RTDEReceiveInterface
-    except ImportError:
-        print("Error: ur-rtde not installed. Run: pip install ur-rtde")
-        return
+    ur5 = UR5eRobot(robot_ip=robot_ip,frequency=frequency)
 
     # Workspace limits (meters) - safety bounds
     WORKSPACE = {
@@ -85,18 +79,8 @@ def main(robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale):
     print(f"  Y: [{WORKSPACE['y_min']}, {WORKSPACE['y_max']}] m")
     print(f"  Z: [{WORKSPACE['z_min']}, {WORKSPACE['z_max']}] m")
 
-    # Connect to robot
-    print(f"\nConnecting to robot at {robot_ip}...")
-    try:
-        rtde_r = RTDEReceiveInterface(robot_ip)
-        rtde_c = RTDEControlInterface(robot_ip)
-        print("Robot connected!")
-    except Exception as e:
-        print(f"Failed to connect to robot: {e}")
-        return
-
     # Check robot mode
-    robot_mode = rtde_r.getRobotMode()
+    robot_mode = ur5.get_robot_mode()
     if robot_mode != 7:  # ROBOT_MODE_RUNNING
         print(f"\nWarning: Robot mode is {robot_mode}, expected 7 (RUNNING)")
         print("Make sure robot is in Remote Control mode and running!")
@@ -108,12 +92,14 @@ def main(robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale):
         print("SpaceMouse connected!")
     except Exception as e:
         print(f"Failed to connect to SpaceMouse: {e}")
-        rtde_c.disconnect()
+        ur5.disconnect()
         return
 
     # Get initial pose
-    tcp_pose = np.array(rtde_r.getActualTCPPose())
+    tcp_pose = ur5.get_tcp_pose()
     target_pose = tcp_pose.copy()
+ 
+    target_pose[3:] = [3.14, 0.0 ,0.0]
 
     print("\n" + "="*60)
     print("Controls:")
@@ -157,11 +143,11 @@ def main(robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale):
                     continue
                 elif key == 'r':
                     # Reset target to current pose
-                    tcp_pose = np.array(rtde_r.getActualTCPPose())
+                    tcp_pose = ur5.get_tcp_pose()
                     target_pose = tcp_pose.copy()
                     print("\nReset to current position")
                 elif key == 's':
-                    tcp_pose = np.array(rtde_r.getActualTCPPose())
+                    tcp_pose = ur5.get_tcp_pose()
                     print_status(tcp_pose, target_pose, speed_scale)
                 elif key == '+' or key == '=':
                     speed_scale = min(1.0, speed_scale + 0.1)
@@ -179,14 +165,14 @@ def main(robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale):
                 if not paused:
                     print("\n⚠️  PAUSED (release right button to continue)")
                     paused = True
-                    rtde_c.speedStop()
+                    ur5.stop()
                 time.sleep(0.1)
                 continue
             elif paused:
                 print("Resuming...")
                 paused = False
                 # Reset target to current pose when resuming
-                tcp_pose = np.array(rtde_r.getActualTCPPose())
+                tcp_pose = ur5.get_tcp_pose()
                 target_pose = tcp_pose.copy()
 
             # Calculate velocity from SpaceMouse
@@ -207,32 +193,32 @@ def main(robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale):
             target_pose[:3] += vel_linear * dt
             target_pose[3:] += vel_angular * dt
 
+            if np.any(vel_angular != 0):
+                drot = st.Rotation.from_euler('xyz', vel_angular)
+                current_rot = st.Rotation.from_rotvec(target_pose[3:])
+                target_pose[3:] = (drot * current_rot).as_rotvec()
+
             # Apply workspace limits
             target_pose[0] = np.clip(target_pose[0], WORKSPACE['x_min'], WORKSPACE['x_max'])
             target_pose[1] = np.clip(target_pose[1], WORKSPACE['y_min'], WORKSPACE['y_max'])
             target_pose[2] = np.clip(target_pose[2], WORKSPACE['z_min'], WORKSPACE['z_max'])
 
+            print(f"target_pose = {target_pose}")
             # Send command to robot using servoL
             # servoL(pose, velocity, acceleration, time, lookahead_time, gain)
             try:
-                rtde_c.servoL(
-                    target_pose.tolist(),
-                    0.5,     # velocity (not used in servoL but required)
-                    0.5,     # acceleration (not used in servoL but required)
-                    dt,      # time - duration of motion
-                    0.1,     # lookahead_time
-                    300      # gain
-                )
+                ur5.servo_tcp_pose(target_pose=target_pose,velocity=0.5,
+                                  acceleration=0.5,dt=dt,lookahead_time=0.1,gain=300)
             except Exception as e:
                 print(f"\nControl error: {e}")
                 # Try to recover
-                tcp_pose = np.array(rtde_r.getActualTCPPose())
+                tcp_pose = ur5.get_tcp_pose()
                 target_pose = tcp_pose.copy()
 
             # Print status periodically
             iter_count += 1
             if time.time() - last_print_time > 1.0:
-                tcp_pose = np.array(rtde_r.getActualTCPPose())
+                tcp_pose = ur5.get_tcp_pose()
                 sm_mag = np.sqrt(sm_state[0]**2 + sm_state[1]**2 + sm_state[2]**2)
 
                 print(f"TCP:[{tcp_pose[0]:+.3f},{tcp_pose[1]:+.3f},{tcp_pose[2]:+.3f}] | "
@@ -255,13 +241,7 @@ def main(robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale):
 
         # Stop robot and cleanup
         print("\nStopping robot...")
-        try:
-            rtde_c.speedStop()
-            rtde_c.stopScript()
-        except:
-            pass
-
-        rtde_c.disconnect()
+        ur5.disconnect()
         sm.close()
 
         print("Teleoperation ended.")

@@ -39,7 +39,7 @@ sys.path.insert(0, PICKPLACE_DIR)
 
 from custom.dynamixel_gripper import DynamixelGripper
 from custom.spacemouse import SpaceMouse
-
+from custom.ur5e_rtde import UR5eRobot
 # Keyboard
 import select
 import termios
@@ -279,16 +279,8 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
 
     # Connect to robot
     print(f"\nConnecting to robot at {robot_ip}...")
-    try:
-        from rtde_control import RTDEControlInterface
-        from rtde_receive import RTDEReceiveInterface
+    ur5 = UR5eRobot(robot_ip=robot_ip,frequency=frequency)
 
-        rtde_c = RTDEControlInterface(robot_ip)
-        rtde_r = RTDEReceiveInterface(robot_ip)
-        print("✅ Robot connected!")
-    except Exception as e:
-        print(f"❌ Failed: {e}")
-        return
 
     # Initialize gripper
     print(f"\nInitializing gripper (ID {gripper_id})...")
