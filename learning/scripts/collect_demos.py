@@ -177,7 +177,8 @@ def main(robot_ip, deadzone,arduino_port, frequency, max_pos_speed, max_rot_spee
     print("="*60)
 
     # Create output directory
-    output_dir = Path("/home/nhnhan/Desktop/flow_contibot_learning/data/demo_data/")
+    # parent_dir = Path(__file__).parent.parent
+    output_dir = Path("/home/protac/Desktop/flow_contibot_learning/data/demo_data/")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize zarr dataset
@@ -216,8 +217,8 @@ def main(robot_ip, deadzone,arduino_port, frequency, max_pos_speed, max_rot_spee
     print("\n" + "="*60)
     print("Controls:")
     print("  SpaceMouse      → Move robot")
-    print("  Left button     → Toggle gripper")
-    print("  Right button    → Hold for rotation")
+    print("  Left button     → Toggle Soft Manipulator")
+    print("  Right button    → Hold for controlling UR5")
     print("  'C'             → Start recording")
     print("  'S'             → Stop recording")
     print("  'Q'             → Quit")
@@ -291,6 +292,8 @@ def main(robot_ip, deadzone,arduino_port, frequency, max_pos_speed, max_rot_spee
                 xyz_fb[2] = -xyz_fb[2] 
                 xyz_fb = np.where(np.abs(xyz_fb) < deadzone, 0.0, xyz_fb)
                 fb.step(xyz_fb)
+
+                fb.update_plot()   # just update handles + one pause
 
             elif button_status[0] and not button_status[1]: ### left button is held
                 xyz_ur5 = sm.get_latest_xyz()
