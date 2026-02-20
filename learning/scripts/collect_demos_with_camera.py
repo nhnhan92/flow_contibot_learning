@@ -31,13 +31,12 @@ import numpy as np
 import zarr
 import scipy.spatial.transform as st
 from pathlib import Path
-
+import cv2
 # Setup paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PICKPLACE_DIR = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, PICKPLACE_DIR)
 
-from custom.spacemouse import SpaceMouse
 from custom.ur5e_rtde import UR5eRobot
 from custom.spacemouse import _build_spacemouse
 from custom.flowbot import flowbot
@@ -54,58 +53,6 @@ try:
 except ImportError:
     CAMERA_AVAILABLE = False
     print("⚠️  Warning: pyrealsense2 not installed. Running without camera.")
-
-
-class RealsenseCamera:
-    """Simple RealSense camera wrapper - single process"""
-
-    def __init__(self, serial_number=None, width=640, height=480, fps=30):
-        if not CAMERA_AVAILABLE:
-            raise RuntimeError("pyrealsense2 not installed")
-
-        self.width = width
-        self.height = height
-        self.fps = fps
-
-        # Create pipeline
-        self.pipeline = rs.pipeline()
-        self.config = rs.config()
-
-        # Enable specific camera if serial provided
-        if serial_number:
-            self.config.enable_device(serial_number)
-
-        # Enable RGB stream only (no depth for now - faster)
-        self.config.enable_stream(rs.stream.color, width, height, rs.format.rgb8, fps)
-
-        # Start pipeline
-        print(f"  Starting RealSense {width}x{height} @ {fps}fps...")
-        try:
-            self.pipeline.start(self.config)
-
-            # Warm up - skip first few frames
-            for _ in range(10):
-                self.pipeline.wait_for_frames()
-
-            print("  ✅ Camera ready!")
-        except Exception as e:
-            raise RuntimeError(f"Failed to start camera: {e}")
-
-    def get_frame(self):
-        """Get RGB frame as numpy array (H, W, 3) uint8"""
-        frames = self.pipeline.wait_for_frames(timeout_ms=1000)
-        color_frame = frames.get_color_frame()
-
-        if not color_frame:
-            return None
-
-        # Convert to numpy (H, W, 3) RGB
-        frame = np.asanyarray(color_frame.get_data())
-        return frame
-
-    def stop(self):
-        """Stop camera"""
-        self.pipeline.stop()
 
 
 class DataBuffer:
@@ -256,7 +203,7 @@ def move_2_init_pos(ur5, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--output', '-o', required=True, default = 'data_demo', help='output folder name')
 @click.option('--robot_ip', '-ri', required=True, default = '192.168.11.20', help='UR5e IP')
 @click.option('--arduino_port', default="/dev/ttyACM0")
-@click.option('--camera_serial', default=None, help='RealSense serial (auto-detect if None)')
+@click.option('--camera_serial', default=827112072398, help='RealSense serial (auto-detect if None)')
 @click.option('--no_camera', is_flag=True, help='Run without camera')
 @click.option('--camera_width', default=640, type=int, help='Camera width')
 @click.option('--camera_height', default=480, type=int, help='Camera height')
@@ -286,11 +233,12 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
     if with_camera:
         try:
             print("\nInitializing camera...")
-            camera = RealsenseCamera(
+            camera = RealSenseCamera(
                 serial_number=camera_serial,
                 width=camera_width,
                 height=camera_height,
-                fps=camera_fps
+                fps=camera_fps,
+                enable_depth=False,
             )
             image_shape = (camera_height, camera_width, 3)
         except Exception as e:
@@ -350,7 +298,6 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
     episode_buffer = DataBuffer()
     episode_count = 0
     iter_count = 0
-    prev_button_0 = False
 
     # Get initial pose
     tcp_pose = ur5.get_tcp_pose()

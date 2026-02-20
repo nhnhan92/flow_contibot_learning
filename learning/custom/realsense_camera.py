@@ -18,7 +18,7 @@ class RealSenseCamera:
         height=480,
         fps=30,
         serial_number=None,
-        enable_depth=True,
+        enable_depth=False,
     ):
         """
         Initialize RealSense camera
@@ -44,23 +44,27 @@ class RealSenseCamera:
             self.config.enable_device(serial_number)
 
         # Configure streams
-        self.config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
+        self.config.enable_stream(rs.stream.color, width, height, rs.format.rgb8, fps)  #bgr8
 
         if enable_depth:
             self.config.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
 
         # Start streaming
         print(f"Starting RealSense camera ({width}×{height} @ {fps}fps)...")
-        self.profile = self.pipeline.start(self.config)
+        try:
+            self.pipeline.start(self.config)
+
+            # Warm up - skip first few frames
+            for _ in range(10):
+                self.pipeline.wait_for_frames()
+        except Exception as e:
+            raise RuntimeError(f"Failed to start camera: {e}")
+        # print("  ✅ Camera ready!")
 
         # Get device info
         device = self.profile.get_device()
         self.serial = device.get_info(rs.camera_info.serial_number)
         print(f"✅ Camera started! Serial: {self.serial}")
-
-        # Warm up camera (discard first few frames)
-        for _ in range(10):
-            self.pipeline.wait_for_frames()
 
     def get_frames(self):
         """
@@ -71,7 +75,7 @@ class RealSenseCamera:
             depth: np.array (H, W) depth image in mm (or None if depth disabled)
         """
         # Wait for frames
-        frames = self.pipeline.wait_for_frames()
+        frames = self.pipeline.wait_for_frames(timeout_ms=1000)
 
         # Get color frame
         color_frame = frames.get_color_frame()
