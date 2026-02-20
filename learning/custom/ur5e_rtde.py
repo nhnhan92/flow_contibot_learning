@@ -28,8 +28,8 @@ class UR5eRobot:
         print(f"Connecting to robot at {robot_ip}...")
 
         # Initialize RTDE interfaces
-        self.rtde_c = RTDEControlInterface(robot_ip, frequency)
-        self.rtde_r = RTDEReceiveInterface(robot_ip, frequency)
+        self.rtde_c = RTDEControlInterface(robot_ip, self.frequency)
+        self.rtde_r = RTDEReceiveInterface(robot_ip, self.frequency)
 
         print(f"✅ Robot connected!")
 

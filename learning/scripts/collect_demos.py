@@ -123,7 +123,6 @@ def save_episode(zarr_root, episode_data):
             dataset = data_group[key]
             # dataset.resize(new_len, *value.shape[1:])
             dataset.resize((new_len,) + value.shape[1:])
-            data_group[key][current_len:new_len] = value
 
 
 
@@ -328,7 +327,6 @@ def main(robot_ip, deadzone,arduino_port, frequency, max_pos_speed, max_rot_spee
             if is_recording:
                 current_tcp = ur5.get_tcp_pose()
                 current_joints = ur5.get_joint_angles()
-                print(fb.last_pwm)
                 episode_buffer.add(
                     timestamp=time.time(),
                     robot_state=current_tcp,
