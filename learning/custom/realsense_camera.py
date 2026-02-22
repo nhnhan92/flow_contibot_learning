@@ -7,7 +7,7 @@ Wrapper around pyrealsense2 for easier use.
 
 import numpy as np
 import pyrealsense2 as rs
-
+import cv2
 
 class RealSenseCamera:
     """RealSense D455 Camera Interface"""
@@ -52,7 +52,7 @@ class RealSenseCamera:
         # Start streaming
         print(f"Starting RealSense camera ({width}×{height} @ {fps}fps)...")
         try:
-            self.pipeline.start(self.config)
+            self.profile = self.pipeline.start(self.config)
 
             # Warm up - skip first few frames
             for _ in range(10):
@@ -131,7 +131,6 @@ class RealSenseCamera:
         """Stop camera streaming"""
         self.pipeline.stop()
         print("Camera stopped")
-
 
 # Alias for compatibility
 RealSense = RealSenseCamera

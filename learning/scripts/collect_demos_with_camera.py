@@ -32,6 +32,9 @@ import zarr
 import scipy.spatial.transform as st
 from pathlib import Path
 import cv2
+from numcodecs.zarr3 import Blosc
+
+
 # Setup paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PICKPLACE_DIR = os.path.dirname(SCRIPT_DIR)
@@ -130,9 +133,12 @@ def save_episode(zarr_root, episode_data):
     meta_group = zarr_root['meta']
 
     episode_ends = meta_group['episode_ends']
-    current_len = 0 if len(episode_ends) == 0 else int(episode_ends[-1])
-
-    episode_len = len(episode_data['timestamp'])
+    n_eps = episode_ends.shape[0]
+    if n_eps == 0:
+        current_len = 0
+    else:
+        current_len = int(episode_ends[n_eps - 1])
+    episode_len = episode_data['timestamp'].shape[0]
     new_len = current_len + episode_len
 
     # Save each data key
@@ -146,7 +152,8 @@ def save_episode(zarr_root, episode_data):
                     shape=(new_len,) + value.shape[1:],
                     dtype=value.dtype,
                     chunks=(1,) + value.shape[1:],  # Chunk per image
-                    compressor=zarr.Blosc(cname='lz4', clevel=3)
+                    compressor=Blosc(cname='lz4', clevel=3)
+                    # compressor = numcodecs.Blosc(cname='lz4', clevel=3)
                 )
             else:
                 # Regular data
@@ -166,10 +173,10 @@ def save_episode(zarr_root, episode_data):
         data_group[key][current_len:new_len] = value
 
     # Update episode_ends
-    episode_ends.resize(len(episode_ends) + 1)
+    episode_ends.resize(n_eps + 1)
     episode_ends[-1] = new_len
 
-    return len(episode_ends) - 1
+    return n_eps
 
 def move_2_init_pos(ur5, start_pose, goal_pose, dt, duration=5.0,
                       velocity=0.1, acceleration=0.1, gain=200, lookahead_time=0.15):
@@ -203,15 +210,15 @@ def move_2_init_pos(ur5, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--output', '-o', required=True, default = 'data_demo', help='output folder name')
 @click.option('--robot_ip', '-ri', required=True, default = '192.168.11.20', help='UR5e IP')
 @click.option('--arduino_port', default="/dev/ttyACM0")
-@click.option('--camera_serial', default=827112072398, help='RealSense serial (auto-detect if None)')
+@click.option('--camera_serial', help='RealSense serial (auto-detect if None)')
 @click.option('--no_camera', is_flag=True, help='Run without camera')
 @click.option('--camera_width', default=640, type=int, help='Camera width')
 @click.option('--camera_height', default=480, type=int, help='Camera height')
 @click.option('--camera_fps', default=30, type=int, help='Camera FPS')
 @click.option('--frequency', '-f', default=10.0, type=float, help='Control Hz')
 @click.option('--flowbot_freqency', '-fb_freq', default=30.0, type=float, help='Control Hz for flowbot')
-@click.option('--max_pos_speed', default=0.15, type=float)
-@click.option('--max_rot_speed', default=0.3, type=float)
+@click.option('--max_pos_speed', default=0.1, type=float)
+@click.option('--max_rot_speed', default=0.2, type=float)
 @click.option('--deadzone', default=0.1, type=float, help='Spacemouse threshold')
 def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height,
          camera_fps, arduino_port,flowbot_freqency, frequency, max_pos_speed, max_rot_speed,deadzone):
@@ -221,7 +228,7 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
     print("="*60)
 
     # Create output
-    parent_dir = Path("/home/nhnhan/Desktop/flow_contibot_learning/data/")
+    parent_dir = "/home/protac/Desktop/flow_contibot_learning/data/"
     output_dir = Path(parent_dir + output)
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"\nOutput: {output_dir}")
@@ -295,16 +302,18 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
     # Control loop
     dt = 1.0 / frequency
     is_recording = False
-    episode_buffer = DataBuffer()
+    episode_buffer = DataBuffer(with_camera=with_camera)
     episode_count = 0
     iter_count = 0
 
     # Get initial pose
     tcp_pose = ur5.get_tcp_pose()
-    init_pose = [0.10267188, -0.4243451 ,  0.2850566,3.14, 0.0 ,0.0]
+    init_pose = [0.20636, -0.46706,  0.44268,3.14, -0.14 ,0.0]
     target_pose = init_pose.copy()
+    
+    move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, duration=5.0,gain=150)
+    tcp_pose = ur5.get_tcp_pose()
     print(f"\nInitial pose: [{', '.join([f'{x:.3f}' for x in tcp_pose])}]")
-    move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, duration=3.0,gain=150)
     print("\nReady! Press 'C' to start recording.\n")
 
     # Terminal setup
@@ -347,6 +356,7 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
                             tcp_pose = ur5.get_tcp_pose()
                             move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, duration=3.0,gain=150)
                             print(f"✅ Robot returned to start pose!\n")
+                            target_pose = init_pose.copy()
                         except Exception as e:
                             print(f"⚠️  Failed to return to start: {e}\n")
                     elif is_recording:
@@ -357,7 +367,11 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
             camera_frame = None
             if with_camera and camera:
                 try:
-                    camera_frame = camera.get_frame()
+                    camera_frame, _ = camera.get_frames()
+                    camera_frame = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
+                      # Convert to RGB
+                    cv2.imshow("Camera", camera_frame)
+                    cv2.waitKey(1)
                 except Exception as e:
                     print(f"\n⚠️  Camera error: {e}\n")
 
