@@ -5,7 +5,7 @@ from datetime import datetime
 import threading
 import matplotlib.pyplot as plt
 import os
-SERIAL_PORT = "COM9"
+SERIAL_PORT = "/dev/ttyACM0"
 BAUD_RATE   = 115200
 OUTPUT_CSV  = f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 

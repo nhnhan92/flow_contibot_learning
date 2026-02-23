@@ -201,7 +201,7 @@ def main(robot_ip, deadzone,arduino_port, frequency, max_pos_speed, max_rot_spee
 
     ### Flowbot
     fb = flowbot(serial_port = serial_port,
-                 pwm_min= 5,
+                 pwm_min= 1,
                  pwm_max= 26,
                  enable_plot = True,
                 frequency = CONTROL_HZ,
@@ -235,9 +235,11 @@ def main(robot_ip, deadzone,arduino_port, frequency, max_pos_speed, max_rot_spee
     # Get initial pose
     tcp_pose = ur5.get_tcp_pose()
     target_pose = tcp_pose.copy()
-    target_pose = [0.10267188, -0.4243451 ,  0.2850566,3.14, 0.0 ,0.0]
+    init_pose = [0.20636, -0.46706,  0.44268,3.14, -0.14 ,0.0]
+    target_pose = init_pose.copy()
+    move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, duration=5.0,gain=150)
+    tcp_pose = ur5.get_tcp_pose()
     print(f"\nInitial pose: [{', '.join([f'{x:.3f}' for x in tcp_pose])}]")
-    move_2_init_pos(ur5, tcp_pose, target_pose, dt=dt, duration=3.0,gain=150)
     print("\nReady! Press 'C' to start recording.\n")
 
     
@@ -274,11 +276,23 @@ def main(robot_ip, deadzone,arduino_port, frequency, max_pos_speed, max_rot_spee
                         is_recording = False
                         print(f"\n>>> Episode {ep_id} SAVED ({len(episode_buffer)} steps) <<<")
                         print(f"Total episodes: {episode_count}\n")
+                    
                     elif is_recording:
                         print("\n⚠️  No data recorded yet!\n")
                         is_recording = False
                     else:
                         print("\n⚠️  Not recording!\n")
+                    print(f"\n🔄 Moving robot back to start pose...")
+                    try:
+                        tcp_pose = ur5.get_tcp_pose()
+                        move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, duration=3.0,gain=150)
+                        print(f"✅ Robot returned to start pose!\n")
+                        target_pose = init_pose.copy()
+
+                        fb.reset()  # Reset flowbot
+                        fb.update_plot() 
+                    except Exception as e:
+                        print(f"⚠️  Failed to return to start: {e}\n")
 
                 elif key == '\x7f':  # Backspace
                     if episode_count > 0:
@@ -319,6 +333,8 @@ def main(robot_ip, deadzone,arduino_port, frequency, max_pos_speed, max_rot_spee
                     target_pose = tcp_pose.copy()
             elif button_status[0] and button_status[1]:
                 print("======== RELEASING =========")
+                fb.reset()  
+                fb.update_plot() 
                 fb.release()
             # Button 1 (Right): rotation mode
             # if not sm.is_button_pressed(1):

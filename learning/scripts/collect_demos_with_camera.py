@@ -276,7 +276,7 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
         serial_port = "COM9"
     ### Flowbot
     fb = flowbot(serial_port = serial_port,
-                 pwm_min= 5,
+                 pwm_min= 1,
                  pwm_max= 26,
                  enable_plot = True,
                 frequency = flowbot_freqency,
@@ -318,7 +318,7 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
 
     # Terminal setup
     old_settings = termios.tcgetattr(sys.stdin)
-
+    cam_obs = cv2.VideoCapture(6)
     try:
         tty.setcbreak(sys.stdin.fileno())
 
@@ -357,6 +357,9 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
                             move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, duration=3.0,gain=150)
                             print(f"✅ Robot returned to start pose!\n")
                             target_pose = init_pose.copy()
+
+                            fb.reset()  # Reset flowbot
+                            fb.update_plot() 
                         except Exception as e:
                             print(f"⚠️  Failed to return to start: {e}\n")
                     elif is_recording:
@@ -367,10 +370,15 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
             camera_frame = None
             if with_camera and camera:
                 try:
+                    
                     camera_frame, _ = camera.get_frames()
-                    camera_frame = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
+                    
+                    # cam_obs.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                    # cam_obs.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                    # camera_frame = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
                       # Convert to RGB
-                    cv2.imshow("Camera", camera_frame)
+                    ret, frame = cam_obs.read()
+                    cv2.imshow("Camera", frame)
                     cv2.waitKey(1)
                 except Exception as e:
                     print(f"\n⚠️  Camera error: {e}\n")
@@ -382,6 +390,7 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
                 xyz_fb[2] = -xyz_fb[2] 
                 xyz_fb = np.where(np.abs(xyz_fb) < deadzone, 0.0, xyz_fb)
                 fb.step(xyz_fb)
+                fb.update_plot() 
             elif button_status[0] and not button_status[1]: ### left button is held
                 xyz_ur5 = sm.get_latest_xyz()
 
@@ -399,7 +408,7 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
                     drot = st.Rotation.from_euler('xyz', vel_angular)
                     current_rot = st.Rotation.from_rotvec(target_pose[3:])
                     target_pose[3:] = (drot * current_rot).as_rotvec()
-
+            
             # Execute command
                 try:
                     ur5.servo_tcp_pose(target_pose=target_pose,velocity=0.1,
@@ -409,11 +418,13 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
                     # Try to recover
                     tcp_pose = ur5.get_tcp_pose()
                     target_pose = tcp_pose.copy()
-                    
+
             elif button_status[0] and button_status[1]:
                 print("======== RELEASING =========")
+                
+                fb.reset()  
+                fb.update_plot() 
                 fb.release()
-
             # Collect data - ALL with SAME timestamp
             if is_recording:
                 if with_camera and camera_frame is None:

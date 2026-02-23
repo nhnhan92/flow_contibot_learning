@@ -76,6 +76,7 @@ class flowbot:
             pwm = np.array([self.pwm_min, self.pwm_min, self.pwm_min], dtype=int)  # [5,5,5] if pwm_min=5
             pb0 = self.flowbot.pwm_to_pressure(pwm)
             fk0 = self.flowbot.forward_kinematics_from_pressures(pb0)
+            self.pc_init = np.asarray(fk0["pc"], dtype=float).reshape(3,)
             self.pc =  np.asarray(fk0["pc"], dtype=float).reshape(3,)
             print("Init pwm:", pwm, "Init pc:", self.pc)
             self.serial_sending(pwm)
@@ -205,6 +206,18 @@ class flowbot:
             self.ser.close()
         except Exception:
             pass
+
+    def reset(self):
+        pwm = np.array([0, 0, 0], dtype=np.int32)
+        self.last_pwm = pwm
+        self.pc = self.pc_init.copy()
+        cmd = f"{int(pwm[0])} {int(pwm[1])} {int(pwm[2])}\n"
+        try:
+            self.ser.write(cmd.encode("ascii"))
+            print("[PYTHON] Sent:", cmd.strip())
+        except Exception as e:
+            print("Serial write failed (reset):", e)
+
     def step(self,dpc) -> np.ndarray:
         if not self._running:
             raise RuntimeError("Call start() before step().")
