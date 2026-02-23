@@ -14,7 +14,7 @@ from rtde_receive import RTDEReceiveInterface
 class UR5eRobot:
     """UR5e Robot control via RTDE"""
 
-    def __init__(self, robot_ip="192.168.1.102", frequency=500):
+    def __init__(self, robot_ip="192.168.11.20", frequency=500):
         """
         Initialize robot connection
 
