@@ -28,12 +28,15 @@ import matplotlib.pyplot as plt
 from scipy.spatial import ConvexHull
 
 import serial
-import pyspacemouse
 
 from kinematic_modeling import Flow_driven_bellow
 from workspace import workspace_using_fwdmodel
 from online_optitrack import MotiveNatNetReader
-
+import os
+import sys
+FILE_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.dirname(FILE_DIR)
+sys.path.insert(0, PARENT_DIR)
 # -------------------------
 # Control settings
 # -------------------------
@@ -73,7 +76,10 @@ def drain_serial(ser: serial.Serial, stop_flag: dict):
 # -------------------------
 # SpaceMouse reader thread
 # -------------------------
-class SpaceMouseReader:
+import platform
+
+class _BaseSpaceMouse:
+    """Threaded SpaceMouse reader with cached latest xyz."""
     def __init__(self, device_index: int):
         self.device_index = device_index
         self._lock = threading.Lock()
@@ -81,15 +87,9 @@ class SpaceMouseReader:
         self._running = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
-    @staticmethod
-    def _extract_xyz(state) -> np.ndarray:
-        if hasattr(state, "x") and hasattr(state, "y") and hasattr(state, "z"):
-            return np.array([float(state.x), float(state.y), -float(state.z)], dtype=float)
-        if isinstance(state, dict) and all(k in state for k in ("x", "y", "z")):
-            return np.array([float(state["x"]), float(state["y"]), -float(state["z"])], dtype=float)
-        raise AttributeError("Cannot read x,y,z from SpaceMouse state.")
-
     def start(self):
+        if self._thread is not None and self._thread.is_alive():
+            return
         self._running.set()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -98,20 +98,88 @@ class SpaceMouseReader:
         self._running.clear()
         if self._thread is not None:
             self._thread.join(timeout=1.0)
+        self._thread = None
 
     def get_latest_xyz(self) -> np.ndarray:
         with self._lock:
             return self._latest_xyz.copy()
 
+    # subclass must implement this
+    def _read_xyz_once(self) -> np.ndarray:
+        raise NotImplementedError
+
     def _run(self):
-        ctx = pyspacemouse.open(device_index=self.device_index)
-        with ctx as dev:
-            while self._running.is_set():
-                st = dev.read()
-                xyz = self._extract_xyz(st)
+        # choose a polling rate. 200 Hz is usually enough.
+        dt = 1.0 / 200.0
+        while self._running.is_set():
+            try:
+                xyz = self._read_xyz_once()
+                xyz = np.asarray(xyz, dtype=float).reshape(3,)
                 with self._lock:
                     self._latest_xyz[:] = xyz
-                # print(xyz)
+            except Exception:
+                # don’t kill thread on transient read errors
+                pass
+            # tiny sleep to avoid 100% CPU
+            threading.Event().wait(dt)
+
+
+def _build_spacemouse(device_index: int = 1,os_name: str = 'linux') -> _BaseSpaceMouse:
+    os_name = platform.system().lower()
+
+    # Linux: libspnav spacemouse.py
+    if "linux" in os_name:
+        from learning.custom.spacemouse import SpaceMouse as _SpaceMouseLibspnav
+
+        class _LinuxSpaceMouse(_BaseSpaceMouse):
+            def __init__(self, device_index: int):
+                super().__init__(device_index)
+                self._sm = _SpaceMouseLibspnav(deadzone=DEADZONE, max_value=350.0)
+
+            def _read_xyz_once(self) -> np.ndarray:
+                state6 = self._sm.get_motion_state_transformed()  # [x,y,z,rx,ry,rz]
+                xyz = np.asarray(state6[:3], dtype=float)
+                # axis/sign convention (edit if needed)
+                return np.array([xyz[0], xyz[1], xyz[2]], dtype=float)
+
+            def stop(self):
+                super().stop()
+                try:
+                    self._sm.close()
+                except Exception:
+                    pass
+
+        sm = _LinuxSpaceMouse(device_index)
+        sm.start()
+        return sm
+
+    # Windows: pyspacemouse spacemouse_control.py
+    if "windows" in os_name:
+        from spacemouse_control import SpaceMouseReader as _SpaceMouseReaderWin
+
+        class _WindowsSpaceMouse(_BaseSpaceMouse):
+            def __init__(self, device_index: int):
+                super().__init__(device_index)
+                self._reader = _SpaceMouseReaderWin(device_index=device_index)
+                self._reader.start()
+
+            def _read_xyz_once(self) -> np.ndarray:
+                xyz = np.asarray(self._reader.get_latest_xyz(), dtype=float)
+                return np.array([xyz[0], xyz[1], -xyz[2]], dtype=float)
+
+            def stop(self):
+                super().stop()
+                try:
+                    self._reader.stop()
+                except Exception:
+                    pass
+
+        sm = _WindowsSpaceMouse(device_index)
+        sm.start()
+        return sm
+
+    raise RuntimeError(f"Unsupported OS: {platform.system()}")
+
 
 
 # -------------------------
@@ -212,14 +280,14 @@ def clamp_pwm(pwm: np.ndarray) -> np.ndarray:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", default="COM9")
+    ap.add_argument("--port", default="/dev/ttyACM0")
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--no-plot", action="store_true")
     ap.add_argument("--device-index", type=int, default=1, help="Index for the spacemouse")
     ap.add_argument("--pwm-min", "-mi", type=int, default=1)
     ap.add_argument("--pwm-max", "-ma", type=int, default=20)
     ap.add_argument("--send-hz", type=float, default=SEND_HZ)
-    ap.add_argument("--optitrack", action="store_true",default=True, help="Enable OptiTrack NatNet streaming (Motive/NatNet).")
+    ap.add_argument("--optitrack", action="store_true",default=False, help="Enable OptiTrack NatNet streaming (Motive/NatNet).")
     args = ap.parse_args()
 
     # --- Serial ---
@@ -292,7 +360,9 @@ def main():
         
     alpha = -30*np.pi/180
     # --- SpaceMouse thread ---
-    sm = SpaceMouseReader(device_index=args.device_index)
+    os_name = platform.system().lower()
+
+    sm = _build_spacemouse(os_name=os_name)
     sm.start()
 
     control_dt = 1.0 / CONTROL_HZ
@@ -331,10 +401,10 @@ def main():
                 step_norm = float(np.linalg.norm(dpc))
                 if step_norm > MAX_STEP:
                     dpc = dpc * (MAX_STEP / step_norm)
-
                 pc_proposed = pc + dpc
+            
                 pc = apply_workspace_constraint(ws, tri, pc, pc_proposed)
-
+                
                 t_next_control += control_dt
 
             # 2) Send command to Arduino (throttled)
@@ -353,7 +423,7 @@ def main():
                     cmd = f"{int(pwm[0])} {int(pwm[1])} {int(pwm[2])}\n"
                     try:
                         ser.write(cmd.encode("ascii"))
-                        # print("[PYTHON] Sent:", cmd.strip(), "pc:", pc)
+                        print("[PYTHON] Sent:", cmd.strip(), "pc:", pc)
                     except Exception as e:
                         print("Serial write failed:", e)
                     last_pwm = pwm

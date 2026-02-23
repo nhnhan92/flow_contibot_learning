@@ -18,6 +18,13 @@ Note: RX và RY hiện tại đang bị disable, chỉ có RZ (yaw) hoạt độ
 import ctypes
 from ctypes import c_int, c_uint, Structure, POINTER, byref
 import numpy as np
+import threading
+from typing import Optional
+import os
+import sys
+FILE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PARENT_DIR = os.path.dirname(FILE_DIR)
+sys.path.insert(0, PARENT_DIR)
 
 
 # spnav event types
@@ -53,6 +60,118 @@ class SpnavEvent(ctypes.Union):
         ("motion", SpnavMotionEvent),
         ("button", SpnavButtonEvent),
     ]
+
+# -------------------------
+# SpaceMouse adapter (Linux vs Windows)
+# -------------------------
+import platform
+
+class _BaseSpaceMouse:
+    """Threaded SpaceMouse reader with cached latest xyz."""
+    def __init__(self, device_index: int):
+        self.device_index = device_index
+        self._lock = threading.Lock()
+        self._latest_xyz = np.zeros(3, dtype=float)
+        self._button_status = [False,False]
+        self._running = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self):
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._running.set()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._running.clear()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        self._thread = None
+
+    def get_latest_xyz(self) -> np.ndarray:
+        with self._lock:
+            return self._latest_xyz.copy()
+
+    def get_button_status(self):
+        with self._lock:
+            return self._button_status.copy()
+    # subclass must implement this
+    def _read_xyz_once(self) -> np.ndarray:
+        raise NotImplementedError
+
+    def _run(self):
+        # choose a polling rate. 200 Hz is usually enough.
+        dt = 1.0 / 200.0
+        while self._running.is_set():
+            try:
+                xyz,button_status = self._read_xyz_once()
+                xyz = np.asarray(xyz, dtype=float).reshape(3,)
+                with self._lock:
+                    self._latest_xyz[:] = xyz
+                    self._button_status = button_status
+            except Exception:
+                # don’t kill thread on transient read errors
+                pass
+            # tiny sleep to avoid 100% CPU
+            threading.Event().wait(dt)
+
+
+def _build_spacemouse(device_index: int = 1,os_name: str = 'linux',deadzone : float = 0.1, max_value: float = 350.0) -> _BaseSpaceMouse:
+    os_name = platform.system().lower()
+
+    # Linux: libspnav spacemouse.py
+    if "linux" in os_name:
+
+        class _LinuxSpaceMouse(_BaseSpaceMouse):
+            def __init__(self, device_index: int):
+                super().__init__(device_index)
+                self._sm = SpaceMouse(deadzone=deadzone, max_value=max_value)
+
+            def _read_xyz_once(self) -> np.ndarray:
+                state6 = self._sm.get_motion_state_transformed()  # [x,y,z,rx,ry,rz]
+                xyz = np.asarray(state6[:3], dtype=float)
+                # axis/sign convention (edit if needed)
+                button_status = self._sm.get_all_buttons()
+                return np.array([xyz[0], xyz[1], xyz[2]], dtype=float),button_status
+
+            def stop(self):
+                super().stop()
+                try:
+                    self._sm.close()
+                except Exception:
+                    pass
+
+        sm = _LinuxSpaceMouse(device_index)
+        sm.start()
+        return sm
+
+    # Windows: pyspacemouse spacemouse_control.py
+    if "windows" in os_name:
+        from flowbot.spacemouse_control import SpaceMouseReader as _SpaceMouseReaderWin
+
+        class _WindowsSpaceMouse(_BaseSpaceMouse):
+            def __init__(self, device_index: int):
+                super().__init__(device_index)
+                self._reader = _SpaceMouseReaderWin(device_index=device_index)
+                self._reader.start()
+
+            def _read_xyz_once(self) -> np.ndarray:
+                xyz = np.asarray(self._reader.get_latest_xyz(), dtype=float)
+                return np.array([xyz[0], xyz[1], -xyz[2]], dtype=float)
+
+            def stop(self):
+                super().stop()
+                try:
+                    self._reader.stop()
+                except Exception:
+                    pass
+
+        sm = _WindowsSpaceMouse(device_index)
+        sm.start()
+        return sm
+
+    raise RuntimeError(f"Unsupported OS: {platform.system()}")
 
 
 class SpaceMouse:

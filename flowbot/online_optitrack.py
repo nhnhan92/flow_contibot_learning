@@ -29,6 +29,7 @@ class MotiveNatNetReader:
         local_ip: str,
         use_multicast: bool,
         rigid_body_id: int,
+        alpha: float = -30*np.pi/180
     ):
         self.server_ip = server_ip
         self.local_ip = local_ip
@@ -40,7 +41,7 @@ class MotiveNatNetReader:
         self.R_MW = np.array([[0.0, 0.0, 1.0],
                     [-1.0, 0.0, 0.0],
                     [0.0, -1.0, 0.0]])
-
+        self.alpha = alpha
         self._client = NatNetClient(
             server_ip_address=self.server_ip,
             local_ip_address=self.local_ip,
@@ -55,11 +56,11 @@ class MotiveNatNetReader:
 
     
 
-    def opti_to_manip(self,pos_W_m, origin_W_m, alpha_rad, scale=1000.0):
+    def opti_to_manip(self,pos_W_m, origin_W_m, scale=1000.0):
         pW = np.array(pos_W_m, dtype=float)
         p0 = np.array(origin_W_m, dtype=float)
         p_rel = pW - p0
-        pM = self.Rz(alpha_rad) @ (self.R_MW @ p_rel)
+        pM = self.Rz(self.alpha) @ (self.R_MW @ p_rel)
         return pM * scale  # into mm if scale=1000
 
     def _on_frame(self, data_frame):

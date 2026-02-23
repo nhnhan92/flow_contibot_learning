@@ -28,8 +28,8 @@ class UR5eRobot:
         print(f"Connecting to robot at {robot_ip}...")
 
         # Initialize RTDE interfaces
-        self.rtde_c = RTDEControlInterface(robot_ip, frequency)
-        self.rtde_r = RTDEReceiveInterface(robot_ip, frequency)
+        self.rtde_c = RTDEControlInterface(robot_ip, self.frequency)
+        self.rtde_r = RTDEReceiveInterface(robot_ip, self.frequency)
 
         print(f"✅ Robot connected!")
 
@@ -72,7 +72,7 @@ class UR5eRobot:
             # Block until movement complete
             self.rtde_c.moveL(target_pose, velocity, acceleration)
 
-    def servo_tcp_pose(self, target_pose, dt=0.1, lookahead_time=0.1, gain=300):
+    def servo_tcp_pose(self, target_pose, velocity=0.0, acceleration=0.0,dt=0.1, lookahead_time=0.1, gain=300):
         """
         Servo control to target pose (for high-frequency absolute pose control)
 
@@ -86,7 +86,7 @@ class UR5eRobot:
         """
         target_pose = list(target_pose)
         # servoL signature: servoL(pose, velocity, acceleration, dt, lookahead_time, gain)
-        self.rtde_c.servoL(target_pose, 0, 0, dt, lookahead_time, gain)
+        self.rtde_c.servoL(target_pose, velocity, acceleration, dt, lookahead_time, gain)
 
     def move_joints(self, target_joints, velocity=0.5, acceleration=1.0, asynchronous=False):
         """
