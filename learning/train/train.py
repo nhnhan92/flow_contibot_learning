@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Training script for Diffusion Policy on Pick-Place task
+Training script for Diffusion Policy on UR5e + Flowbot soft manipulator task
 
 Usage:
     python train/train.py --config train/config.yaml
@@ -133,7 +133,7 @@ def main():
         config = yaml.safe_load(f)
 
     print("="*60)
-    print("   DIFFUSION POLICY TRAINING - PICK-PLACE")
+    print("   DIFFUSION POLICY TRAINING - FLOWBOT")
     print("="*60)
     print(f"\nConfig: {args.config}")
     print(f"Device: {args.device}")
@@ -162,8 +162,10 @@ def main():
         exclude_episodes=exclude_episodes,
     )
     print(f"Total samples: {len(dataset)}")
-    print(f"State range - min: {dataset.state_min[:3]}, max: {dataset.state_max[:3]}")
-    print(f"Action range - min: {dataset.action_min[:3]}, max: {dataset.action_max[:3]}")
+    print(f"State  XYZ range - min: {dataset.state_min[:3]}, max: {dataset.state_max[:3]}")
+    print(f"State  PWM range - min: {dataset.state_min[6:]}, max: {dataset.state_max[6:]}")
+    print(f"Action XYZ range - min: {dataset.action_min[:3]}, max: {dataset.action_max[:3]}")
+    print(f"Action PWM range - min: {dataset.action_min[6:]}, max: {dataset.action_max[6:]}")
 
     # Train/val split
     val_ratio = config.get('val_ratio', 0.1)

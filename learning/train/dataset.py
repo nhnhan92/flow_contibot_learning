@@ -1,6 +1,8 @@
 """
-Dataset loader for Pick-Place demonstrations
+Dataset loader for Flowbot demonstrations
 Loads data from zarr format collected by collect_demos_with_camera.py
+
+Robot: UR5e + Flowbot soft manipulator (3 pneumatic valves via PWM)
 """
 
 import numpy as np
@@ -13,18 +15,18 @@ import cv2
 
 class PickPlaceDataset(Dataset):
     """
-    Dataset for pick-place demonstrations
+    Dataset for robot demonstrations with Flowbot soft manipulator.
 
-    Data format from zarr:
-        - robot_eef_pose: (T, 6) - end-effector pose [x, y, z, rx, ry, rz] (USED AS ACTIONS)
-        - robot_joint: (T, 6) - joint angles
-        - gripper_position: (T,) - gripper state [0, 1]
-        - action: (T, 6) - commanded poses during collection (NOT USED - relative commands)
-        - camera_0: (T, H, W, 3) - RGB images
-        - timestamp: (T,) - timestamps
+    Data format from zarr (collected by collect_demos_with_camera.py):
+        - robot_eef_pose: (T, 6) - UR5e end-effector TCP pose [x, y, z, rx, ry, rz]
+        - robot_joint:    (T, 6) - UR5e joint angles (not used for training)
+        - pwm_signals:    (T, 3) - Flowbot PWM signals [pwm1, pwm2, pwm3]
+        - action:         (T, 6) - commanded UR5e target TCP pose (not used; we use future eef_pose)
+        - camera_0:       (T, H, W, 3) - RGB images
+        - timestamp:      (T,) - timestamps
 
-    NOTE: For Diffusion Policy, actions are ABSOLUTE TARGET POSES, not relative commands.
-          We use future robot_eef_pose as action labels.
+    State  (9D): robot_eef_pose (6D) + pwm_signals (3D)
+    Action (9D): future robot_eef_pose (6D) + future pwm_signals (3D)
     """
 
     def __init__(
@@ -69,14 +71,10 @@ class PickPlaceDataset(Dataset):
 
             # Each sample needs obs_horizon past frames + pred_horizon future actions
             for i in range(episode_length):
-                # Can we get obs_horizon frames? (including current)
                 if i < obs_horizon - 1:
                     continue
-
-                # Can we get pred_horizon future actions?
                 if i + pred_horizon > episode_length:
                     continue
-
                 self.samples.append({
                     'episode_idx': ep_idx,
                     'start_idx': start_idx,
@@ -94,55 +92,46 @@ class PickPlaceDataset(Dataset):
             self._compute_stats()
 
     def _compute_stats(self):
-        """Compute min/max for normalization (following original diffusion_policy)
+        """Compute min/max for normalization (Min-Max to [-1, 1]).
 
-        Uses Min-Max normalization to [-1, 1] range:
-            x_norm = 2.0 * (x - min) / (max - min) - 1.0
-
-        This is the standard approach in diffusion models, as it provides:
-        - Bounded inputs/outputs in [-1, 1]
-        - Better stability during training
-        - Consistent with image normalization
+        x_norm = 2.0 * (x - min) / (max - min) - 1.0
         """
         print("Computing normalization statistics (Min-Max to [-1, 1])...")
 
-        # Sample 1000 random timesteps
         total_len = int(self.episode_ends[-1])
         num_samples = min(1000, total_len)
         sample_indices = np.random.choice(total_len, num_samples, replace=False)
-        sample_indices = sorted(sample_indices)  # Sort for better performance
+        sample_indices = sorted(sample_indices)
 
-        # Get robot states (zarr doesn't support fancy indexing, load individually)
         robot_states = []
-        gripper_states = []
-        actions = []
+        pwm_states = []
         for idx in sample_indices:
             robot_states.append(self.zarr_root['data/robot_eef_pose'][idx])
-            gripper_states.append(self.zarr_root['data/gripper_position'][idx])
-            actions.append(self.zarr_root['data/action'][idx])
+            pwm_states.append(self.zarr_root['data/pwm_signals'][idx])
 
-        robot_states = np.array(robot_states)
-        gripper_states = np.array(gripper_states)
-        actions = np.array(actions)
+        robot_states = np.array(robot_states)  # (N, 6)
+        pwm_states = np.array(pwm_states)      # (N, 3)
 
-        # Compute min/max for Min-Max normalization
-        eps = 1e-6  # Small epsilon to avoid division by zero
+        eps = 1e-6
 
-        self.state_min = np.concatenate([robot_states.min(0), [gripper_states.min()]])
-        self.state_max = np.concatenate([robot_states.max(0), [gripper_states.max()]])
+        # State: robot_pose (6D) + pwm (3D) = 9D
+        self.state_min = np.concatenate([robot_states.min(0), pwm_states.min(0)])
+        self.state_max = np.concatenate([robot_states.max(0), pwm_states.max(0)])
         self.state_range = self.state_max - self.state_min + eps
 
-        # Action includes robot pose (6D) + gripper (1D) = 7D
-        self.action_min = np.concatenate([actions.min(0), [gripper_states.min()]])
-        self.action_max = np.concatenate([actions.max(0), [gripper_states.max()]])
-        self.action_range = self.action_max - self.action_min + eps
+        # Action uses the same structure (future robot_pose + future pwm)
+        self.action_min = self.state_min.copy()
+        self.action_max = self.state_max.copy()
+        self.action_range = self.state_range.copy()
 
-        print(f"  State range: [{self.state_min[0]:.4f}, {self.state_max[0]:.4f}] (X)")
-        print(f"               [{self.state_min[1]:.4f}, {self.state_max[1]:.4f}] (Y)")
-        print(f"               [{self.state_min[2]:.4f}, {self.state_max[2]:.4f}] (Z)")
-        print(f"  Action range: [{self.action_min[0]:.4f}, {self.action_max[0]:.4f}] (X)")
-        print(f"                [{self.action_min[1]:.4f}, {self.action_max[1]:.4f}] (Y)")
-        print(f"                [{self.action_min[2]:.4f}, {self.action_max[2]:.4f}] (Z)")
+        print(f"  State/Action range (XYZ): "
+              f"X=[{self.state_min[0]:.4f}, {self.state_max[0]:.4f}], "
+              f"Y=[{self.state_min[1]:.4f}, {self.state_max[1]:.4f}], "
+              f"Z=[{self.state_min[2]:.4f}, {self.state_max[2]:.4f}]")
+        print(f"  PWM range: "
+              f"[{self.state_min[6]:.1f}, {self.state_max[6]:.1f}], "
+              f"[{self.state_min[7]:.1f}, {self.state_max[7]:.1f}], "
+              f"[{self.state_min[8]:.1f}, {self.state_max[8]:.1f}]")
 
     def _normalize_state(self, state):
         """Normalize state using Min-Max to [-1, 1]"""
@@ -175,115 +164,89 @@ class PickPlaceDataset(Dataset):
         sample_info = self.samples[idx]
         sample_idx = sample_info['sample_idx']
 
-        # Get observation window
+        # Observation window indices
         obs_start = sample_idx - (self.obs_horizon - 1)
         obs_end = sample_idx + 1
 
-        # Robot states (obs_horizon, 6)
+        # Robot TCP states (obs_horizon, 6)
         robot_states = self.zarr_root['data/robot_eef_pose'][obs_start:obs_end]
 
-        # Gripper states (obs_horizon,)
-        gripper_states = self.zarr_root['data/gripper_position'][obs_start:obs_end]
+        # Flowbot PWM states (obs_horizon, 3)
+        pwm_states = self.zarr_root['data/pwm_signals'][obs_start:obs_end].astype(np.float32)
 
-        # Combine into state (obs_horizon, 7)
-        states = np.concatenate([
-            robot_states,
-            gripper_states[:, None]
-        ], axis=-1)
-
-        # Normalize
+        # Combined state (obs_horizon, 9): robot_pose + pwm
+        states = np.concatenate([robot_states, pwm_states], axis=-1)
         states = self._normalize_state(states)
 
-        # Get images if using
+        # Images
         if self.use_images:
-            # Load images (obs_horizon, H, W, 3)
             images = self.zarr_root['data/camera_0'][obs_start:obs_end]
 
-            # Process images: center crop then resize
             processed_images = []
             for img in images:
-                # Center crop (matches original diffusion_policy approach)
-                # Original camera: 480x640 (H x W)
-                # Target size: self.image_size (H, W)
                 h, w = img.shape[:2]
                 target_h, target_w = self.image_size
 
-                # Calculate crop boundaries for center crop
-                crop_h = min(h, int(target_h * 1.5))  # Allow some margin for cropping
+                crop_h = min(h, int(target_h * 1.5))
                 crop_w = min(w, int(target_w * 1.5))
 
-                # Center crop
                 start_h = (h - crop_h) // 2
                 start_w = (w - crop_w) // 2
                 img_cropped = img[start_h:start_h + crop_h, start_w:start_w + crop_w]
 
-                # Resize to target size (cv2.resize takes (width, height))
                 img_resized = cv2.resize(img_cropped, (target_w, target_h))
-
-                # Normalize to [-1, 1]
                 img_normalized = (img_resized.astype(np.float32) / 127.5) - 1.0
                 processed_images.append(img_normalized)
 
             images = np.array(processed_images)
-            # Transpose to (obs_horizon, C, H, W) for PyTorch
-            images = images.transpose(0, 3, 1, 2)
+            images = images.transpose(0, 3, 1, 2)  # (obs_horizon, C, H, W)
         else:
             images = np.zeros((self.obs_horizon, 3, *self.image_size), dtype=np.float32)
 
-        # Get future actions (pred_horizon, 6) and gripper (pred_horizon,)
-        # IMPORTANT: Actions should be target poses (absolute), not relative commands!
+        # Future actions: robot_eef_pose (6D) + pwm_signals (3D) = 9D
         action_start = sample_idx
         action_end = sample_idx + self.pred_horizon
-        robot_actions = self.zarr_root['data/robot_eef_pose'][action_start:action_end]  # Use future poses as actions
-        gripper_actions = self.zarr_root['data/gripper_position'][action_start:action_end]
+        robot_actions = self.zarr_root['data/robot_eef_pose'][action_start:action_end]
+        pwm_actions = self.zarr_root['data/pwm_signals'][action_start:action_end].astype(np.float32)
 
-        # Combine into actions (pred_horizon, 7): robot pose + gripper
-        actions = np.concatenate([
-            robot_actions,
-            gripper_actions[:, None]
-        ], axis=-1)
-
-        # Normalize
+        actions = np.concatenate([robot_actions, pwm_actions], axis=-1)  # (pred_horizon, 9)
         actions = self._normalize_action(actions)
 
         return {
-            'obs_state': torch.from_numpy(states).float(),        # (obs_horizon, 7)
-            'obs_image': torch.from_numpy(images).float(),        # (obs_horizon, 3, H, W)
-            'actions': torch.from_numpy(actions).float(),         # (pred_horizon, 7)
+            'obs_state': torch.from_numpy(states).float(),    # (obs_horizon, 9)
+            'obs_image': torch.from_numpy(images).float(),    # (obs_horizon, 3, H, W)
+            'actions':   torch.from_numpy(actions).float(),   # (pred_horizon, 9)
         }
 
     def get_normalizer(self):
-        """Get action normalizer for inference"""
+        """Get action/state normalizer for inference"""
         return {
-            'action_min': self.action_min,
-            'action_max': self.action_max,
+            'action_min':   self.action_min,
+            'action_max':   self.action_max,
             'action_range': self.action_range,
-            'state_min': self.state_min,
-            'state_max': self.state_max,
-            'state_range': self.state_range,
+            'state_min':    self.state_min,
+            'state_max':    self.state_max,
+            'state_range':  self.state_range,
         }
 
 
 def test_dataset():
     """Test dataset loading"""
     dataset = PickPlaceDataset(
-        dataset_path='/home/protac/Desktop/my_pickplace/data/camera_demos/dataset.zarr',
+        dataset_path='data/data_demo/dataset.zarr',
         use_images=True
     )
 
     print(f"\nDataset size: {len(dataset)}")
 
-    # Get a sample
     sample = dataset[0]
     print(f"\nSample 0:")
-    print(f"  obs_state shape: {sample['obs_state'].shape}")
-    print(f"  obs_image shape: {sample['obs_image'].shape}")
-    print(f"  action shape: {sample['action'].shape}")
+    print(f"  obs_state shape: {sample['obs_state'].shape}")   # (2, 9)
+    print(f"  obs_image shape: {sample['obs_image'].shape}")   # (2, 3, H, W)
+    print(f"  actions shape:   {sample['actions'].shape}")     # (16, 9)
 
-    # Print some values
-    print(f"\n  State (first timestep): {sample['obs_state'][0]}")
-    print(f"  Image (first pixel): {sample['obs_image'][0, :, 0, 0]}")
-    print(f"  Action (first step): {sample['action'][0]}")
+    print(f"\n  State (t):  pose={sample['obs_state'][-1, :6]}, pwm={sample['obs_state'][-1, 6:]}")
+    print(f"  Action [0]: pose={sample['actions'][0, :6]},     pwm={sample['actions'][0, 6:]}")
 
 
 if __name__ == '__main__':
