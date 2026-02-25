@@ -56,7 +56,7 @@ def evaluate_model(checkpoint_path, dataset_path, num_episodes=5):
     print(f"Total samples: {len(dataset)}")
 
     # Load zarr to get episode boundaries
-    zarr_root = zarr.open(dataset_path, 'r')
+    zarr_root = zarr.open(dataset_path, mode='r')
     episode_ends = zarr_root['meta/episode_ends'][:]
     num_total_episodes = len(episode_ends)
 

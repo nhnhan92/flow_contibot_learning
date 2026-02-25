@@ -32,7 +32,7 @@ def analyze_dataset(dataset_path, show_plots=True):
     print(f"\nDataset path: {dataset_path}\n")
 
     # Load dataset
-    root = zarr.open(dataset_path, 'r')
+    root = zarr.open(dataset_path, mode='r')
 
     # Get episode information
     episode_ends = root['meta/episode_ends'][:]

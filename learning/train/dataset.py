@@ -233,7 +233,7 @@ class PickPlaceDataset(Dataset):
 def test_dataset():
     """Test dataset loading"""
     dataset = PickPlaceDataset(
-        dataset_path='data/data_demo/dataset.zarr',
+        dataset_path='/home/nhnhan/Desktop/flow_contibot_learning/data/demo_data/dataset.zarr',
         use_images=True
     )
 

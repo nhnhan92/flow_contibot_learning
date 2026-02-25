@@ -121,21 +121,21 @@ def validate(model, dataloader, device):
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='train/config.yaml', help='Config file')
+    parser.add_argument('--config', type=str, default='/config.yaml', help='Config file')
     parser.add_argument('--resume', type=str, default=None, help='Checkpoint to resume from')
     parser.add_argument('--device', type=str, default='cuda', help='Device (cuda/cpu)')
     parser.add_argument('--wandb_project', type=str, default='pickplace-diffusion', help='W&B project name')
     parser.add_argument('--wandb_run_name', type=str, default=None, help='W&B run name')
     args = parser.parse_args()
-
+    config_path = Path(TRAIN_DIR + args.config)
     # Load config
-    with open(args.config, 'r') as f:
+    with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
     print("="*60)
     print("   DIFFUSION POLICY TRAINING - FLOWBOT")
     print("="*60)
-    print(f"\nConfig: {args.config}")
+    print(f"\nConfig: {config_path}")
     print(f"Device: {args.device}")
 
     # Create output directory
