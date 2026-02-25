@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Evaluate trained Diffusion Policy model on dataset
+Evaluate trained Diffusion Policy model on dataset (Flowbot task)
 
 This script evaluates the model by:
 1. Running inference on validation data
-2. Computing prediction errors (position, gripper)
-3. Analyzing gripper state prediction accuracy
-4. Visualizing predicted vs actual trajectories
+2. Computing prediction errors (position, PWM)
+3. Visualizing predicted vs actual trajectories
 
 Usage:
-    python train/evaluate_model.py --checkpoint train/checkpoints/best_model.pt --dataset_path data/fix_pose_data/dataset.zarr
+    python train/evaluate_model.py --checkpoint train/checkpoints/best_model.pt --dataset_path data/demo_data/dataset.zarr
 """
 
 import os
@@ -35,7 +34,7 @@ def evaluate_model(checkpoint_path, dataset_path, num_episodes=5):
     """Evaluate model on dataset"""
 
     print("="*80)
-    print("MODEL EVALUATION")
+    print("MODEL EVALUATION - FLOWBOT")
     print("="*80)
     print(f"\nCheckpoint: {checkpoint_path}")
     print(f"Dataset: {dataset_path}")
@@ -44,7 +43,6 @@ def evaluate_model(checkpoint_path, dataset_path, num_episodes=5):
     print("\nLoading policy...")
     policy = DiffusionPolicyInference(checkpoint_path)
     config = policy.config
-    device = policy.device
 
     # Load dataset
     print("\nLoading dataset...")
@@ -57,8 +55,8 @@ def evaluate_model(checkpoint_path, dataset_path, num_episodes=5):
     )
     print(f"Total samples: {len(dataset)}")
 
-    # Load zarr to get episodes
-    zarr_root = zarr.open(dataset_path, 'r')
+    # Load zarr to get episode boundaries
+    zarr_root = zarr.open(dataset_path, mode='r')
     episode_ends = zarr_root['meta/episode_ends'][:]
     num_total_episodes = len(episode_ends)
 
@@ -67,8 +65,7 @@ def evaluate_model(checkpoint_path, dataset_path, num_episodes=5):
 
     # Evaluation metrics
     all_position_errors = []
-    all_gripper_errors = []
-    all_gripper_correct = []
+    all_pwm_errors = []     # Mean absolute error across 3 PWM channels
 
     # Evaluate each episode
     for ep_idx in range(min(num_episodes, num_total_episodes)):
@@ -76,85 +73,66 @@ def evaluate_model(checkpoint_path, dataset_path, num_episodes=5):
         print(f"Episode {ep_idx}")
         print(f"{'='*80}")
 
-        # Get episode range
         start_idx = 0 if ep_idx == 0 else int(episode_ends[ep_idx - 1])
         end_idx = int(episode_ends[ep_idx])
         ep_length = end_idx - start_idx
 
         print(f"Episode length: {ep_length} steps")
-        print(f"Sample range: [{start_idx}, {end_idx})")
 
-        # Collect predictions and ground truth
         position_errors = []
-        gripper_errors = []
-        gripper_correct = []
+        pwm_errors = []
 
         predicted_actions_list = []
         actual_actions_list = []
 
-        # Sample every N steps to avoid overlap
         sample_stride = config['action_horizon']
 
         for step in range(0, ep_length - config['pred_horizon'], sample_stride):
             sample_idx = start_idx + step
 
-            # Get sample from dataset
             try:
                 sample = dataset[sample_idx]
             except IndexError:
                 break
 
-            # Prepare inputs (dataset returns normalized tensors)
-            obs_state = sample['obs_state']  # (obs_horizon, 7)
-            obs_image = sample['obs_image']  # (obs_horizon, 3, H, W)
-            actual_actions_normalized = sample['actions'].cpu().numpy()  # (pred_horizon, 7) - NORMALIZED
+            obs_state = sample['obs_state']                               # (obs_horizon, 9)
+            obs_image = sample['obs_image']                               # (obs_horizon, 3, H, W)
+            actual_actions_normalized = sample['actions'].cpu().numpy()   # (pred_horizon, 9)
 
-            # Predict using the policy inference class (returns normalized predictions)
-            predicted_actions_normalized = policy.predict(obs_state, obs_image).numpy()  # (pred_horizon, 7)
+            predicted_actions_normalized = policy.predict(obs_state, obs_image).numpy()  # (pred_horizon, 9)
 
-            # Denormalize BOTH predictions and actual to compare in original scale
-            # Using Min-Max denormalization: x = (x_norm + 1) * 0.5 * range + min
+            # Denormalize both: x = (x_norm + 1) * 0.5 * range + min
             predicted_actions = (predicted_actions_normalized + 1.0) * 0.5 * dataset.action_range + dataset.action_min
             actual_actions = (actual_actions_normalized + 1.0) * 0.5 * dataset.action_range + dataset.action_min
 
-            # Compute errors
-            pos_error = np.linalg.norm(predicted_actions[:, :3] - actual_actions[:, :3], axis=1)  # (pred_horizon,)
-            grip_error = np.abs(predicted_actions[:, 6] - actual_actions[:, 6])  # (pred_horizon,)
+            # Position error (first 3 dims: XYZ)
+            pos_error = np.linalg.norm(predicted_actions[:, :3] - actual_actions[:, :3], axis=1)
 
-            # Gripper classification accuracy (threshold at 0.5)
-            pred_grip_binary = (predicted_actions[:, 6] < 0.5).astype(int)
-            actual_grip_binary = (actual_actions[:, 6] < 0.5).astype(int)
-            grip_correct = (pred_grip_binary == actual_grip_binary).astype(float)
+            # PWM error: mean absolute error across 3 channels (dims 6,7,8)
+            pwm_error = np.abs(predicted_actions[:, 6:] - actual_actions[:, 6:]).mean(axis=1)
 
             position_errors.extend(pos_error.tolist())
-            gripper_errors.extend(grip_error.tolist())
-            gripper_correct.extend(grip_correct.tolist())
+            pwm_errors.extend(pwm_error.tolist())
 
             predicted_actions_list.append(predicted_actions)
             actual_actions_list.append(actual_actions)
 
-        # Episode statistics
         position_errors = np.array(position_errors)
-        gripper_errors = np.array(gripper_errors)
-        gripper_correct = np.array(gripper_correct)
+        pwm_errors = np.array(pwm_errors)
 
         print(f"\nPosition Error (meters):")
         print(f"  Mean: {position_errors.mean():.4f} ({position_errors.mean()*100:.2f} cm)")
         print(f"  Std:  {position_errors.std():.4f}")
         print(f"  Max:  {position_errors.max():.4f} ({position_errors.max()*100:.2f} cm)")
 
-        print(f"\nGripper Error:")
-        print(f"  Mean: {gripper_errors.mean():.4f}")
-        print(f"  Std:  {gripper_errors.std():.4f}")
-        print(f"  Max:  {gripper_errors.max():.4f}")
-
-        print(f"\nGripper Classification Accuracy: {gripper_correct.mean()*100:.1f}%")
+        print(f"\nFlowbot PWM Error (mean abs across 3 channels):")
+        print(f"  Mean: {pwm_errors.mean():.2f}")
+        print(f"  Std:  {pwm_errors.std():.2f}")
+        print(f"  Max:  {pwm_errors.max():.2f}")
 
         all_position_errors.extend(position_errors.tolist())
-        all_gripper_errors.extend(gripper_errors.tolist())
-        all_gripper_correct.extend(gripper_correct.tolist())
+        all_pwm_errors.extend(pwm_errors.tolist())
 
-        # Visualize first episode
         if ep_idx == 0:
             visualize_episode(predicted_actions_list, actual_actions_list, ep_idx)
 
@@ -164,22 +142,19 @@ def evaluate_model(checkpoint_path, dataset_path, num_episodes=5):
     print(f"{'='*80}")
 
     all_position_errors = np.array(all_position_errors)
-    all_gripper_errors = np.array(all_gripper_errors)
-    all_gripper_correct = np.array(all_gripper_correct)
+    all_pwm_errors = np.array(all_pwm_errors)
 
     print(f"\nPosition Error (meters):")
-    print(f"  Mean: {all_position_errors.mean():.4f} ({all_position_errors.mean()*100:.2f} cm)")
+    print(f"  Mean:   {all_position_errors.mean():.4f} ({all_position_errors.mean()*100:.2f} cm)")
     print(f"  Median: {np.median(all_position_errors):.4f} ({np.median(all_position_errors)*100:.2f} cm)")
-    print(f"  Std:  {all_position_errors.std():.4f}")
-    print(f"  Max:  {all_position_errors.max():.4f} ({all_position_errors.max()*100:.2f} cm)")
+    print(f"  Std:    {all_position_errors.std():.4f}")
+    print(f"  Max:    {all_position_errors.max():.4f} ({all_position_errors.max()*100:.2f} cm)")
 
-    print(f"\nGripper Error:")
-    print(f"  Mean: {all_gripper_errors.mean():.4f}")
-    print(f"  Median: {np.median(all_gripper_errors):.4f}")
-    print(f"  Std:  {all_gripper_errors.std():.4f}")
-    print(f"  Max:  {all_gripper_errors.max():.4f}")
-
-    print(f"\nGripper Classification Accuracy: {all_gripper_correct.mean()*100:.1f}%")
+    print(f"\nFlowbot PWM Error:")
+    print(f"  Mean:   {all_pwm_errors.mean():.2f}")
+    print(f"  Median: {np.median(all_pwm_errors):.2f}")
+    print(f"  Std:    {all_pwm_errors.std():.2f}")
+    print(f"  Max:    {all_pwm_errors.max():.2f}")
 
     # Quality assessment
     print(f"\n{'='*80}")
@@ -187,13 +162,13 @@ def evaluate_model(checkpoint_path, dataset_path, num_episodes=5):
     print(f"{'='*80}")
 
     mean_pos_error_cm = all_position_errors.mean() * 100
-    grip_accuracy = all_gripper_correct.mean() * 100
+    mean_pwm_error = all_pwm_errors.mean()
 
-    if mean_pos_error_cm < 1.0 and grip_accuracy > 95:
+    if mean_pos_error_cm < 1.0 and mean_pwm_error < 2.0:
         print("✅ EXCELLENT: Model predictions are very accurate!")
-    elif mean_pos_error_cm < 2.0 and grip_accuracy > 90:
+    elif mean_pos_error_cm < 2.0 and mean_pwm_error < 4.0:
         print("✅ GOOD: Model predictions are reasonably accurate")
-    elif mean_pos_error_cm < 5.0 and grip_accuracy > 80:
+    elif mean_pos_error_cm < 5.0 and mean_pwm_error < 8.0:
         print("⚠️  ACCEPTABLE: Model predictions have some errors")
     else:
         print("❌ POOR: Model predictions have significant errors")
@@ -203,65 +178,68 @@ def evaluate_model(checkpoint_path, dataset_path, num_episodes=5):
 def visualize_episode(predicted_actions_list, actual_actions_list, ep_idx):
     """Visualize predicted vs actual trajectories"""
 
-    # Concatenate all predictions/actuals
-    predicted = np.concatenate(predicted_actions_list, axis=0)  # (N, 7)
-    actual = np.concatenate(actual_actions_list, axis=0)  # (N, 7)
+    predicted = np.concatenate(predicted_actions_list, axis=0)  # (N, 9)
+    actual = np.concatenate(actual_actions_list, axis=0)         # (N, 9)
 
-    # Create visualization
     fig, axes = plt.subplots(2, 2, figsize=(15, 10))
     fig.suptitle(f'Episode {ep_idx}: Predicted vs Actual', fontsize=16)
 
+    timesteps = np.arange(len(predicted))
+
     # Plot 1: XYZ positions
     ax = axes[0, 0]
-    timesteps = np.arange(len(predicted))
     ax.plot(timesteps, predicted[:, 0], 'r-', label='Pred X', alpha=0.7)
-    ax.plot(timesteps, actual[:, 0], 'r--', label='Actual X')
+    ax.plot(timesteps, actual[:, 0],    'r--', label='Actual X')
     ax.plot(timesteps, predicted[:, 1], 'g-', label='Pred Y', alpha=0.7)
-    ax.plot(timesteps, actual[:, 1], 'g--', label='Actual Y')
+    ax.plot(timesteps, actual[:, 1],    'g--', label='Actual Y')
     ax.plot(timesteps, predicted[:, 2], 'b-', label='Pred Z', alpha=0.7)
-    ax.plot(timesteps, actual[:, 2], 'b--', label='Actual Z')
+    ax.plot(timesteps, actual[:, 2],    'b--', label='Actual Z')
     ax.set_xlabel('Timestep')
     ax.set_ylabel('Position (m)')
-    ax.set_title('Position Trajectory')
+    ax.set_title('UR5e TCP Position Trajectory')
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    # Plot 2: Gripper
+    # Plot 2: Flowbot PWM signals
     ax = axes[0, 1]
-    ax.plot(timesteps, predicted[:, 6], 'r-', label='Predicted', linewidth=2)
-    ax.plot(timesteps, actual[:, 6], 'b--', label='Actual', linewidth=2)
-    ax.axhline(y=0.5, color='k', linestyle=':', label='Threshold')
+    colors = ['tab:blue', 'tab:orange', 'tab:green']
+    for i, color in enumerate(colors):
+        ax.plot(timesteps, predicted[:, 6+i], color=color, linestyle='-',
+                label=f'Pred PWM{i+1}', alpha=0.7)
+        ax.plot(timesteps, actual[:, 6+i],    color=color, linestyle='--',
+                label=f'Actual PWM{i+1}')
     ax.set_xlabel('Timestep')
-    ax.set_ylabel('Gripper Position')
-    ax.set_title('Gripper State')
-    ax.legend()
+    ax.set_ylabel('PWM Value')
+    ax.set_title('Flowbot PWM Signals')
+    ax.legend(fontsize=7)
     ax.grid(True, alpha=0.3)
 
     # Plot 3: Position error over time
     ax = axes[1, 0]
     pos_error = np.linalg.norm(predicted[:, :3] - actual[:, :3], axis=1) * 100  # cm
     ax.plot(timesteps, pos_error, 'r-', linewidth=2)
-    ax.axhline(y=pos_error.mean(), color='b', linestyle='--', label=f'Mean: {pos_error.mean():.2f} cm')
+    ax.axhline(y=pos_error.mean(), color='b', linestyle='--',
+               label=f'Mean: {pos_error.mean():.2f} cm')
     ax.set_xlabel('Timestep')
     ax.set_ylabel('Position Error (cm)')
     ax.set_title('Position Error Over Time')
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    # Plot 4: Error distribution
+    # Plot 4: PWM error distribution
     ax = axes[1, 1]
-    ax.hist(pos_error, bins=30, edgecolor='black', alpha=0.7)
-    ax.axvline(x=pos_error.mean(), color='r', linestyle='--', label=f'Mean: {pos_error.mean():.2f} cm')
-    ax.axvline(x=np.median(pos_error), color='g', linestyle='--', label=f'Median: {np.median(pos_error):.2f} cm')
-    ax.set_xlabel('Position Error (cm)')
+    pwm_error = np.abs(predicted[:, 6:] - actual[:, 6:]).mean(axis=1)
+    ax.hist(pwm_error, bins=30, edgecolor='black', alpha=0.7)
+    ax.axvline(x=pwm_error.mean(), color='r', linestyle='--',
+               label=f'Mean: {pwm_error.mean():.2f}')
+    ax.set_xlabel('PWM Error (mean across 3 channels)')
     ax.set_ylabel('Count')
-    ax.set_title('Position Error Distribution')
+    ax.set_title('PWM Error Distribution')
     ax.legend()
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
 
-    # Save
     output_path = f'train/evaluation_ep{ep_idx}.png'
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     print(f"\n📊 Visualization saved to: {output_path}")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Training script for Diffusion Policy on Pick-Place task
+Training script for Diffusion Policy on UR5e + Flowbot soft manipulator task
 
 Usage:
     python train/train.py --config train/config.yaml
@@ -121,21 +121,21 @@ def validate(model, dataloader, device):
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='train/config.yaml', help='Config file')
+    parser.add_argument('--config', type=str, default='/config.yaml', help='Config file')
     parser.add_argument('--resume', type=str, default=None, help='Checkpoint to resume from')
     parser.add_argument('--device', type=str, default='cuda', help='Device (cuda/cpu)')
     parser.add_argument('--wandb_project', type=str, default='pickplace-diffusion', help='W&B project name')
     parser.add_argument('--wandb_run_name', type=str, default=None, help='W&B run name')
     args = parser.parse_args()
-
+    config_path = Path(TRAIN_DIR + args.config)
     # Load config
-    with open(args.config, 'r') as f:
+    with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
     print("="*60)
-    print("   DIFFUSION POLICY TRAINING - PICK-PLACE")
+    print("   DIFFUSION POLICY TRAINING - FLOWBOT")
     print("="*60)
-    print(f"\nConfig: {args.config}")
+    print(f"\nConfig: {config_path}")
     print(f"Device: {args.device}")
 
     # Create output directory
@@ -162,8 +162,10 @@ def main():
         exclude_episodes=exclude_episodes,
     )
     print(f"Total samples: {len(dataset)}")
-    print(f"State range - min: {dataset.state_min[:3]}, max: {dataset.state_max[:3]}")
-    print(f"Action range - min: {dataset.action_min[:3]}, max: {dataset.action_max[:3]}")
+    print(f"State  XYZ range - min: {dataset.state_min[:3]}, max: {dataset.state_max[:3]}")
+    print(f"State  PWM range - min: {dataset.state_min[6:]}, max: {dataset.state_max[6:]}")
+    print(f"Action XYZ range - min: {dataset.action_min[:3]}, max: {dataset.action_max[:3]}")
+    print(f"Action PWM range - min: {dataset.action_min[6:]}, max: {dataset.action_max[6:]}")
 
     # Train/val split
     val_ratio = config.get('val_ratio', 0.1)

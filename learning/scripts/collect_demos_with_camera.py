@@ -324,7 +324,7 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
 
         while True:
             loop_start = time.time()
-
+            releasing_act = False
             # Keyboard
             if select.select([sys.stdin], [], [], 0)[0]:
                 key = sys.stdin.read(1)

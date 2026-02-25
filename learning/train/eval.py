@@ -178,9 +178,9 @@ def visualize_prediction(policy, dataset, sample_idx=None):
     gs = fig.add_gridspec(3, 4, hspace=0.3, wspace=0.3)
     fig.suptitle(f'Sample {sample_idx} - Prediction vs Ground Truth', fontsize=16)
 
-    # Plot actions (7D: 6D robot pose + 1D gripper)
-    action_labels = ['X', 'Y', 'Z', 'RX', 'RY', 'RZ', 'Gripper']
-    for i in range(7):
+    # Plot actions (9D: 6D robot TCP pose + 3D flowbot PWM)
+    action_labels = ['X', 'Y', 'Z', 'RX', 'RY', 'RZ', 'PWM1', 'PWM2', 'PWM3']
+    for i in range(9):
         ax = fig.add_subplot(gs[i // 4, i % 4])
         ax.plot(gt_actions_np[:, i], label='Ground Truth', linewidth=2)
         ax.plot(pred_actions_np[:, i], label='Predicted', linewidth=2, linestyle='--')
@@ -212,7 +212,7 @@ def visualize_prediction(policy, dataset, sample_idx=None):
     ax.set_title('Absolute Error')
     ax.set_xlabel('Time Step')
     ax.set_ylabel('Action Dimension')
-    ax.set_yticks(range(7))
+    ax.set_yticks(range(9))
     ax.set_yticklabels(action_labels)
     plt.colorbar(im, ax=ax)
 
@@ -275,10 +275,10 @@ def main():
     elif args.mode == 'predict':
         print("\nPrediction mode - load your own observations and call policy.predict()")
         print("Example:")
-        print("  obs_state = torch.randn(2, 7)  # (obs_horizon, state_dim)")
-        print("  obs_image = torch.randn(2, 3, 96, 96)  # (obs_horizon, C, H, W)")
+        print("  obs_state = torch.randn(2, 9)  # (obs_horizon, state_dim=9: pose6+pwm3)")
+        print("  obs_image = torch.randn(2, 3, 216, 288)  # (obs_horizon, C, H, W)")
         print("  actions = policy.predict(obs_state, obs_image)")
-        print("  print(actions.shape)  # (pred_horizon, action_dim)")
+        print("  print(actions.shape)  # (pred_horizon, 9: pose6+pwm3)")
 
 
 if __name__ == '__main__':

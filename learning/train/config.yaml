@@ -1,27 +1,28 @@
-# Diffusion Policy Training Configuration for Pick-Place Task
+# Diffusion Policy Training Configuration for Flowbot Task
+# Robot: UR5e + Flowbot soft manipulator (3 pneumatic valves via PWM)
 
 # Dataset
-dataset_path: "data/fix_pose_data/dataset.zarr"  # Updated to new high-quality dataset
+dataset_path: "data/demo_data/dataset.zarr"
 obs_horizon: 2        # Number of observation frames
 pred_horizon: 16      # Number of action steps to predict
 action_horizon: 8     # Number of action steps to execute
-image_size: [216, 288]  # Center crop from 480x640, matches original diffusion_policy
-exclude_episodes: [44,45] # Episodes to exclude from training (last episode was incomplete)
+image_size: [216, 288]  # Center crop from 480x640
+exclude_episodes: []  # Episodes to exclude from training (e.g. incomplete)
 
 # Model architecture
-action_dim: 7         # Robot pose (x, y, z, rx, ry, rz) + gripper (1)
-state_dim: 7          # Robot pose (6) + gripper (1)
-vision_feature_dim: 512  # Increased from 256 for better visual features
-state_feature_dim: 128   # Increased from 64
+action_dim: 9         # Robot TCP pose (x, y, z, rx, ry, rz) + flowbot PWM (3)
+state_dim: 9          # Robot TCP pose (6) + flowbot PWM (3)
+vision_feature_dim: 512
+state_feature_dim: 128
 num_diffusion_iters: 100  # Number of diffusion training steps (DDPM)
 num_inference_steps: 16   # Number of inference steps (DDIM - 6x faster)
 use_resnet: true          # Use ResNet18 encoder (true) or custom CNN (false)
 
 # Training
-num_epochs: 3000  # Adjusted for 21 high-quality episodes
+num_epochs: 3000
 batch_size: 64
-learning_rate: 5.0e-5  # Lower LR to prevent overfitting
-weight_decay: 1.0e-5   # More regularization
+learning_rate: 5.0e-5
+weight_decay: 1.0e-5
 ema_decay: 0.999      # Exponential moving average decay
 seed: 42
 
@@ -35,13 +36,13 @@ save_every: 50        # Save checkpoint every N epochs
 
 # Logging
 use_wandb: false      # Set to true to enable W&B logging
-wandb_project: "pickplace-diffusion"
+wandb_project: "flowbot-diffusion"
 wandb_entity: null    # Your W&B username/team
 
 # Notes:
 # - obs_horizon=2: Use last 2 camera frames for temporal information
 # - pred_horizon=16: Predict 16 future actions (~1.6s at 10Hz)
 # - action_horizon=8: Execute first 8 actions, then replan
-# - num_diffusion_iters=100: Balance between quality and inference speed
-# - For faster training, reduce batch_size if GPU memory is limited
-# - For better results, increase num_epochs and use learning rate scheduling
+# - action_dim=9: 6D UR5e TCP pose + 3D flowbot PWM signals
+# - state_dim=9:  6D UR5e TCP pose + 3D flowbot PWM signals
+# - PWM range: [pwm_min, pwm_max] as configured in flowbot (e.g. 1-26)

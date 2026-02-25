@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-Test script to verify the training pipeline works correctly
+Test script to verify the training pipeline for UR5e + Flowbot task.
+
+State/Action space (9D):
+    - UR5e TCP pose: x, y, z, rx, ry, rz  (6D)
+    - Flowbot PWM signals: pwm1, pwm2, pwm3 (3D)
 
 Usage:
     python train/test_pipeline.py --config train/config.yaml
@@ -10,8 +14,6 @@ import os
 import sys
 import yaml
 import torch
-import numpy as np
-from pathlib import Path
 
 # Add parent directory to path
 TRAIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -58,15 +60,15 @@ def test_dataset(config):
             f"Expected actions shape ({config['pred_horizon']}, {config['action_dim']}), got {sample['actions'].shape}"
 
         print(f"\n✅ All dimensions correct!")
-        print(f"   state_dim: {config['state_dim']} (robot pose 6D + gripper 1D)")
-        print(f"   action_dim: {config['action_dim']} (robot pose 6D + gripper 1D)")
+        print(f"   state_dim:  {config['state_dim']} (UR5e TCP pose 6D + flowbot PWM 3D)")
+        print(f"   action_dim: {config['action_dim']} (UR5e TCP pose 6D + flowbot PWM 3D)")
 
         # Check normalization stats
-        print(f"\n✅ Normalization stats:")
-        print(f"   State mean: {dataset.state_mean}")
-        print(f"   State std: {dataset.state_std}")
-        print(f"   Action mean: {dataset.action_mean}")
-        print(f"   Action std: {dataset.action_std}")
+        print(f"\n✅ Normalization stats (Min-Max to [-1, 1]):")
+        print(f"   State min  (XYZ): {dataset.state_min[:3]}")
+        print(f"   State max  (XYZ): {dataset.state_max[:3]}")
+        print(f"   State min  (PWM): {dataset.state_min[6:]}")
+        print(f"   State max  (PWM): {dataset.state_max[6:]}")
 
         return True
 
@@ -111,9 +113,9 @@ def test_model(config):
 
         print(f"\n✅ Testing training forward pass...")
         print(f"   Input shapes:")
-        print(f"     obs_state: {obs_state.shape}")
+        print(f"     obs_state: {obs_state.shape}  (B, obs_horizon, 9: pose6+pwm3)")
         print(f"     obs_image: {obs_image.shape}")
-        print(f"     actions: {actions.shape}")
+        print(f"     actions:   {actions.shape}  (B, pred_horizon, 9: pose6+pwm3)")
 
         loss = model(obs_state, obs_image, actions, train=True)
 
@@ -132,7 +134,7 @@ def test_model(config):
             pred_actions = model(obs_state, obs_image, train=False)
 
         print(f"   ✅ Inference forward pass successful!")
-        print(f"   Output shape: {pred_actions.shape}")
+        print(f"   Output shape: {pred_actions.shape}  (B, pred_horizon, 9: pose6+pwm3)")
 
         assert pred_actions.shape == (batch_size, config['pred_horizon'], config['action_dim']), \
             f"Expected output shape ({batch_size}, {config['pred_horizon']}, {config['action_dim']}), got {pred_actions.shape}"
@@ -179,7 +181,6 @@ def test_dataloader(config):
         print(f"   Batch size: {config['batch_size']}")
         print(f"   Total batches: {len(dataloader)}")
 
-        # Get one batch
         print(f"\n✅ Loading one batch...")
         batch = next(iter(dataloader))
 
@@ -187,7 +188,7 @@ def test_dataloader(config):
         print(f"   Batch shapes:")
         print(f"     obs_state: {batch['obs_state'].shape}")
         print(f"     obs_image: {batch['obs_image'].shape}")
-        print(f"     actions: {batch['actions'].shape}")
+        print(f"     actions:   {batch['actions'].shape}")
 
         return True
 
@@ -210,7 +211,6 @@ def test_full_pipeline(config):
 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        # Load dataset
         dataset = PickPlaceDataset(
             dataset_path=config['dataset_path'],
             obs_horizon=config['obs_horizon'],
@@ -224,10 +224,9 @@ def test_full_pipeline(config):
             dataset,
             batch_size=min(config['batch_size'], len(dataset)),
             shuffle=True,
-            num_workers=0,  # Use 0 for testing
+            num_workers=0,
         )
 
-        # Create model
         model = DiffusionPolicy(
             obs_horizon=config['obs_horizon'],
             pred_horizon=config['pred_horizon'],
@@ -238,7 +237,6 @@ def test_full_pipeline(config):
             num_diffusion_iters=config['num_diffusion_iters'],
         ).to(device)
 
-        # Create optimizer
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=config['learning_rate'],
@@ -247,7 +245,6 @@ def test_full_pipeline(config):
 
         print(f"✅ Pipeline components ready!")
 
-        # Training step
         print(f"\n✅ Running one training step...")
         model.train()
         batch = next(iter(dataloader))
@@ -264,7 +261,6 @@ def test_full_pipeline(config):
         print(f"   ✅ Training step successful!")
         print(f"   Loss: {loss.item():.4f}")
 
-        # Inference step
         print(f"\n✅ Running inference...")
         model.eval()
         with torch.no_grad():
@@ -272,6 +268,8 @@ def test_full_pipeline(config):
 
         print(f"   ✅ Inference successful!")
         print(f"   Predicted actions shape: {pred_actions.shape}")
+        print(f"   Pose (batch0, step0): {pred_actions[0, 0, :6]}")
+        print(f"   PWM  (batch0, step0): {pred_actions[0, 0, 6:]}")
 
         return True
 
@@ -289,17 +287,15 @@ def main():
     parser.add_argument('--config', type=str, default='train/config.yaml', help='Config file')
     args = parser.parse_args()
 
-    # Load config
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
 
     print("="*60)
-    print("   TRAINING PIPELINE TEST")
+    print("   TRAINING PIPELINE TEST - FLOWBOT")
     print("="*60)
     print(f"\nConfig: {args.config}")
     print(f"Dataset: {config['dataset_path']}")
 
-    # Run tests
     tests = [
         ("Dataset", test_dataset),
         ("Model", test_model),
@@ -311,7 +307,6 @@ def main():
     for test_name, test_func in tests:
         results[test_name] = test_func(config)
 
-    # Summary
     print("\n" + "="*60)
     print("   TEST SUMMARY")
     print("="*60)

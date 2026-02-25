@@ -1,6 +1,10 @@
 """
-Diffusion Policy Model for Pick-Place
+Diffusion Policy Model for UR5e + Flowbot soft manipulator
 Based on Diffusion Policy paper: https://diffusion-policy.cs.columbia.edu/
+
+Action/State space (9D):
+    - UR5e TCP pose: x, y, z, rx, ry, rz  (6D)
+    - Flowbot PWM signals: pwm1, pwm2, pwm3 (3D)
 """
 
 import torch
@@ -300,8 +304,8 @@ class DiffusionPolicy(nn.Module):
         self,
         obs_horizon=2,
         pred_horizon=16,
-        action_dim=6,
-        state_dim=7,  # 6 (robot pose) + 1 (gripper)
+        action_dim=9,   # UR5e TCP pose (6D) + flowbot PWM (3D)
+        state_dim=9,    # UR5e TCP pose (6D) + flowbot PWM (3D)
         vision_feature_dim=256,
         state_feature_dim=64,
         num_diffusion_iters=100,
