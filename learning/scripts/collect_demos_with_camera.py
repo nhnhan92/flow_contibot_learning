@@ -318,7 +318,7 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
 
     # Terminal setup
     old_settings = termios.tcgetattr(sys.stdin)
-    cam_obs = cv2.VideoCapture(6)
+    cam_obs = cv2.VideoCapture(0)
     try:
         tty.setcbreak(sys.stdin.fileno())
 

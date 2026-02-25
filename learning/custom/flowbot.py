@@ -245,10 +245,10 @@ class flowbot:
             except Exception as e:
                 print("Serial write failed:", e)
             self.last_pwm = pwm
+            print("Sent pwm:", pwm, "for pc:", self.pc)
 
         elapsed = time.time() - t0
         if elapsed < self.dt:
-            print(self.dt - elapsed)
             time.sleep(self.dt - elapsed)
 
         return pwm

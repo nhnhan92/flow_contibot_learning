@@ -68,7 +68,7 @@ def main():
 
     ### Flowbot
     fb = flowbot.flowbot(serial_port = serial_port,
-                 pwm_min= 5,
+                 pwm_min= 1,
                  pwm_max= 26,
                  enable_plot = True,
                 frequency = CONTROL_HZ,
