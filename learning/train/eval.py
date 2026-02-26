@@ -52,17 +52,36 @@ class DiffusionPolicyInference:
             num_diffusion_iters=self.config['num_diffusion_iters'],
             num_inference_steps=self.config.get('num_inference_steps', 16),
             use_resnet=self.config.get('use_resnet', True),
+            use_film_unet=self.config.get('use_film_unet', True),
+            film_step_embed_dim=self.config.get('film_step_embed_dim', 256),
+            film_kernel_size=self.config.get('film_kernel_size', 5),
+            use_spatial_softmax=self.config.get('use_spatial_softmax', None),
+            num_keypoints=self.config.get('num_keypoints', 32),
+            crop_pad=self.config.get('random_crop_pad', 0),  # disabled at eval time automatically
         ).to(self.device)
 
-        # Load weights (use EMA if available)
+        # Load weights — prefer EMA shadow weights for the UNet denoiser
         if 'ema' in checkpoint:
-            print("Loading EMA weights...")
-            # Load EMA weights
-            for name, param in self.model.named_parameters():
-                if name in checkpoint['ema']:
-                    param.data = checkpoint['ema'][name]
+            ema_state = checkpoint['ema']
+            # EMA is scoped to diffusion_model (UNet) only.
+            # shadow dict keys are relative to diffusion_model (e.g. 'input_proj.weight').
+            shadow = ema_state['shadow'] if isinstance(ema_state, dict) else ema_state
+            n_loaded = 0
+            for name, param in self.model.diffusion_model.named_parameters():
+                if name in shadow:
+                    param.data = shadow[name]
+                    n_loaded += 1
+            # Load live weights for vision/state encoders (not covered by EMA)
+            full_state = checkpoint.get('model')
+            if full_state is not None:
+                encoder_state = {k: v for k, v in full_state.items()
+                                 if not k.startswith('diffusion_model.')}
+                self.model.load_state_dict(
+                    {**self.model.state_dict(), **encoder_state}
+                )
+            print(f"Loaded EMA weights ({n_loaded} UNet params) + live encoder weights")
         else:
-            print("Loading model weights...")
+            print("Loading model weights (no EMA found)...")
             self.model.load_state_dict(checkpoint['model'])
 
         self.model.eval()

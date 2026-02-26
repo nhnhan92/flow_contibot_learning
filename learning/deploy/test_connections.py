@@ -3,304 +3,224 @@
 Test all robot connections before deployment
 
 Usage:
-    python deploy/test_connections.py
-    python deploy/test_connections.py --robot_ip 192.168.1.102
+    python deploy/test_connections.py \
+        --robot_ip 192.168.1.100 \
+        --camera_id 0 \
+        --flowbot_port /dev/ttyACM0
+
+Tests:
+    1. UR5e RTDE connection
+    2. Camera capture
+    3. Flowbot (Arduino serial) connection
 """
 
-import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import argparse
+import sys
 import time
+import argparse
 import numpy as np
 
-from custom.ur5e_rtde import UR5eRobot
-from custom.realsense_camera import RealSenseCamera
-from custom.dynamixel_gripper import DynamixelGripper
+DEPLOY_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(DEPLOY_DIR)
+sys.path.insert(0, PROJECT_DIR)
+
+FLOWBOT_DIR = os.path.join(PROJECT_DIR, 'flowbot')
+sys.path.insert(0, FLOWBOT_DIR)
 
 
-def test_robot(robot_ip):
-    """Test robot connection"""
-    print("\n" + "="*60)
-    print("Testing Robot Connection")
-    print("="*60)
+def test_robot(robot_ip: str) -> bool:
+    """Test UR5e RTDE connection and read current TCP pose."""
+    print("\n" + "="*50)
+    print("TEST 1: UR5e Robot Connection")
+    print("="*50)
 
     try:
-        print(f"Connecting to robot at {robot_ip}...")
-        robot = UR5eRobot(robot_ip)
+        import rtde_control
+        import rtde_receive
+    except ImportError:
+        print("❌ rtde_control not installed. Run: pip install ur-rtde")
+        return False
 
-        print("✅ Robot connected!")
+    try:
+        print(f"  Connecting to UR5e at {robot_ip} ...")
+        rtde_r = rtde_receive.RTDEReceiveInterface(robot_ip)
+        rtde_c = rtde_control.RTDEControlInterface(robot_ip)
 
-        # Get current pose
-        pose = robot.get_tcp_pose()
-        print(f"Current TCP pose: {pose}")
+        tcp_pose = rtde_r.getActualTCPPose()
+        joint_pos = rtde_r.getActualQ()
+        robot_mode = rtde_r.getRobotMode()
 
-        # Get joint angles
-        joints = robot.get_joint_angles()
-        print(f"Current joints: {joints}")
+        print(f"  ✅ Connected!")
+        print(f"     Robot mode : {robot_mode}  (7 = running)")
+        print(f"     TCP pose   : {[f'{v:.4f}' for v in tcp_pose]}")
+        print(f"     Joints (°) : {[f'{np.degrees(j):.1f}' for j in joint_pos]}")
 
-        # Test small movement
-        print("\nTesting small movement...")
-        response = input("Move robot slightly? [y/N]: ")
-
-        if response.lower() == 'y':
-            current_pose = robot.get_tcp_pose()
-            target_pose = current_pose.copy()
-            target_pose[2] += 0.05  # Move up 5cm
-
-            print(f"Moving from Z={current_pose[2]:.3f} to Z={target_pose[2]:.3f}")
-            robot.move_tcp_pose(target_pose, velocity=0.1, acceleration=0.3, asynchronous=False)
-
-            time.sleep(1)
-
-            # Move back
-            print("Moving back...")
-            robot.move_tcp_pose(current_pose, velocity=0.1, acceleration=0.3, asynchronous=False)
-
-            print("✅ Movement test complete!")
-
-        robot.disconnect()
-        print("✅ Robot test PASSED!\n")
+        rtde_c.disconnect()
+        rtde_r.disconnect()
         return True
 
     except Exception as e:
-        print(f"❌ Robot test FAILED: {e}\n")
-        import traceback
-        traceback.print_exc()
+        print(f"  ❌ Robot connection failed: {e}")
         return False
 
 
-def test_camera(serial_number=None):
-    """Test camera connection"""
-    print("\n" + "="*60)
-    print("Testing Camera Connection")
-    print("="*60)
+def test_camera(camera_id: int) -> bool:
+    """Test camera capture and display frame info."""
+    print("\n" + "="*50)
+    print("TEST 2: Camera")
+    print("="*50)
 
     try:
-        print("Initializing camera...")
-        camera = RealSenseCamera(serial_number=serial_number)
-
-        print("✅ Camera initialized!")
-
-        # Get frames
-        print("Capturing frames...")
-        color, depth = camera.get_frames()
-
-        print(f"Color image shape: {color.shape}")
-        print(f"Depth image shape: {depth.shape}")
-
-        # Test multiple captures
-        print("\nTesting frame rate...")
-        n_frames = 30
-        start_time = time.time()
-
-        for i in range(n_frames):
-            color, depth = camera.get_frames()
-
-        elapsed = time.time() - start_time
-        fps = n_frames / elapsed
-
-        print(f"Captured {n_frames} frames in {elapsed:.2f}s")
-        print(f"Frame rate: {fps:.1f} FPS")
-
-        camera.stop()
-        print("✅ Camera test PASSED!\n")
-        return True
-
-    except Exception as e:
-        print(f"❌ Camera test FAILED: {e}\n")
-        import traceback
-        traceback.print_exc()
+        import cv2
+    except ImportError:
+        print("❌ opencv-python not installed.")
         return False
 
-
-def test_gripper():
-    """Test gripper connection"""
-    print("\n" + "="*60)
-    print("Testing Gripper Connection")
-    print("="*60)
-
     try:
-        print("Connecting to gripper...")
-        gripper = DynamixelGripper()
+        print(f"  Opening camera id={camera_id} ...")
+        cap = cv2.VideoCapture(camera_id)
 
-        print("✅ Gripper connected!")
-
-        # Get current position
-        pos = gripper.get_position()
-        print(f"Current position: {pos:.3f}")
-
-        # Test movement
-        print("\nTesting gripper movement...")
-        response = input("Test gripper open/close? [y/N]: ")
-
-        if response.lower() == 'y':
-            print("Opening gripper...")
-            gripper.set_position(1.0)
-            time.sleep(1)
-
-            pos = gripper.get_position()
-            print(f"Position after open: {pos:.3f}")
-
-            print("Closing gripper...")
-            gripper.set_position(0.0)
-            time.sleep(1)
-
-            pos = gripper.get_position()
-            print(f"Position after close: {pos:.3f}")
-
-            print("Opening gripper...")
-            gripper.set_position(1.0)
-            time.sleep(1)
-
-            print("✅ Movement test complete!")
-
-        gripper.disconnect()
-        print("✅ Gripper test PASSED!\n")
-        return True
-
-    except Exception as e:
-        print(f"❌ Gripper test FAILED: {e}\n")
-        import traceback
-        traceback.print_exc()
-        return False
-
-
-def test_inference_speed(checkpoint_path):
-    """Test model inference speed"""
-    print("\n" + "="*60)
-    print("Testing Model Inference Speed")
-    print("="*60)
-
-    try:
-        from train.eval import DiffusionPolicyInference
-        import torch
-
-        print(f"Loading model from: {checkpoint_path}")
-        policy = DiffusionPolicyInference(checkpoint_path)
-
-        print("✅ Model loaded!")
-
-        # Create dummy input
-        obs_horizon = policy.config['obs_horizon']
-        obs_images = torch.randn(1, obs_horizon, 3, 96, 96).cuda()
-        obs_states = torch.randn(1, obs_horizon, 7).cuda()
-
-        print(f"\nRunning inference benchmark...")
-        n_runs = 50
+        if not cap.isOpened():
+            print(f"  ❌ Cannot open camera id={camera_id}")
+            return False
 
         # Warmup
         for _ in range(5):
-            _ = policy.predict(obs_states, obs_images)
+            cap.read()
 
-        # Benchmark
-        start_time = time.time()
-        for i in range(n_runs):
-            actions = policy.predict(obs_states, obs_images)
-        elapsed = time.time() - start_time
+        ret, frame = cap.read()
+        if not ret:
+            print("  ❌ Cannot read frame from camera")
+            cap.release()
+            return False
 
-        avg_time = elapsed / n_runs
-        fps = 1.0 / avg_time
+        h, w, c = frame.shape
+        print(f"  ✅ Camera OK!")
+        print(f"     Resolution : {w} × {h}  ({c} channels)")
 
-        print(f"\nResults:")
-        print(f"  Average inference time: {avg_time*1000:.1f} ms")
-        print(f"  Max FPS: {fps:.1f}")
-        print(f"  Predicted actions shape: {actions.shape}")
-
-        if avg_time < 0.1:  # < 100ms = 10 Hz possible
-            print("\n✅ Inference speed is good for 10 Hz control!")
+        # Check brightness (very dark → wrong camera or lens cap)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        mean_brightness = gray.mean()
+        print(f"     Brightness : {mean_brightness:.1f} / 255  ", end="")
+        if mean_brightness < 10:
+            print("⚠️  (very dark — check lens cap)")
+        elif mean_brightness < 30:
+            print("⚠️  (dim — check lighting)")
         else:
-            print(f"\n⚠️  Inference too slow for 10 Hz (need < 100ms, got {avg_time*1000:.1f}ms)")
+            print("✅")
 
-        print("✅ Inference test PASSED!\n")
+        cap.release()
         return True
 
     except Exception as e:
-        print(f"❌ Inference test FAILED: {e}\n")
-        import traceback
-        traceback.print_exc()
+        print(f"  ❌ Camera test failed: {e}")
+        return False
+
+
+def test_flowbot(port: str, baud: int = 115200) -> bool:
+    """
+    Test Flowbot (Arduino) serial connection.
+    Sends a zero-PWM command, then a small test pulse, then resets.
+    """
+    print("\n" + "="*50)
+    print("TEST 3: Flowbot (Arduino Serial)")
+    print("="*50)
+
+    try:
+        from flowbot import Flowbot
+    except ImportError:
+        print("  ❌ flowbot module not found.")
+        print(f"     Expected at: {FLOWBOT_DIR}/flowbot.py")
+        return False
+
+    try:
+        print(f"  Connecting to Flowbot on {port} @ {baud} baud ...")
+        fb = Flowbot(port=port, baud=baud)
+        time.sleep(2.0)   # Arduino bootloader delay
+
+        print("  ✅ Connected!")
+
+        # Read initial PWM state
+        print(f"     Initial PWM: {fb.last_pwm}")
+
+        # Send a zero command (safe)
+        fb.serial_sending(np.array([0, 0, 0], dtype=int))
+        time.sleep(0.3)
+        print(f"     After zero command — PWM: {fb.last_pwm}")
+
+        # Small test pulse on valve 1 only
+        print("  Sending test pulse (PWM1=5, PWM2=0, PWM3=0) for 1s ...")
+        fb.serial_sending(np.array([5, 0, 0], dtype=int))
+        time.sleep(1.0)
+
+        # Reset all valves
+        print("  Resetting Flowbot ...")
+        fb.reset()
+        time.sleep(0.3)
+        print(f"     After reset — PWM: {fb.last_pwm}")
+        print("  ✅ Flowbot OK!")
+
+        return True
+
+    except Exception as e:
+        print(f"  ❌ Flowbot test failed: {e}")
         return False
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Test robot connections')
-    parser.add_argument('--robot_ip', type=str, default='192.168.11.20', help='Robot IP')
-    parser.add_argument('--camera_serial', type=str, default=None, help='Camera serial')
-    parser.add_argument('--checkpoint', type=str, default='train/checkpoints/best_model.pt',
-                        help='Model checkpoint for inference test')
-    parser.add_argument('--skip_robot', action='store_true', help='Skip robot test')
-    parser.add_argument('--skip_camera', action='store_true', help='Skip camera test')
-    parser.add_argument('--skip_gripper', action='store_true', help='Skip gripper test')
-    parser.add_argument('--skip_inference', action='store_true', help='Skip inference test')
+    parser = argparse.ArgumentParser(description='Test robot connections before deployment')
+    parser.add_argument('--robot_ip',     type=str, default='192.168.1.100',
+                        help='UR5e IP address')
+    parser.add_argument('--camera_id',    type=int, default=0,
+                        help='Camera device ID')
+    parser.add_argument('--flowbot_port', type=str, default='/dev/ttyACM0',
+                        help='Arduino serial port for Flowbot')
+    parser.add_argument('--flowbot_baud', type=int, default=115200,
+                        help='Flowbot serial baud rate')
+    parser.add_argument('--skip_robot',   action='store_true', help='Skip robot test')
+    parser.add_argument('--skip_camera',  action='store_true', help='Skip camera test')
+    parser.add_argument('--skip_flowbot', action='store_true', help='Skip flowbot test')
     args = parser.parse_args()
 
-    print("="*60)
-    print("   ROBOT DEPLOYMENT CONNECTION TEST")
-    print("="*60)
+    print("="*50)
+    print("CONNECTION TESTS — UR5e + Flowbot")
+    print("="*50)
 
     results = {}
 
-    # Test robot
     if not args.skip_robot:
-        results['robot'] = test_robot(args.robot_ip)
+        results['UR5e Robot'] = test_robot(args.robot_ip)
     else:
-        print("\n⏭️  Skipping robot test")
-        results['robot'] = None
+        print("\n⏭  Skipping robot test")
 
-    # Test camera
     if not args.skip_camera:
-        results['camera'] = test_camera(args.camera_serial)
+        results['Camera'] = test_camera(args.camera_id)
     else:
-        print("\n⏭️  Skipping camera test")
-        results['camera'] = None
+        print("\n⏭  Skipping camera test")
 
-    # Test gripper
-    if not args.skip_gripper:
-        results['gripper'] = test_gripper()
+    if not args.skip_flowbot:
+        results['Flowbot'] = test_flowbot(args.flowbot_port, args.flowbot_baud)
     else:
-        print("\n⏭️  Skipping gripper test")
-        results['gripper'] = None
-
-    # Test inference
-    if not args.skip_inference and os.path.exists(args.checkpoint):
-        results['inference'] = test_inference_speed(args.checkpoint)
-    elif not args.skip_inference:
-        print(f"\n⏭️  Skipping inference test (checkpoint not found: {args.checkpoint})")
-        results['inference'] = None
-    else:
-        print("\n⏭️  Skipping inference test")
-        results['inference'] = None
+        print("\n⏭  Skipping flowbot test")
 
     # Summary
-    print("="*60)
-    print("   TEST SUMMARY")
-    print("="*60)
-
+    print("\n" + "="*50)
+    print("SUMMARY")
+    print("="*50)
     all_passed = True
-    for component, result in results.items():
-        if result is None:
-            status = "⏭️  SKIPPED"
-        elif result:
-            status = "✅ PASSED"
-        else:
-            status = "❌ FAILED"
+    for name, passed in results.items():
+        status = "✅ PASS" if passed else "❌ FAIL"
+        print(f"  {status}  {name}")
+        if not passed:
             all_passed = False
 
-        print(f"{component.upper():.<20} {status}")
-
-    print("="*60)
-
-    if all_passed and any(results.values()):
-        print("\n🎉 All tests passed! Ready for deployment!")
-        print("\nNext step:")
-        print("  python deploy/deploy_real_robot.py --checkpoint train/checkpoints/best_model.pt")
-    elif not all_passed:
-        print("\n⚠️  Some tests failed. Please fix issues before deployment.")
+    if all_passed:
+        print("\n🎉 All tests passed! Safe to run deploy_real_robot.py")
     else:
-        print("\n⚠️  No tests were run.")
+        print("\n⚠️  Fix the failing tests before deploying.")
+        return 1
 
-    return 0 if all_passed else 1
+    return 0
 
 
 if __name__ == '__main__':

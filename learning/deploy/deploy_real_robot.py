@@ -1,580 +1,449 @@
 #!/usr/bin/env python3
 """
-Deploy trained Diffusion Policy on real UR5e robot
+Deploy trained Diffusion Policy on real UR5e + Flowbot soft manipulator
 
 Usage:
-    python deploy/deploy_real_robot.py --checkpoint train/checkpoints/best_model.pt
-    python deploy/deploy_real_robot.py --checkpoint train/checkpoints/best_model.pt --num_episodes 5
+    python deploy/deploy_real_robot.py \
+        --checkpoint train/checkpoints/best_model.pt \
+        --robot_ip 192.168.1.100 \
+        --camera_id 0
+
+Hardware:
+    - UR5e robot arm (RTDE control)
+    - Flowbot soft pneumatic manipulator (3 valves via Arduino serial)
+    - USB camera (camera_id)
+
+State  (9D): robot_eef_pose (6D: x,y,z,rx,ry,rz) + flowbot pwm (3D)
+Action (9D): target robot_eef_pose (6D) + target pwm (3D)
 """
 
-import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import argparse
+import sys
 import time
+import argparse
 import numpy as np
-import cv2
 import torch
-from collections import deque
+import cv2
 from pathlib import Path
-import logging
-from datetime import datetime
+from collections import deque
 
-# Import robot and camera interfaces
-from custom.ur5e_rtde import UR5eRobot
-from custom.realsense_camera import RealSenseCamera
-from custom.dynamixel_gripper import DynamixelGripper
+# Add parent directory to path
+DEPLOY_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(DEPLOY_DIR)
+sys.path.insert(0, PROJECT_DIR)
 
-# Import policy
 from train.eval import DiffusionPolicyInference
+
+# ── Hardware imports ──────────────────────────────────────────────────────────
+try:
+    import rtde_control
+    import rtde_receive
+    HAS_RTDE = True
+except ImportError:
+    HAS_RTDE = False
+    print("⚠️  rtde_control not found — robot control disabled")
+
+try:
+    FLOWBOT_DIR = os.path.join(PROJECT_DIR, 'flowbot')
+    sys.path.insert(0, FLOWBOT_DIR)
+    from flowbot import Flowbot
+    HAS_FLOWBOT = True
+except ImportError:
+    HAS_FLOWBOT = False
+    print("⚠️  flowbot module not found — PWM control disabled")
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+PWM_MIN = 1
+PWM_MAX = 26
+
+# Default start pose (from collect_demos_with_camera.py)
+DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
+
+# Control frequency (Hz)
+CONTROL_FREQ = 10.0
+DT = 1.0 / CONTROL_FREQ
+
+# servo_l speed/acceleration (lower = smoother)
+SERVO_SPEED = 0.3       # m/s
+SERVO_ACCEL = 0.3       # m/s^2
+SERVO_LOOKAHEAD = 0.1   # s
+SERVO_GAIN = 300
 
 
 class RobotDeployment:
-    """Deploy Diffusion Policy on real robot"""
+    """
+    Main deployment class for UR5e + Flowbot with Diffusion Policy.
+
+    Observation buffer keeps the last `obs_horizon` frames so the policy
+    always sees a temporal window of states and images.
+    """
 
     def __init__(
         self,
-        checkpoint_path,
-        robot_ip="192.168.1.102",
-        camera_serial=None,
-        image_size=None,  # Will be loaded from checkpoint config
-        control_frequency=10.0,  # Hz
-        action_horizon_override=None,  # Override action_horizon from config
-        verbose=True,
-        log_file=None,  # Path to log file
+        checkpoint_path: str,
+        robot_ip: str,
+        camera_id: int = 0,
+        flowbot_port: str = '/dev/ttyACM0',
+        flowbot_baud: int = 115200,
+        image_size: tuple = (96, 96),
+        device: str = 'cuda',
+        verbose: bool = True,
     ):
-        self.checkpoint_path = checkpoint_path
-        self.control_dt = 1.0 / control_frequency
         self.verbose = verbose
+        self.image_size = image_size
 
-        # Setup logging
-        if log_file is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_file = f"deploy_log_{timestamp}.txt"
-        self.log_file = log_file
-        self.log_handle = open(self.log_file, 'w')
-        self.log(f"{'='*60}")
-        self.log(f"DEPLOYMENT LOG - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        self.log(f"{'='*60}\n")
+        # ── Load policy ───────────────────────────────────────────────────────
+        print(f"\n[1/4] Loading policy from: {checkpoint_path}")
+        device_obj = torch.device(device if torch.cuda.is_available() else 'cpu')
+        self.policy = DiffusionPolicyInference(checkpoint_path, device=str(device_obj))
+        self.config = self.policy.config
+        self.obs_horizon = self.config['obs_horizon']
+        self.action_horizon = self.config['action_horizon']
+        print(f"      obs_horizon={self.obs_horizon}, action_horizon={self.action_horizon}")
+        print(f"      device={device_obj}")
 
-        # Load policy
-        print("="*60)
-        print("   DIFFUSION POLICY DEPLOYMENT")
-        print("="*60)
-        print(f"\nLoading policy from: {checkpoint_path}")
-        self.policy = DiffusionPolicyInference(checkpoint_path)
+        # ── Camera ────────────────────────────────────────────────────────────
+        print(f"\n[2/4] Opening camera (id={camera_id}) ...")
+        self.cap = cv2.VideoCapture(camera_id)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Cannot open camera id={camera_id}")
+        # Warmup
+        for _ in range(5):
+            self.cap.read()
+        print("      Camera OK")
 
-        self.obs_horizon = self.policy.config['obs_horizon']
-        self.pred_horizon = self.policy.config['pred_horizon']
-        self.action_horizon = action_horizon_override if action_horizon_override is not None else self.policy.config['action_horizon']
+        # ── UR5e RTDE ─────────────────────────────────────────────────────────
+        print(f"\n[3/4] Connecting to UR5e at {robot_ip} ...")
+        if not HAS_RTDE:
+            raise ImportError("rtde_control is required for robot control")
+        self.rtde_c = rtde_control.RTDEControlInterface(robot_ip)
+        self.rtde_r = rtde_receive.RTDEReceiveInterface(robot_ip)
+        print("      UR5e connected")
 
-        # Load image_size from config (CRITICAL: must match training!)
-        if image_size is None:
-            self.image_size = tuple(self.policy.config['image_size'])
-        else:
-            self.image_size = image_size
-        print(f"  image_size: {self.image_size}")
+        # ── Flowbot ───────────────────────────────────────────────────────────
+        print(f"\n[4/4] Connecting to Flowbot on {flowbot_port} ...")
+        if not HAS_FLOWBOT:
+            raise ImportError("flowbot module is required")
+        self.fb = Flowbot(port=flowbot_port, baud=flowbot_baud)
+        time.sleep(2.0)  # Arduino reset delay
+        print("      Flowbot connected")
 
-        print(f"Policy loaded successfully!")
-        print(f"  obs_horizon: {self.obs_horizon}")
-        print(f"  pred_horizon: {self.pred_horizon}")
-        if action_horizon_override is not None:
-            print(f"  action_horizon: {self.action_horizon} (overridden from config: {self.policy.config['action_horizon']})")
-        else:
-            print(f"  action_horizon: {self.action_horizon}")
-
-        # Load normalization stats from checkpoint (CRITICAL: use same stats as training!)
-        print("\nLoading normalization stats from checkpoint...")
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
-
-        # Try to load stats from checkpoint (new checkpoints with min-max normalization)
-        if 'action_min' in checkpoint:
-            self.state_min = checkpoint['state_min']
-            self.state_max = checkpoint['state_max']
-            self.state_range = checkpoint['state_range']
-            self.action_min = checkpoint['action_min']
-            self.action_max = checkpoint['action_max']
-            self.action_range = checkpoint['action_range']
-            print("  ✅ Loaded Min-Max normalization stats from checkpoint!")
-        elif 'state_mean' in checkpoint:
-            # Old checkpoints with z-score normalization (deprecated)
-            print("  ⚠️  WARNING: Checkpoint uses old Z-score normalization!")
-            print("  ⚠️  Please retrain with new Min-Max normalization for better performance!")
-            self.state_mean = checkpoint['state_mean']
-            self.state_std = checkpoint['state_std']
-            self.action_mean = checkpoint['action_mean']
-            self.action_std = checkpoint['action_std']
-            # Set flags to use old normalization
-            self.use_old_normalization = True
-        else:
-            # Fallback: compute from dataset (old checkpoints without stats)
-            print("  ⚠️  Checkpoint missing stats, computing from dataset...")
-            from train.dataset import PickPlaceDataset
-            temp_dataset = PickPlaceDataset(
-                dataset_path=self.policy.config['dataset_path'],
-                obs_horizon=self.obs_horizon,
-                pred_horizon=self.pred_horizon,
-                action_horizon=self.action_horizon,
-                image_size=tuple(self.policy.config['image_size']),
-                exclude_episodes=self.policy.config.get('exclude_episodes', []),
-            )
-            self.state_min = temp_dataset.state_min
-            self.state_max = temp_dataset.state_max
-            self.state_range = temp_dataset.state_range
-            self.action_min = temp_dataset.action_min
-            self.action_max = temp_dataset.action_max
-            self.action_range = temp_dataset.action_range
-            del temp_dataset  # Free memory
-            print("  ⚠️  Stats may differ from training!")
-
-        print(f"  Action range: [{self.action_min[0]:.4f}, {self.action_max[0]:.4f}] (X)")
-        print(f"                [{self.action_min[1]:.4f}, {self.action_max[1]:.4f}] (Y)")
-        print(f"                [{self.action_min[2]:.4f}, {self.action_max[2]:.4f}] (Z)")
-
-        # Initialize robot
-        print(f"\nConnecting to robot at {robot_ip}...")
-        self.robot = UR5eRobot(robot_ip)
-        print("✅ Robot connected!")
-
-        # Initialize camera
-        print("\nInitializing camera...")
-        self.camera = RealSenseCamera(serial_number=camera_serial)
-        print("✅ Camera initialized!")
-
-        # Initialize gripper
-        print("\nInitializing gripper...")
-        self.gripper = DynamixelGripper()
-        print("✅ Gripper initialized!")
-
-        # Observation buffers (store last obs_horizon observations)
-        self.image_buffer = deque(maxlen=self.obs_horizon)
+        # ── Observation buffers ───────────────────────────────────────────────
         self.state_buffer = deque(maxlen=self.obs_horizon)
+        self.image_buffer = deque(maxlen=self.obs_horizon)
 
-        # Action queue for temporal smoothing
-        self.action_queue = deque()
+        print("\n✅ All systems ready!\n")
 
-        print("\n" + "="*60)
-        print("   DEPLOYMENT READY!")
-        print("="*60)
+    # ── Low-level observation ─────────────────────────────────────────────────
 
-    def log(self, message, print_to_console=True):
-        """Log message to file and optionally console"""
-        self.log_handle.write(message + '\n')
-        self.log_handle.flush()
-        if print_to_console:
-            print(message)
+    def _get_raw_observation(self):
+        """
+        Read current robot state and camera image.
 
-    def get_observation(self):
-        """Get current observation from robot and camera"""
-        # Get robot state
-        robot_pose = self.robot.get_tcp_pose()  # (6,) [x, y, z, rx, ry, rz]
-        gripper_pos = self.gripper.get_position()  # scalar [0, 1]
+        Returns:
+            state_raw  : np.ndarray (9,)  — [x,y,z,rx,ry,rz, pwm1,pwm2,pwm3]
+            image_raw  : np.ndarray (H,W,3) uint8 — cropped camera frame
+        """
+        # Robot TCP pose (6D)
+        tcp_pose = np.array(self.rtde_r.getActualTCPPose(), dtype=np.float32)  # (6,)
 
-        # Combine into state (7D)
-        state = np.concatenate([robot_pose, [gripper_pos]]).astype(np.float32)
+        # Flowbot last sent PWM (3D)
+        pwm = np.array(self.fb.last_pwm, dtype=np.float32)                     # (3,)
 
-        # Get camera image
-        color_image, depth_image = self.camera.get_frames()
+        state_raw = np.concatenate([tcp_pose, pwm])                            # (9,)
 
-        # Center crop then resize (matches training preprocessing)
-        h, w = color_image.shape[:2]
+        # Camera image
+        ret, frame = self.cap.read()
+        if not ret:
+            raise RuntimeError("Camera read failed")
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # Centre-crop and resize (same as dataset.py)
+        h, w = frame_rgb.shape[:2]
         target_h, target_w = self.image_size
-
-        # Calculate crop boundaries for center crop
         crop_h = min(h, int(target_h * 1.5))
         crop_w = min(w, int(target_w * 1.5))
+        sh = (h - crop_h) // 2
+        sw = (w - crop_w) // 2
+        image_raw = frame_rgb[sh:sh + crop_h, sw:sw + crop_w]
+        image_raw = cv2.resize(image_raw, (target_w, target_h))
 
-        # Center crop
-        start_h = (h - crop_h) // 2
-        start_w = (w - crop_w) // 2
-        image_cropped = color_image[start_h:start_h + crop_h, start_w:start_w + crop_w]
+        return state_raw, image_raw
 
-        # Resize to target size
-        image = cv2.resize(image_cropped, (target_w, target_h))
+    # ── Preprocessing (matching dataset.py) ──────────────────────────────────
 
-        return image, state
+    def _preprocess_state(self, state_raw: np.ndarray) -> np.ndarray:
+        """Min-Max normalise state to [-1, 1]."""
+        state_min   = self.policy.checkpoint['state_min']
+        state_range = self.policy.checkpoint['state_range']
+        return (2.0 * (state_raw - state_min) / state_range - 1.0).astype(np.float32)
 
-    def preprocess_observation(self, image, state):
-        """Preprocess observation for model input"""
-        # Image: resize and normalize to [-1, 1]
-        image = image.astype(np.float32) / 255.0
-        image = (image - 0.5) / 0.5  # Normalize to [-1, 1]
-        image = np.transpose(image, (2, 0, 1))  # HWC -> CHW
+    def _preprocess_image(self, image_raw: np.ndarray) -> np.ndarray:
+        """uint8 (H,W,3) → float32 (3,H,W) in [-1,1]."""
+        img = (image_raw.astype(np.float32) / 127.5) - 1.0
+        return img.transpose(2, 0, 1)   # (3,H,W)
 
-        # State: normalize using Min-Max to [-1, 1]
-        # x_norm = 2 * (x - min) / range - 1
-        state = 2.0 * (state - self.state_min) / self.state_range - 1.0
+    # ── Observation buffer management ─────────────────────────────────────────
 
-        return image, state
-
-    def initialize_observation_buffer(self):
-        """Fill observation buffer with current observations"""
-        print("\nInitializing observation buffer...")
-
-        image, state = self.get_observation()
-        image, state = self.preprocess_observation(image, state)
-
-        # Fill buffer with same observation
+    def _fill_obs_buffer(self):
+        """Fill observation buffers with obs_horizon copies of current obs."""
+        state_raw, image_raw = self._get_raw_observation()
+        state_norm = self._preprocess_state(state_raw)
+        image_norm = self._preprocess_image(image_raw)
         for _ in range(self.obs_horizon):
-            self.image_buffer.append(image.copy())
-            self.state_buffer.append(state.copy())
+            self.state_buffer.append(state_norm.copy())
+            self.image_buffer.append(image_norm.copy())
 
-        print("✅ Observation buffer initialized!")
+    def _update_obs_buffer(self):
+        """Append one new observation to the rolling buffer."""
+        state_raw, image_raw = self._get_raw_observation()
+        state_norm = self._preprocess_state(state_raw)
+        image_norm = self._preprocess_image(image_raw)
+        self.state_buffer.append(state_norm)
+        self.image_buffer.append(image_norm)
 
-    def get_model_input(self):
-        """Get model input from observation buffers"""
-        # Stack observations
-        obs_images = np.stack(list(self.image_buffer), axis=0)  # (obs_horizon, 3, H, W)
-        obs_states = np.stack(list(self.state_buffer), axis=0)  # (obs_horizon, 7)
+    def _get_obs_tensors(self):
+        """
+        Stack buffer contents into tensors for the policy.
 
-        # Convert to torch tensors
-        obs_images = torch.from_numpy(obs_images).float().unsqueeze(0)  # (1, obs_horizon, 3, H, W)
-        obs_states = torch.from_numpy(obs_states).float().unsqueeze(0)  # (1, obs_horizon, 7)
+        Returns:
+            obs_state : torch.Tensor (1, obs_horizon, 9)
+            obs_image : torch.Tensor (1, obs_horizon, 3, H, W)
+        """
+        obs_state = torch.from_numpy(
+            np.stack(list(self.state_buffer), axis=0)   # (obs_horizon, 9)
+        ).unsqueeze(0)                                   # (1, obs_horizon, 9)
 
-        return obs_states, obs_images
+        obs_image = torch.from_numpy(
+            np.stack(list(self.image_buffer), axis=0)   # (obs_horizon, 3, H, W)
+        ).unsqueeze(0)                                   # (1, obs_horizon, 3, H, W)
 
-    def predict_actions(self):
-        """Predict actions using the policy"""
-        obs_states, obs_images = self.get_model_input()
+        return obs_state, obs_image
 
-        # Predict (returns NORMALIZED actions from model)
-        with torch.no_grad():
-            actions = self.policy.predict(obs_states, obs_images)  # (1, pred_horizon, 7)
+    # ── Policy inference ──────────────────────────────────────────────────────
 
-        # Convert to numpy and remove batch dimension
-        actions = actions.cpu().numpy()
-        if len(actions.shape) == 3:
-            actions = actions[0]  # Remove batch dimension: (pred_horizon, 7)
+    def _predict_actions(self):
+        """
+        Run one DDIM inference step.
 
-        # Denormalize actions (Min-Max from [-1, 1] to original range)
-        # x = (x_norm + 1) * 0.5 * range + min
-        actions = (actions + 1.0) * 0.5 * self.action_range + self.action_min
+        Returns:
+            actions : np.ndarray (pred_horizon, 9) — denormalised actions
+                      [:6] = TCP pose, [6:] = flowbot PWM (float)
+        """
+        obs_state, obs_image = self._get_obs_tensors()
+        actions_norm = self.policy.predict(
+            obs_state.squeeze(0),   # (obs_horizon, 9)
+            obs_image.squeeze(0),   # (obs_horizon, 3, H, W)
+        ).numpy()                   # (pred_horizon, 9)
 
-        return actions
+        # Denormalise: x = (x_norm + 1) * 0.5 * range + min
+        action_min   = self.policy.checkpoint['action_min']
+        action_range = self.policy.checkpoint['action_range']
+        actions = (actions_norm + 1.0) * 0.5 * action_range + action_min
+        return actions              # (pred_horizon, 9)
 
-    def execute_action(self, action):
-        """Execute a single action on the robot"""
-        # Extract pose and gripper
-        target_pose = action[:6]  # [x, y, z, rx, ry, rz]
-        target_gripper = action[6]  # [0, 1]
+    # ── Action execution ──────────────────────────────────────────────────────
 
-        # Send commands
-        # Use servoL for smooth absolute pose control (correct for Diffusion Policy!)
-        self.robot.servo_tcp_pose(target_pose, dt=self.control_dt, lookahead_time=0.1, gain=300)
-        self.gripper.set_position(target_gripper)
+    def _execute_action(self, action: np.ndarray):
+        """
+        Send one action step to the robot and flowbot.
+
+        Args:
+            action : np.ndarray (9,) — [x,y,z,rx,ry,rz, pwm1,pwm2,pwm3]
+        """
+        # UR5e: servo to target TCP pose (non-blocking)
+        tcp_target = action[:6].tolist()
+        self.rtde_c.servoL(
+            tcp_target,
+            SERVO_SPEED,
+            SERVO_ACCEL,
+            DT,
+            SERVO_LOOKAHEAD,
+            SERVO_GAIN,
+        )
+
+        # Flowbot: clamp, round to int, send
+        pwm_raw   = action[6:]
+        pwm_int   = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
+        self.fb.serial_sending(pwm_int)
 
         if self.verbose:
-            print(f"  → Pose: [{target_pose[0]:.3f}, {target_pose[1]:.3f}, {target_pose[2]:.3f}, "
-                  f"{target_pose[3]:.3f}, {target_pose[4]:.3f}, {target_pose[5]:.3f}]")
-            print(f"  → Gripper: {target_gripper:.3f}")
+            tcp = np.array(self.rtde_r.getActualTCPPose())
+            print(
+                f"  TCP: [{tcp[0]:.3f}, {tcp[1]:.3f}, {tcp[2]:.3f}]  "
+                f"PWM: {pwm_int.tolist()}"
+            )
 
-    def run_episode(self, max_steps=250):
-        """Run one episode of deployment"""
+    # ── Start position ────────────────────────────────────────────────────────
+
+    def move_to_start(self, speed: float = 0.3, accel: float = 0.3):
+        """
+        Move UR5e to DEFAULT_START_POSE using moveL, then reset flowbot.
+        """
+        print("\nMoving to start position ...")
+        self.rtde_c.moveL(DEFAULT_START_POSE, speed, accel)
+        print(f"  TCP at: {DEFAULT_START_POSE}")
+
+        print("Resetting Flowbot ...")
+        self.fb.reset()
+        time.sleep(0.5)
+        print("  Flowbot reset OK")
+
+    # ── Main episode loop ─────────────────────────────────────────────────────
+
+    def run_episode(self, max_steps: int = 300, move_to_start: bool = True):
+        """
+        Run one deployment episode with receding-horizon control.
+
+        The policy produces `pred_horizon` actions; we execute `action_horizon`
+        of them before re-planning — identical to training's receding horizon.
+
+        Args:
+            max_steps    : Hard step limit (safety stop)
+            move_to_start: If True, move robot to start before running
+        """
+        if move_to_start:
+            self.move_to_start()
+
         print("\n" + "="*60)
-        print("   STARTING EPISODE")
+        print("Starting episode ...")
         print("="*60)
 
-        # Wait for user confirmation
-        input("\nPress Enter to start episode (Ctrl+C to abort)...")
+        # Fill the observation buffer with obs_horizon initial frames
+        print("Filling observation buffer ...")
+        self._fill_obs_buffer()
 
-        # Initialize observation buffer
-        self.initialize_observation_buffer()
-
-        # Get starting position
-        start_pose = self.robot.get_tcp_pose()
-        start_gripper = self.gripper.get_position()
-
-        self.log(f"\n{'='*60}")
-        self.log(f"EPISODE START")
-        self.log(f"{'='*60}")
-        self.log(f"Starting position:")
-        self.log(f"  X: {start_pose[0]:.4f}, Y: {start_pose[1]:.4f}, Z: {start_pose[2]:.4f}")
-        self.log(f"  Rotation: [{start_pose[3]:.4f}, {start_pose[4]:.4f}, {start_pose[5]:.4f}]")
-        self.log(f"  Gripper: {start_gripper:.4f}")
-        self.log(f"")
-
-        # Clear action queue
-        self.action_queue.clear()
-
-        step = 0
-        iter_idx = 0
-        episode_start_time = time.time()
-
-        # Track trajectory for analysis
-        trajectory_positions = [start_pose[:3].copy()]
-        trajectory_grippers = [start_gripper]
-        prediction_count = 0
-
-        print(f"\nRunning episode (max {max_steps} steps)...")
-        print("Press Ctrl+C to stop early\n")
+        total_steps = 0
+        episode_start = time.time()
 
         try:
-            while step < max_steps:
-                # Calculate timing for this iteration
-                # Following original diffusion_policy: predict every action_horizon steps
-                t_cycle_end = episode_start_time + (iter_idx + self.action_horizon) * self.control_dt
-
-                # Prediction timing
-                inference_start = time.time()
+            while total_steps < max_steps:
+                # ── Plan: run DDIM inference ──────────────────────────────────
+                t_plan_start = time.time()
+                actions = self._predict_actions()   # (pred_horizon, 9)
+                t_plan = time.time() - t_plan_start
 
                 if self.verbose:
-                    print(f"\n[Step {step}] Predicting actions...")
+                    print(f"\nStep {total_steps} | Plan time: {t_plan*1000:.1f} ms")
 
-                # Get current observation with timestamp
-                obs_timestamp = time.time()
+                # ── Execute: action_horizon steps from the plan ───────────────
+                for step_i in range(self.action_horizon):
+                    if total_steps >= max_steps:
+                        break
 
-                # Predict new action sequence
-                actions = self.predict_actions()  # (pred_horizon, 7)
+                    t_step_start = time.time()
 
-                inference_time = time.time() - inference_start
-                if self.verbose:
-                    print(f"  Inference time: {inference_time*1000:.1f}ms")
+                    action = actions[step_i]    # (9,)
+                    self._execute_action(action)
 
-                # Log detailed prediction info for first few predictions
-                if prediction_count < 3:
-                    current_pos = self.robot.get_tcp_pose()
-                    self.log(f"\n--- PREDICTION #{prediction_count + 1} at Step {step} ---")
-                    self.log(f"Current position: [{current_pos[0]:.4f}, {current_pos[1]:.4f}, {current_pos[2]:.4f}]")
-                    self.log(f"\nFirst 8 predicted actions:")
-                    for i in range(min(8, len(actions))):
-                        pos = actions[i, :3]
-                        grip = actions[i, 6]
-                        grip_state = "CLOSE" if grip < 0.5 else "OPEN"
-                        self.log(f"  Action {i}: Pos=[{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}] | Grip={grip:.3f} ({grip_state})")
+                    # Update observation buffer after executing action
+                    self._update_obs_buffer()
 
-                    # Analyze movement
-                    first_target = actions[0, :3]
-                    dist_to_first = np.linalg.norm(first_target - current_pos[:3])
-                    z_change = actions[-1, 2] - current_pos[2]
+                    total_steps += 1
 
-                    self.log(f"\nMovement analysis:")
-                    self.log(f"  Distance to first action: {dist_to_first*100:.2f} cm")
-                    self.log(f"  Z change over {self.pred_horizon} actions: {z_change*100:.2f} cm")
-
-                    # Check if gripper closes
-                    close_indices = np.where(actions[:, 6] < 0.5)[0]
-                    if len(close_indices) > 0:
-                        self.log(f"  ✅ Gripper closes at action {close_indices[0]}")
-                    else:
-                        self.log(f"  ⚠️  Gripper stays OPEN for all {self.pred_horizon} actions")
-                    self.log("")
-
-                prediction_count += 1
-
-                # Calculate action timestamps (following original diffusion_policy approach)
-                # Actions are scheduled relative to observation timestamp
-                action_timestamps = obs_timestamp + np.arange(len(actions)) * self.control_dt
-
-                # Filter stale actions (key innovation from original diffusion_policy!)
-                action_exec_latency = 0.01  # 10ms execution latency
-                curr_time = time.time()
-                is_new = action_timestamps > (curr_time + action_exec_latency)
-
-                if np.sum(is_new) == 0:
-                    # All actions are stale! Execute only the last one
-                    actions_to_execute = actions[[-1]]
-                    n_executed = 1
-                    if self.verbose:
-                        print(f"  ⚠️  All actions stale! Executing last action only")
-                else:
-                    # Execute only fresh actions
-                    actions_to_execute = actions[is_new]
-                    n_executed = len(actions_to_execute)
-                    n_stale = len(actions) - n_executed
-                    if self.verbose and n_stale > 0:
-                        print(f"  Filtered {n_stale} stale actions, executing {n_executed} fresh actions")
-
-                if self.verbose:
-                    print(f"  Predicted {self.pred_horizon} actions, executing {n_executed}")
-
-                # Execute actions sequentially
-                for i, action in enumerate(actions_to_execute):
-                    if self.verbose and i == 0:
-                        print(f"\n[Step {step}] Executing action...")
-
-                    self.execute_action(action)
-
-                    # Wait for control frequency
-                    step_start_time = time.time()
-                    time.sleep(self.control_dt)
-
-                    # Get new observation and update buffers
-                    image, state = self.get_observation()
-                    image, state = self.preprocess_observation(image, state)
-
-                    self.image_buffer.append(image)
-                    self.state_buffer.append(state)
-
-                    # Track trajectory
-                    current_pose = self.robot.get_tcp_pose()
-                    current_gripper = self.gripper.get_position()
-                    trajectory_positions.append(current_pose[:3].copy())
-                    trajectory_grippers.append(current_gripper)
-
-                    step += 1
-
-                    # Print step summary
-                    if step % 10 == 0:
-                        elapsed_time = time.time() - episode_start_time
-                        print(f"\n{'='*60}")
-                        print(f"Step {step}/{max_steps} | Time: {elapsed_time:.1f}s | Hz: {step/elapsed_time:.1f}")
-                        print(f"{'='*60}")
-
-                    # Log summary every 50 steps
-                    if step % 50 == 0:
-                        dist_from_start = np.linalg.norm(current_pose[:3] - start_pose[:3])
-                        z_change = current_pose[2] - start_pose[2]
-                        self.log(f"\n[Step {step}] Progress:", print_to_console=False)
-                        self.log(f"  Position: [{current_pose[0]:.4f}, {current_pose[1]:.4f}, {current_pose[2]:.4f}]", print_to_console=False)
-                        self.log(f"  Distance from start: {dist_from_start*100:.2f} cm", print_to_console=False)
-                        self.log(f"  Z change: {z_change*100:.2f} cm", print_to_console=False)
-                        self.log(f"  Gripper: {current_gripper:.3f}", print_to_console=False)
-
-                # Update iteration counter (predict every action_horizon steps)
-                iter_idx += self.action_horizon
+                    # Pace to CONTROL_FREQ
+                    elapsed = time.time() - t_step_start
+                    sleep_time = DT - elapsed
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
 
         except KeyboardInterrupt:
-            print("\n\n⚠️  Episode interrupted by user!")
+            print("\n⚠️  Episode interrupted by user")
 
-        finally:
-            # Stop robot
-            print("\nStopping robot...")
-            self.robot.stop()
+        elapsed_total = time.time() - episode_start
+        print(f"\n✅ Episode finished: {total_steps} steps in {elapsed_total:.1f}s")
 
-            total_time = time.time() - episode_start_time
+        # Stop UR5e servoing
+        self.rtde_c.servoStop()
 
-            # Calculate final statistics
-            final_pose = self.robot.get_tcp_pose()
-            final_gripper = self.gripper.get_position()
+        # Reset Flowbot
+        print("Resetting Flowbot ...")
+        self.fb.reset()
 
-            trajectory_positions = np.array(trajectory_positions)
-            trajectory_grippers = np.array(trajectory_grippers)
-
-            total_distance = np.sum([np.linalg.norm(trajectory_positions[i+1] - trajectory_positions[i])
-                                     for i in range(len(trajectory_positions)-1)])
-            dist_from_start = np.linalg.norm(final_pose[:3] - start_pose[:3])
-            z_change_total = final_pose[2] - start_pose[2]
-
-            # Log final summary
-            self.log(f"\n{'='*60}")
-            self.log(f"EPISODE COMPLETE")
-            self.log(f"{'='*60}")
-            self.log(f"Total steps: {step}")
-            self.log(f"Total time: {total_time:.1f}s")
-            self.log(f"Average Hz: {step/total_time:.1f}")
-            self.log(f"")
-            self.log(f"Movement Summary:")
-            self.log(f"  Starting pos: [{start_pose[0]:.4f}, {start_pose[1]:.4f}, {start_pose[2]:.4f}]")
-            self.log(f"  Final pos:    [{final_pose[0]:.4f}, {final_pose[1]:.4f}, {final_pose[2]:.4f}]")
-            self.log(f"  Total path distance: {total_distance*100:.2f} cm")
-            self.log(f"  Straight-line distance: {dist_from_start*100:.2f} cm")
-            self.log(f"  Z change: {z_change_total*100:.2f} cm")
-            self.log(f"")
-            self.log(f"Gripper Summary:")
-            self.log(f"  Starting: {start_gripper:.3f}")
-            self.log(f"  Final: {final_gripper:.3f}")
-            self.log(f"  Min value: {trajectory_grippers.min():.3f}")
-            self.log(f"  Max value: {trajectory_grippers.max():.3f}")
-            if trajectory_grippers.min() < 0.5:
-                self.log(f"  ✅ Gripper closed during episode")
-            else:
-                self.log(f"  ⚠️  Gripper stayed OPEN (all values > 0.5)")
-            self.log(f"")
-            self.log(f"Number of predictions: {prediction_count}")
-            self.log(f"")
-
-            print(f"\n{'='*60}")
-            print(f"   EPISODE COMPLETE")
-            print(f"{'='*60}")
-            print(f"Total steps: {step}")
-            print(f"Total time: {total_time:.1f}s")
-            print(f"Average Hz: {step/total_time:.1f}")
-            print(f"\n📋 Log saved to: {self.log_file}")
-
-    def move_to_start_position(self, start_pose=None):
-        """Move robot to starting position"""
-        if start_pose is None:
-            # Default start position (current robot position)
-            start_pose = [0.0521, -0.3485, 0.4590, 3.1028, 0.0172, -0.1296]  # [x, y, z, rx, ry, rz]
-
-        print(f"\nMoving to start position: {start_pose}")
-        self.robot.move_tcp_pose(start_pose, velocity=0.1, acceleration=0.3, asynchronous=False)
-        self.gripper.set_position(1.0)  # Open gripper
-        print("✅ At start position!")
+    # ── Cleanup ───────────────────────────────────────────────────────────────
 
     def shutdown(self):
-        """Clean shutdown"""
-        print("\nShutting down...")
-        self.robot.disconnect()
-        self.camera.stop()
-        self.gripper.disconnect()
-
-        # Close log file
-        if hasattr(self, 'log_handle') and self.log_handle:
-            self.log_handle.close()
-
-        print("✅ Shutdown complete!")
+        """Safely disconnect all hardware."""
+        print("\nShutting down ...")
+        try:
+            self.rtde_c.servoStop()
+            self.rtde_c.stopScript()
+        except Exception as e:
+            print(f"  UR5e shutdown error: {e}")
+        try:
+            self.fb.reset()
+        except Exception as e:
+            print(f"  Flowbot reset error: {e}")
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+        print("✅ Shutdown complete")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Deploy Diffusion Policy on real robot')
-    parser.add_argument('--checkpoint', type=str, required=True, help='Path to checkpoint')
-    parser.add_argument('--robot_ip', type=str, default='192.168.11.20', help='Robot IP address')
-    parser.add_argument('--camera_serial', type=str, default=None, help='Camera serial number')
-    parser.add_argument('--num_episodes', type=int, default=1, help='Number of episodes to run')
-    parser.add_argument('--max_steps', type=int, default=250, help='Max steps per episode')
-    parser.add_argument('--frequency', type=float, default=10.0, help='Control frequency (Hz)')
-    parser.add_argument('--action_horizon', type=int, default=6, help='Override action_horizon (default: 6, following original diffusion_policy)')
-    parser.add_argument('--quiet', action='store_true', help='Suppress verbose output')
-    parser.add_argument('--log_file', type=str, default=None, help='Path to log file (default: deploy_log_TIMESTAMP.txt)')
+    parser = argparse.ArgumentParser(description='Deploy Diffusion Policy on UR5e + Flowbot')
+    parser.add_argument('--checkpoint',    type=str,   required=True,
+                        help='Path to trained checkpoint (.pt)')
+    parser.add_argument('--robot_ip',      type=str,   required=True,
+                        help='UR5e IP address (e.g. 192.168.1.100)')
+    parser.add_argument('--camera_id',     type=int,   default=0,
+                        help='Camera device ID')
+    parser.add_argument('--flowbot_port',  type=str,   default='/dev/ttyACM0',
+                        help='Arduino serial port for Flowbot')
+    parser.add_argument('--flowbot_baud',  type=int,   default=115200,
+                        help='Flowbot serial baud rate')
+    parser.add_argument('--max_steps',     type=int,   default=300,
+                        help='Max steps per episode')
+    parser.add_argument('--num_episodes',  type=int,   default=1,
+                        help='Number of episodes to run')
+    parser.add_argument('--device',        type=str,   default='cuda',
+                        help='Inference device (cuda/cpu)')
+    parser.add_argument('--no_start_pose', action='store_true',
+                        help='Skip moving to start pose at beginning of each episode')
+    parser.add_argument('--quiet',         action='store_true',
+                        help='Reduce per-step output')
     args = parser.parse_args()
 
-    # Initialize deployment
-    deployment = RobotDeployment(
-        checkpoint_path=args.checkpoint,
-        robot_ip=args.robot_ip,
-        camera_serial=args.camera_serial,
-        control_frequency=args.frequency,
-        action_horizon_override=args.action_horizon,
-        verbose=not args.quiet,
-        log_file=args.log_file,
-    )
+    if not os.path.exists(args.checkpoint):
+        print(f"❌ Checkpoint not found: {args.checkpoint}")
+        return 1
 
+    robot = None
     try:
-        # Move to start position
-        deployment.move_to_start_position()
+        robot = RobotDeployment(
+            checkpoint_path=args.checkpoint,
+            robot_ip=args.robot_ip,
+            camera_id=args.camera_id,
+            flowbot_port=args.flowbot_port,
+            flowbot_baud=args.flowbot_baud,
+            device=args.device,
+            verbose=not args.quiet,
+        )
 
-        # Run episodes
-        for episode in range(args.num_episodes):
+        for ep in range(args.num_episodes):
             print(f"\n{'='*60}")
-            print(f"   EPISODE {episode + 1}/{args.num_episodes}")
+            print(f"EPISODE {ep + 1} / {args.num_episodes}")
             print(f"{'='*60}")
 
-            deployment.run_episode(max_steps=args.max_steps)
+            robot.run_episode(
+                max_steps=args.max_steps,
+                move_to_start=not args.no_start_pose,
+            )
 
-            if episode < args.num_episodes - 1:
-                # Ask if user wants to continue
-                response = input("\nContinue to next episode? [Y/n]: ")
-                if response.lower() == 'n':
-                    print("Stopping deployment.")
-                    break
+            if ep < args.num_episodes - 1:
+                input("\nPress Enter to start next episode (Ctrl+C to abort) ...")
 
-                # Return to start
-                deployment.move_to_start_position()
+        print("\n✅ All episodes complete!")
 
-    except Exception as e:
-        print(f"\n❌ Error during deployment: {e}")
-        import traceback
-        traceback.print_exc()
-
+    except KeyboardInterrupt:
+        print("\n⚠️  Deployment interrupted")
     finally:
-        deployment.shutdown()
+        if robot is not None:
+            robot.shutdown()
 
-    print("\n" + "="*60)
-    print("   DEPLOYMENT FINISHED")
-    print("="*60)
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

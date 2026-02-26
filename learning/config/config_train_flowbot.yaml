@@ -17,14 +17,28 @@ state_feature_dim: 128
 num_diffusion_iters: 100  # Number of diffusion training steps (DDPM)
 num_inference_steps: 16   # Number of inference steps (DDIM - 6x faster)
 use_resnet: true          # Use ResNet18 encoder (true) or custom CNN (false)
+random_crop_pad: 20       # Random crop padding pixels (0 = disabled); pads by 20px then crops back to original size
+
+# UNet variant (FiLM = Stanford-style, recommended)
+use_film_unet: true       # true = ConditionalUNet1D (FiLM), false = DiffusionUNet1D (simple)
+film_step_embed_dim: 256  # Timestep embedding dim for FiLM UNet (Stanford: 256)
+film_kernel_size: 5       # Conv kernel size for FiLM UNet (Stanford: 5)
+
+# Vision pooling (auto: SpatialSoftmax when use_film_unet=true)
+use_spatial_softmax: null # null = auto (true if use_film_unet else false); or override explicitly
+num_keypoints: 32         # SpatialSoftmax keypoints → 64-D per frame (Stanford default)
 
 # Training
 num_epochs: 3000
 batch_size: 64
-learning_rate: 5.0e-5
-weight_decay: 1.0e-5
-ema_decay: 0.999      # Exponential moving average decay
+learning_rate: 5.0e-5  # Peak LR reached after warmup
+weight_decay: 1.0e-5   # AdamW weight decay
+ema_max_value: 0.9999  # EMA adaptive decay upper bound (UNet-only, Stanford default)
 seed: 42
+
+# LR schedule: linear warmup → cosine decay
+warmup_epochs: 500     # Linear warmup from 0 → peak_lr over first 500 epochs (~16%)
+lr_min_factor: 0.01    # Cosine decays to peak_lr * 0.01 at the end
 
 # Data
 val_ratio: 0.1        # Validation split ratio

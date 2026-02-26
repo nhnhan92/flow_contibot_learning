@@ -17,8 +17,8 @@ import torch
 
 # Add parent directory to path
 TRAIN_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.dirname(TRAIN_DIR)
-sys.path.insert(0, PROJECT_DIR)
+LEARNING_DIR = os.path.dirname(TRAIN_DIR)
+sys.path.insert(0, LEARNING_DIR)
 
 from train.dataset import PickPlaceDataset
 from train.model import DiffusionPolicy
@@ -90,7 +90,9 @@ def test_model(config):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {device}")
 
-        # Create model
+        # Create model — mirror all params from config exactly as train.py does
+        use_film = config.get('use_film_unet', True)
+        use_ss   = config.get('use_spatial_softmax', None)
         model = DiffusionPolicy(
             obs_horizon=config['obs_horizon'],
             pred_horizon=config['pred_horizon'],
@@ -99,6 +101,14 @@ def test_model(config):
             vision_feature_dim=config['vision_feature_dim'],
             state_feature_dim=config['state_feature_dim'],
             num_diffusion_iters=config['num_diffusion_iters'],
+            num_inference_steps=config.get('num_inference_steps', 16),
+            use_resnet=config.get('use_resnet', True),
+            use_film_unet=use_film,
+            film_step_embed_dim=config.get('film_step_embed_dim', 256),
+            film_kernel_size=config.get('film_kernel_size', 5),
+            use_spatial_softmax=use_ss,
+            num_keypoints=config.get('num_keypoints', 32),
+            crop_pad=config.get('random_crop_pad', 0),
         ).to(device)
 
         num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -227,6 +237,8 @@ def test_full_pipeline(config):
             num_workers=0,
         )
 
+        use_film = config.get('use_film_unet', True)
+        use_ss   = config.get('use_spatial_softmax', None)
         model = DiffusionPolicy(
             obs_horizon=config['obs_horizon'],
             pred_horizon=config['pred_horizon'],
@@ -235,12 +247,20 @@ def test_full_pipeline(config):
             vision_feature_dim=config['vision_feature_dim'],
             state_feature_dim=config['state_feature_dim'],
             num_diffusion_iters=config['num_diffusion_iters'],
+            num_inference_steps=config.get('num_inference_steps', 16),
+            use_resnet=config.get('use_resnet', True),
+            use_film_unet=use_film,
+            film_step_embed_dim=config.get('film_step_embed_dim', 256),
+            film_kernel_size=config.get('film_kernel_size', 5),
+            use_spatial_softmax=use_ss,
+            num_keypoints=config.get('num_keypoints', 32),
+            crop_pad=config.get('random_crop_pad', 0),
         ).to(device)
 
         optimizer = torch.optim.AdamW(
             model.parameters(),
-            lr=config['learning_rate'],
-            weight_decay=config['weight_decay'],
+            lr=float(config['learning_rate']),
+            weight_decay=float(config['weight_decay']),
         )
 
         print(f"✅ Pipeline components ready!")
@@ -283,11 +303,13 @@ def test_full_pipeline(config):
 
 def main():
     import argparse
+    import sys
+    from pathlib import Path
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='train/config.yaml', help='Config file')
+    parser.add_argument('--config', type=str, default='/config/config_train_flowbot.yaml', help='Config file')
     args = parser.parse_args()
-
-    with open(args.config, 'r') as f:
+    config_path = Path(LEARNING_DIR + args.config)
+    with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
     print("="*60)

@@ -1,138 +1,138 @@
 #!/usr/bin/env python3
 """
-Move robot to start position
+Move UR5e to start position and reset Flowbot
+
+Useful to:
+  - Reset the robot to a known start before a deployment episode
+  - Test that both UR5e and Flowbot are responsive
+  - Quickly reset after a failed episode
 
 Usage:
-    python deploy/move_to_start.py
-    python deploy/move_to_start.py --robot_ip 192.168.11.20
-    python deploy/move_to_start.py --custom_pose 0.1 -0.3 0.4 3.14 0 0
+    python deploy/move_to_start.py --robot_ip 192.168.1.100
+    python deploy/move_to_start.py --robot_ip 192.168.1.100 --flowbot_port /dev/ttyACM0
+    python deploy/move_to_start.py --robot_ip 192.168.1.100 --pose 0.206 -0.467 0.443 3.14 -0.14 0.0
 """
 
-import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import argparse
+import sys
 import time
-from custom.ur5e_rtde import UR5eRobot
-from custom.dynamixel_gripper import DynamixelGripper
+import argparse
+import numpy as np
+
+DEPLOY_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(DEPLOY_DIR)
+FLOWBOT_DIR = os.path.join(PROJECT_DIR, 'flowbot')
+sys.path.insert(0, PROJECT_DIR)
+sys.path.insert(0, FLOWBOT_DIR)
+
+# Default start pose (from collect_demos_with_camera.py)
+DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
 
 
-# Default start position (from deployment script)
-DEFAULT_START_POSE = [0.0521, -0.3485, 0.4590, 3.1028, 0.0172, -0.1296]
+def move_to_start(
+    robot_ip: str,
+    target_pose: list,
+    speed: float = 0.3,
+    accel: float = 0.3,
+    flowbot_port: str = None,
+    flowbot_baud: int = 115200,
+):
+    """
+    Move UR5e to target_pose using moveL, then reset Flowbot.
 
+    Args:
+        robot_ip     : UR5e IP address
+        target_pose  : [x, y, z, rx, ry, rz] in metres / radians
+        speed        : moveL speed (m/s)
+        accel        : moveL acceleration (m/s^2)
+        flowbot_port : Serial port for Flowbot. If None, skip flowbot.
+        flowbot_baud : Serial baud rate
+    """
+    # ── UR5e ─────────────────────────────────────────────────────────────────
+    try:
+        import rtde_control
+        import rtde_receive
+    except ImportError:
+        print("❌ rtde_control not installed. Run: pip install ur-rtde")
+        return False
 
-def move_to_start(robot_ip, start_pose, velocity=0.1, acceleration=0.3, open_gripper=True):
-    """Move robot to start position"""
+    print("="*50)
+    print("MOVING TO START POSITION")
+    print("="*50)
 
-    print("="*60)
-    print("   MOVE TO START POSITION")
-    print("="*60)
+    try:
+        print(f"\nConnecting to UR5e at {robot_ip} ...")
+        rtde_c = rtde_control.RTDEControlInterface(robot_ip)
+        rtde_r = rtde_receive.RTDEReceiveInterface(robot_ip)
 
-    # Connect to robot
-    print(f"\nConnecting to robot at {robot_ip}...")
-    robot = UR5eRobot(robot_ip)
+        current_pose = rtde_r.getActualTCPPose()
+        print(f"  Current TCP : {[f'{v:.4f}' for v in current_pose]}")
+        print(f"  Target TCP  : {[f'{v:.4f}' for v in target_pose]}")
 
-    # Get current pose
-    current_pose = robot.get_tcp_pose()
-    print(f"\nCurrent position:")
-    print(f"  Position: [{current_pose[0]:.4f}, {current_pose[1]:.4f}, {current_pose[2]:.4f}] m")
-    print(f"  Rotation: [{current_pose[3]:.4f}, {current_pose[4]:.4f}, {current_pose[5]:.4f}] rad")
+        print(f"\nExecuting moveL (speed={speed} m/s, accel={accel} m/s^2) ...")
+        rtde_c.moveL(target_pose, speed, accel)
 
-    # Show target
-    print(f"\nTarget position:")
-    print(f"  Position: [{start_pose[0]:.4f}, {start_pose[1]:.4f}, {start_pose[2]:.4f}] m")
-    print(f"  Rotation: [{start_pose[3]:.4f}, {start_pose[4]:.4f}, {start_pose[5]:.4f}] rad")
+        final_pose = rtde_r.getActualTCPPose()
+        print(f"  Final TCP   : {[f'{v:.4f}' for v in final_pose]}")
 
-    # Ask for confirmation
-    response = input("\nMove to start position? [Y/n]: ")
-    if response.lower() == 'n':
-        print("Aborted.")
-        robot.disconnect()
-        return
+        pos_error = np.linalg.norm(np.array(final_pose[:3]) - np.array(target_pose[:3]))
+        print(f"  Position error: {pos_error*1000:.2f} mm")
 
-    # Initialize gripper if requested
-    gripper = None
-    if open_gripper:
+        rtde_c.disconnect()
+        rtde_r.disconnect()
+        print("  ✅ Robot at start position!")
+
+    except Exception as e:
+        print(f"  ❌ Robot move failed: {e}")
+        return False
+
+    # ── Flowbot ───────────────────────────────────────────────────────────────
+    if flowbot_port is not None:
+        print(f"\nResetting Flowbot on {flowbot_port} ...")
         try:
-            print("\nInitializing gripper...")
-            gripper = DynamixelGripper()
-            print("Opening gripper...")
-            gripper.set_position(1.0)  # Open
-            time.sleep(1)
+            from flowbot import Flowbot
+            fb = Flowbot(port=flowbot_port, baud=flowbot_baud)
+            time.sleep(2.0)
+            fb.reset()
+            time.sleep(0.5)
+            print(f"  ✅ Flowbot reset!  Last PWM: {fb.last_pwm}")
         except Exception as e:
-            print(f"⚠️  Gripper initialization failed: {e}")
-            print("Continuing without gripper...")
+            print(f"  ❌ Flowbot reset failed: {e}")
+            return False
 
-    # Move robot
-    print(f"\nMoving robot...")
-    print(f"  Velocity: {velocity} m/s")
-    print(f"  Acceleration: {acceleration} m/s²")
-
-    robot.move_tcp_pose(start_pose, velocity=velocity, acceleration=acceleration, asynchronous=False)
-
-    print("✅ Robot moved to start position!")
-
-    # Verify position
-    time.sleep(0.5)
-    final_pose = robot.get_tcp_pose()
-    print(f"\nFinal position:")
-    print(f"  Position: [{final_pose[0]:.4f}, {final_pose[1]:.4f}, {final_pose[2]:.4f}] m")
-    print(f"  Rotation: [{final_pose[3]:.4f}, {final_pose[4]:.4f}, {final_pose[5]:.4f}] rad")
-
-    # Calculate error
-    error = [(final_pose[i] - start_pose[i]) for i in range(6)]
-    pos_error = sum([e**2 for e in error[:3]])**0.5
-    print(f"\nPosition error: {pos_error*1000:.2f} mm")
-
-    # Cleanup
-    robot.disconnect()
-    if gripper:
-        gripper.disconnect()
-
-    print("\n" + "="*60)
-    print("   DONE!")
-    print("="*60)
+    print("\n✅ Ready for deployment!")
+    return True
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Move robot to start position')
-    parser.add_argument('--robot_ip', type=str, default='192.168.11.20',
-                        help='Robot IP address (default: 192.168.11.20)')
-    parser.add_argument('--custom_pose', type=float, nargs=6, default=None,
-                        help='Custom start pose: x y z rx ry rz')
-    parser.add_argument('--velocity', type=float, default=0.1,
-                        help='Movement velocity in m/s (default: 0.1)')
-    parser.add_argument('--acceleration', type=float, default=0.3,
-                        help='Movement acceleration in m/s² (default: 0.3)')
-    parser.add_argument('--no_gripper', action='store_true',
-                        help='Do not open gripper')
+    parser = argparse.ArgumentParser(description='Move UR5e to start and reset Flowbot')
+    parser.add_argument('--robot_ip',     type=str,   required=True,
+                        help='UR5e IP address (e.g. 192.168.1.100)')
+    parser.add_argument('--pose',         type=float, nargs=6,
+                        default=DEFAULT_START_POSE,
+                        metavar=('X', 'Y', 'Z', 'RX', 'RY', 'RZ'),
+                        help='Target TCP pose [x y z rx ry rz] (default: collection start)')
+    parser.add_argument('--speed',        type=float, default=0.3, help='moveL speed (m/s)')
+    parser.add_argument('--accel',        type=float, default=0.3, help='moveL accel (m/s^2)')
+    parser.add_argument('--flowbot_port', type=str,   default=None,
+                        help='Flowbot serial port (e.g. /dev/ttyACM0). '
+                             'If omitted, only the robot is moved.')
+    parser.add_argument('--flowbot_baud', type=int,   default=115200,
+                        help='Flowbot baud rate')
     args = parser.parse_args()
 
-    # Use custom pose or default
-    if args.custom_pose:
-        start_pose = args.custom_pose
-        print(f"Using custom pose: {start_pose}")
-    else:
-        start_pose = DEFAULT_START_POSE
-        print(f"Using default start pose")
+    print(f"Target pose: {args.pose}")
 
-    # Move robot
-    try:
-        move_to_start(
-            robot_ip=args.robot_ip,
-            start_pose=start_pose,
-            velocity=args.velocity,
-            acceleration=args.acceleration,
-            open_gripper=not args.no_gripper,
-        )
-    except KeyboardInterrupt:
-        print("\n\n⚠️  Interrupted by user!")
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
+    ok = move_to_start(
+        robot_ip=args.robot_ip,
+        target_pose=args.pose,
+        speed=args.speed,
+        accel=args.accel,
+        flowbot_port=args.flowbot_port,
+        flowbot_baud=args.flowbot_baud,
+    )
+    return 0 if ok else 1
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
