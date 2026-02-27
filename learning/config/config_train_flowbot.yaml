@@ -48,7 +48,7 @@ num_workers: 4        # DataLoader workers
 early_stopping_patience: 200  # Stop if no improvement for N post-warmup epochs (0 = disabled)
 
 # Checkpointing
-output_dir: "out_policies/checkpoints"
+output_dir: "robot_policies"
 save_every: 50        # Save checkpoint every N epochs
 
 # Logging

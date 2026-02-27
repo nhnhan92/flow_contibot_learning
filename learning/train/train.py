@@ -27,9 +27,6 @@ sys.path.insert(0, LEARNING_DIR)
 from train.dataset import PickPlaceDataset
 from train.model import DiffusionPolicy
 
-
-
-
 def train_epoch(model, dataloader, optimizer, device, ema=None):
     """Train for one epoch"""
     model.train()
@@ -101,14 +98,14 @@ def main():
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
-    print("="*60)
+    print("="*30)
     print("   DIFFUSION POLICY TRAINING - FLOWBOT")
-    print("="*60)
+    print("="*30)
     print(f"\nConfig: {config_path}")
     print(f"Device: {args.device}")
 
     # Create output directory
-    output_dir = Path(config['output_dir'])
+    output_dir = Path(LEARNING_DIR) / config['output_dir']
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output: {output_dir}")
 
@@ -258,9 +255,9 @@ def main():
         wandb.watch(model, log='gradients', log_freq=100)
 
     # Training loop
-    print("\n" + "="*60)
+    print("\n" + "="*30)
     print("Starting training...")
-    print("="*60)
+    print("="*30)
 
     best_val_loss = float('inf')
     patience = config.get('early_stopping_patience', 200)
