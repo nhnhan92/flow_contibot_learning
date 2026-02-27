@@ -2,7 +2,7 @@
 # Robot: UR5e + Flowbot soft manipulator (3 pneumatic valves via PWM)
 
 # Dataset
-dataset_path: "/media/protac/Desk SSD/Task3/dataset.zarr"  # Path to training dataset (Zarr format) please change Task 1, 2, or 3 as needed
+dataset_path: "data/demo_data/Task3/dataset.zarr"  # Path to training dataset (Zarr format) please change Task 1, 2, or 3 as needed
 obs_horizon: 2        # Number of observation frames
 pred_horizon: 16      # Number of action steps to predict
 action_horizon: 8     # Number of action steps to execute

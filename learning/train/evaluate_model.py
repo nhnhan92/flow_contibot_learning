@@ -17,6 +17,8 @@ import argparse
 import numpy as np
 import torch
 import zarr
+import matplotlib
+matplotlib.use('Agg')  # non-interactive backend — avoids Tkinter threading issues
 import matplotlib.pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
@@ -33,9 +35,9 @@ from train.eval import DiffusionPolicyInference
 def evaluate_model(checkpoint_path, dataset_path, num_episodes=5):
     """Evaluate model on dataset"""
 
-    print("="*80)
+    print("="*30)
     print("MODEL EVALUATION - FLOWBOT")
-    print("="*80)
+    print("="*30)
     print(f"\nCheckpoint: {checkpoint_path}")
     print(f"Dataset: {dataset_path}")
 
@@ -43,7 +45,7 @@ def evaluate_model(checkpoint_path, dataset_path, num_episodes=5):
     print("\nLoading policy...")
     policy = DiffusionPolicyInference(checkpoint_path)
     config = policy.config
-
+    dataset_path = dataset_path or policy.config['dataset_path']
     # Load dataset
     print("\nLoading dataset...")
     dataset = PickPlaceDataset(
@@ -69,9 +71,9 @@ def evaluate_model(checkpoint_path, dataset_path, num_episodes=5):
 
     # Evaluate each episode
     for ep_idx in range(min(num_episodes, num_total_episodes)):
-        print(f"\n{'='*80}")
+        print(f"\n{'='*30}")
         print(f"Episode {ep_idx}")
-        print(f"{'='*80}")
+        print(f"{'='*30}")
 
         start_idx = 0 if ep_idx == 0 else int(episode_ends[ep_idx - 1])
         end_idx = int(episode_ends[ep_idx])
@@ -133,13 +135,13 @@ def evaluate_model(checkpoint_path, dataset_path, num_episodes=5):
         all_position_errors.extend(position_errors.tolist())
         all_pwm_errors.extend(pwm_errors.tolist())
 
-        if ep_idx == 0:
-            visualize_episode(predicted_actions_list, actual_actions_list, ep_idx)
+        # if ep_idx == 0:
+        visualize_episode(predicted_actions_list, actual_actions_list, ep_idx)
 
     # Overall statistics
-    print(f"\n{'='*80}")
+    print(f"\n{'='*30}")
     print(f"OVERALL STATISTICS (across {num_episodes} episodes)")
-    print(f"{'='*80}")
+    print(f"{'='*30}")
 
     all_position_errors = np.array(all_position_errors)
     all_pwm_errors = np.array(all_pwm_errors)
@@ -157,9 +159,9 @@ def evaluate_model(checkpoint_path, dataset_path, num_episodes=5):
     print(f"  Max:    {all_pwm_errors.max():.2f}")
 
     # Quality assessment
-    print(f"\n{'='*80}")
+    print(f"\n{'='*30}")
     print(f"QUALITY ASSESSMENT")
-    print(f"{'='*80}")
+    print(f"{'='*30}")
 
     mean_pos_error_cm = all_position_errors.mean() * 100
     mean_pwm_error = all_pwm_errors.mean()
@@ -173,7 +175,6 @@ def evaluate_model(checkpoint_path, dataset_path, num_episodes=5):
     else:
         print("❌ POOR: Model predictions have significant errors")
         print("   Consider collecting more data or adjusting training hyperparameters")
-
 
 def visualize_episode(predicted_actions_list, actual_actions_list, ep_idx):
     """Visualize predicted vs actual trajectories"""
@@ -240,7 +241,7 @@ def visualize_episode(predicted_actions_list, actual_actions_list, ep_idx):
 
     plt.tight_layout()
 
-    output_path = f'train/evaluation_ep{ep_idx}.png'
+    output_path = f'evaluation_ep{ep_idx}.png'
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     print(f"\n📊 Visualization saved to: {output_path}")
 
@@ -251,7 +252,7 @@ def main():
     parser = argparse.ArgumentParser(description='Evaluate trained model')
     parser.add_argument('--checkpoint', type=str, required=True, help='Path to checkpoint')
     parser.add_argument('--dataset_path', type=str, required=True, help='Path to dataset')
-    parser.add_argument('--num_episodes', type=int, default=5, help='Number of episodes to evaluate')
+    parser.add_argument('--num_episodes', type=int, default=2, help='Number of episodes to evaluate')
     args = parser.parse_args()
 
     if not os.path.exists(args.checkpoint):
@@ -264,9 +265,9 @@ def main():
 
     evaluate_model(args.checkpoint, args.dataset_path, args.num_episodes)
 
-    print(f"\n{'='*80}")
+    print(f"\n{'='*30}")
     print(f"EVALUATION COMPLETE")
-    print(f"{'='*80}\n")
+    print(f"{'='*30}\n")
 
 
 if __name__ == '__main__':

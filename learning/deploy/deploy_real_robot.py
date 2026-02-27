@@ -29,11 +29,11 @@ from collections import deque
 
 # Add parent directory to path
 DEPLOY_DIR = os.path.dirname(os.path.abspath(__file__))
-LEARNING_DIR = os.path.dirname(DEPLOY_DIR)
-sys.path.insert(0, LEARNING_DIR)
+PROJECT_DIR = os.path.dirname(DEPLOY_DIR)
+sys.path.insert(0, PROJECT_DIR)
 
 from train.eval import DiffusionPolicyInference
-from hardware.flowbot import flowbot
+
 # ── Hardware imports ──────────────────────────────────────────────────────────
 try:
     import rtde_control
@@ -42,6 +42,15 @@ try:
 except ImportError:
     HAS_RTDE = False
     print("⚠️  rtde_control not found — robot control disabled")
+
+try:
+    FLOWBOT_DIR = os.path.join(PROJECT_DIR, 'flowbot')
+    sys.path.insert(0, FLOWBOT_DIR)
+    from flowbot import Flowbot
+    HAS_FLOWBOT = True
+except ImportError:
+    HAS_FLOWBOT = False
+    print("⚠️  flowbot module not found — PWM control disabled")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 PWM_MIN = 1
@@ -61,7 +70,7 @@ SERVO_LOOKAHEAD = 0.1   # s
 SERVO_GAIN = 300
 
 
-class Real_Deployment:
+class RobotDeployment:
     """
     Main deployment class for UR5e + Flowbot with Diffusion Policy.
 
@@ -267,7 +276,7 @@ class Real_Deployment:
 
     # ── Start position ────────────────────────────────────────────────────────
 
-    def move_to_start(self, speed: float = 0.2, accel: float = 0.2):
+    def move_to_start(self, speed: float = 0.3, accel: float = 0.3):
         """
         Move UR5e to DEFAULT_START_POSE using moveL, then reset flowbot.
         """
@@ -282,7 +291,7 @@ class Real_Deployment:
 
     # ── Main episode loop ─────────────────────────────────────────────────────
 
-    def run_episode(self, max_steps: int = 300):
+    def run_episode(self, max_steps: int = 300, move_to_start: bool = True):
         """
         Run one deployment episode with receding-horizon control.
 
@@ -293,7 +302,8 @@ class Real_Deployment:
             max_steps    : Hard step limit (safety stop)
             move_to_start: If True, move robot to start before running
         """
-        self.move_to_start()
+        if move_to_start:
+            self.move_to_start()
 
         print("\n" + "="*60)
         print("Starting episode ...")
@@ -371,68 +381,69 @@ class Real_Deployment:
         print("✅ Shutdown complete")
 
 
-# def main():
-#     parser = argparse.ArgumentParser(description='Deploy Diffusion Policy on UR5e + Flowbot')
-#     parser.add_argument('--checkpoint',    type=str,   required=True,
-#                         help='Path to trained checkpoint (.pt)')
-#     parser.add_argument('--robot_ip',      type=str,   required=True,
-#                         help='UR5e IP address (e.g. 192.168.1.100)')
-#     parser.add_argument('--camera_id',     type=int,   default=0,
-#                         help='Camera device ID')
-#     parser.add_argument('--flowbot_port',  type=str,   default='/dev/ttyACM0',
-#                         help='Arduino serial port for Flowbot')
-#     parser.add_argument('--flowbot_baud',  type=int,   default=115200,
-#                         help='Flowbot serial baud rate')
-#     parser.add_argument('--max_steps',     type=int,   default=300,
-#                         help='Max steps per episode')
-#     parser.add_argument('--num_episodes',  type=int,   default=1,
-#                         help='Number of episodes to run')
-#     parser.add_argument('--device',        type=str,   default='cuda',
-#                         help='Inference device (cuda/cpu)')
-#     parser.add_argument('--no_start_pose', action='store_true',
-#                         help='Skip moving to start pose at beginning of each episode')
-#     parser.add_argument('--quiet',         action='store_true',
-#                         help='Reduce per-step output')
-#     args = parser.parse_args()
+def main():
+    parser = argparse.ArgumentParser(description='Deploy Diffusion Policy on UR5e + Flowbot')
+    parser.add_argument('--checkpoint',    type=str,   required=True,
+                        help='Path to trained checkpoint (.pt)')
+    parser.add_argument('--robot_ip',      type=str,   required=True,
+                        help='UR5e IP address (e.g. 192.168.1.100)')
+    parser.add_argument('--camera_id',     type=int,   default=0,
+                        help='Camera device ID')
+    parser.add_argument('--flowbot_port',  type=str,   default='/dev/ttyACM0',
+                        help='Arduino serial port for Flowbot')
+    parser.add_argument('--flowbot_baud',  type=int,   default=115200,
+                        help='Flowbot serial baud rate')
+    parser.add_argument('--max_steps',     type=int,   default=300,
+                        help='Max steps per episode')
+    parser.add_argument('--num_episodes',  type=int,   default=1,
+                        help='Number of episodes to run')
+    parser.add_argument('--device',        type=str,   default='cuda',
+                        help='Inference device (cuda/cpu)')
+    parser.add_argument('--no_start_pose', action='store_true',
+                        help='Skip moving to start pose at beginning of each episode')
+    parser.add_argument('--quiet',         action='store_true',
+                        help='Reduce per-step output')
+    args = parser.parse_args()
 
-#     if not os.path.exists(args.checkpoint):
-#         print(f"❌ Checkpoint not found: {args.checkpoint}")
-#         return 1
+    if not os.path.exists(args.checkpoint):
+        print(f"❌ Checkpoint not found: {args.checkpoint}")
+        return 1
 
-#     robot = None
-#     try:
-#         robot = Real_Deployment(
-#             checkpoint_path=args.checkpoint,
-#             robot_ip=args.robot_ip,
-#             camera_id=args.camera_id,
-#             flowbot_port=args.flowbot_port,
-#             flowbot_baud=args.flowbot_baud,
-#             device=args.device,
-#             verbose=not args.quiet,
-#         )
+    robot = None
+    try:
+        robot = RobotDeployment(
+            checkpoint_path=args.checkpoint,
+            robot_ip=args.robot_ip,
+            camera_id=args.camera_id,
+            flowbot_port=args.flowbot_port,
+            flowbot_baud=args.flowbot_baud,
+            device=args.device,
+            verbose=not args.quiet,
+        )
 
-#         for ep in range(args.num_episodes):
-#             print(f"\n{'='*60}")
-#             print(f"EPISODE {ep + 1} / {args.num_episodes}")
-#             print(f"{'='*60}")
+        for ep in range(args.num_episodes):
+            print(f"\n{'='*60}")
+            print(f"EPISODE {ep + 1} / {args.num_episodes}")
+            print(f"{'='*60}")
 
-#             robot.run_episode(
-#                 max_steps=args.max_steps,
-#             )
+            robot.run_episode(
+                max_steps=args.max_steps,
+                move_to_start=not args.no_start_pose,
+            )
 
-#             if ep < args.num_episodes - 1:
-#                 input("\nPress Enter to start next episode (Ctrl+C to abort) ...")
+            if ep < args.num_episodes - 1:
+                input("\nPress Enter to start next episode (Ctrl+C to abort) ...")
 
-#         print("\n✅ All episodes complete!")
+        print("\n✅ All episodes complete!")
 
-#     except KeyboardInterrupt:
-#         print("\n⚠️  Deployment interrupted")
-#     finally:
-#         if robot is not None:
-#             robot.shutdown()
+    except KeyboardInterrupt:
+        print("\n⚠️  Deployment interrupted")
+    finally:
+        if robot is not None:
+            robot.shutdown()
 
-#     return 0
+    return 0
 
 
-# if __name__ == '__main__':
-#     sys.exit(main())
+if __name__ == '__main__':
+    sys.exit(main())

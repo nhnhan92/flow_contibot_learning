@@ -42,14 +42,6 @@ import select
 import termios
 import tty
 import platform
-# Camera
-try:
-    import pyrealsense2 as rs
-    CAMERA_AVAILABLE = True
-except ImportError:
-    CAMERA_AVAILABLE = False
-    print("⚠️  Warning: pyrealsense2 not installed. Running without camera.")
-
 
 class DataBuffer:
     """Buffer for collecting episode data with camera"""
@@ -228,7 +220,7 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
 
     # Initialize camera
     camera = None
-    with_camera = not no_camera and CAMERA_AVAILABLE
+    with_camera = not no_camera
 
     if with_camera:
         try:
