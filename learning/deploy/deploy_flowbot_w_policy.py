@@ -6,12 +6,12 @@ Usage:
     python deploy/deploy_real_robot.py \
         --checkpoint train/checkpoints/best_model.pt \
         --robot_ip 192.168.1.100 \
-        --camera_id 0
+        --flowbot_port /dev/ttyACM0
 
 Hardware:
     - UR5e robot arm (RTDE control)
     - Flowbot soft pneumatic manipulator (3 valves via Arduino serial)
-    - USB camera (camera_id)
+    - Intel RealSense camera (auto-detected)
 
 State  (9D): robot_eef_pose (6D: x,y,z,rx,ry,rz) + flowbot pwm (3D)
 Action (9D): target robot_eef_pose (6D) + target pwm (3D)
@@ -31,26 +31,10 @@ from collections import deque
 DEPLOY_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(DEPLOY_DIR)
 sys.path.insert(0, PROJECT_DIR)
-
+from hardware.ur5e_rtde import UR5eRobot
+from hardware.flowbot import flowbot
+from hardware.realsense_camera import RealSenseCamera
 from train.eval import DiffusionPolicyInference
-
-# ── Hardware imports ──────────────────────────────────────────────────────────
-try:
-    import rtde_control
-    import rtde_receive
-    HAS_RTDE = True
-except ImportError:
-    HAS_RTDE = False
-    print("⚠️  rtde_control not found — robot control disabled")
-
-try:
-    FLOWBOT_DIR = os.path.join(PROJECT_DIR, 'flowbot')
-    sys.path.insert(0, FLOWBOT_DIR)
-    from flowbot import Flowbot
-    HAS_FLOWBOT = True
-except ImportError:
-    HAS_FLOWBOT = False
-    print("⚠️  flowbot module not found — PWM control disabled")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 PWM_MIN = 1
@@ -62,10 +46,11 @@ DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
 # Control frequency (Hz)
 CONTROL_FREQ = 10.0
 DT = 1.0 / CONTROL_FREQ
+FLOWBOT_FREQ = 10  # Flowbot command frequency — must match CONTROL_FREQ
 
 # servo_l speed/acceleration (lower = smoother)
-SERVO_SPEED = 0.3       # m/s
-SERVO_ACCEL = 0.3       # m/s^2
+SERVO_SPEED = 0.1       # m/s
+SERVO_ACCEL = 0.1     # m/s^2
 SERVO_LOOKAHEAD = 0.1   # s
 SERVO_GAIN = 300
 
@@ -82,15 +67,16 @@ class RobotDeployment:
         self,
         checkpoint_path: str,
         robot_ip: str,
-        camera_id: int = 0,
         flowbot_port: str = '/dev/ttyACM0',
         flowbot_baud: int = 115200,
-        image_size: tuple = (96, 96),
+        image_size: tuple = (216, 288),
         device: str = 'cuda',
         verbose: bool = True,
+        camera_height: int = 480,
+        camera_width: int = 640,
     ):
         self.verbose = verbose
-        self.image_size = image_size
+        
 
         # ── Load policy ───────────────────────────────────────────────────────
         print(f"\n[1/4] Loading policy from: {checkpoint_path}")
@@ -101,30 +87,34 @@ class RobotDeployment:
         self.action_horizon = self.config['action_horizon']
         print(f"      obs_horizon={self.obs_horizon}, action_horizon={self.action_horizon}")
         print(f"      device={device_obj}")
-
+        if image_size is None:
+            self.image_size = tuple(self.policy.config['image_size'])
+        else:
+            self.image_size = image_size
         # ── Camera ────────────────────────────────────────────────────────────
-        print(f"\n[2/4] Opening camera (id={camera_id}) ...")
-        self.cap = cv2.VideoCapture(camera_id)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"Cannot open camera id={camera_id}")
-        # Warmup
-        for _ in range(5):
-            self.cap.read()
+        print(f"\n[2/4] Opening RealSense camera ...")
+        self.cam = RealSenseCamera(
+            width=camera_width,
+            height=camera_height,
+            enable_depth=False,
+        )
         print("      Camera OK")
 
         # ── UR5e RTDE ─────────────────────────────────────────────────────────
         print(f"\n[3/4] Connecting to UR5e at {robot_ip} ...")
-        if not HAS_RTDE:
-            raise ImportError("rtde_control is required for robot control")
-        self.rtde_c = rtde_control.RTDEControlInterface(robot_ip)
-        self.rtde_r = rtde_receive.RTDEReceiveInterface(robot_ip)
+        self.ur5 = UR5eRobot(robot_ip=robot_ip,frequency=CONTROL_FREQ)
         print("      UR5e connected")
 
         # ── Flowbot ───────────────────────────────────────────────────────────
         print(f"\n[4/4] Connecting to Flowbot on {flowbot_port} ...")
-        if not HAS_FLOWBOT:
-            raise ImportError("flowbot module is required")
-        self.fb = Flowbot(port=flowbot_port, baud=flowbot_baud)
+        self.fb = flowbot(serial_port=flowbot_port,
+                          baud_rate=flowbot_baud,
+                          pwm_min=PWM_MIN,
+                          pwm_max=PWM_MAX,
+                          enable_plot=False,
+                          frequency=FLOWBOT_FREQ,
+                          max_pos_speed=30)
+        self.fb.start()
         time.sleep(2.0)  # Arduino reset delay
         print("      Flowbot connected")
 
@@ -145,7 +135,7 @@ class RobotDeployment:
             image_raw  : np.ndarray (H,W,3) uint8 — cropped camera frame
         """
         # Robot TCP pose (6D)
-        tcp_pose = np.array(self.rtde_r.getActualTCPPose(), dtype=np.float32)  # (6,)
+        tcp_pose = self.ur5.get_tcp_pose()
 
         # Flowbot last sent PWM (3D)
         pwm = np.array(self.fb.last_pwm, dtype=np.float32)                     # (3,)
@@ -153,19 +143,18 @@ class RobotDeployment:
         state_raw = np.concatenate([tcp_pose, pwm])                            # (9,)
 
         # Camera image
-        ret, frame = self.cap.read()
-        if not ret:
+        camera_frame, _ = self.cam.get_frames()
+        if camera_frame is None:
             raise RuntimeError("Camera read failed")
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         # Centre-crop and resize (same as dataset.py)
-        h, w = frame_rgb.shape[:2]
+        h, w = camera_frame.shape[:2]
         target_h, target_w = self.image_size
         crop_h = min(h, int(target_h * 1.5))
         crop_w = min(w, int(target_w * 1.5))
         sh = (h - crop_h) // 2
         sw = (w - crop_w) // 2
-        image_raw = frame_rgb[sh:sh + crop_h, sw:sw + crop_w]
+        image_raw = camera_frame[sh:sh + crop_h, sw:sw + crop_w]
         image_raw = cv2.resize(image_raw, (target_w, target_h))
 
         return state_raw, image_raw
@@ -253,14 +242,8 @@ class RobotDeployment:
         """
         # UR5e: servo to target TCP pose (non-blocking)
         tcp_target = action[:6].tolist()
-        self.rtde_c.servoL(
-            tcp_target,
-            SERVO_SPEED,
-            SERVO_ACCEL,
-            DT,
-            SERVO_LOOKAHEAD,
-            SERVO_GAIN,
-        )
+        self.ur5.servo_tcp_pose(target_pose=tcp_target,velocity=SERVO_SPEED,
+                                    acceleration=SERVO_ACCEL,dt=DT,lookahead_time=SERVO_LOOKAHEAD,gain=SERVO_GAIN)
 
         # Flowbot: clamp, round to int, send
         pwm_raw   = action[6:]
@@ -268,7 +251,7 @@ class RobotDeployment:
         self.fb.serial_sending(pwm_int)
 
         if self.verbose:
-            tcp = np.array(self.rtde_r.getActualTCPPose())
+            tcp = np.array(tcp_target, dtype=np.float32)
             print(
                 f"  TCP: [{tcp[0]:.3f}, {tcp[1]:.3f}, {tcp[2]:.3f}]  "
                 f"PWM: {pwm_int.tolist()}"
@@ -281,7 +264,7 @@ class RobotDeployment:
         Move UR5e to DEFAULT_START_POSE using moveL, then reset flowbot.
         """
         print("\nMoving to start position ...")
-        self.rtde_c.moveL(DEFAULT_START_POSE, speed, accel)
+        self.ur5.move_tcp_pose(DEFAULT_START_POSE, velocity=speed, acceleration=accel)
         print(f"  TCP at: {DEFAULT_START_POSE}")
 
         print("Resetting Flowbot ...")
@@ -291,7 +274,7 @@ class RobotDeployment:
 
     # ── Main episode loop ─────────────────────────────────────────────────────
 
-    def run_episode(self, max_steps: int = 300, move_to_start: bool = True):
+    def run_episode(self, max_steps: int = 400, move_to_start: bool = True):
         """
         Run one deployment episode with receding-horizon control.
 
@@ -305,9 +288,9 @@ class RobotDeployment:
         if move_to_start:
             self.move_to_start()
 
-        print("\n" + "="*60)
+        print("\n" + "="*30)
         print("Starting episode ...")
-        print("="*60)
+        print("="*30)
 
         # Fill the observation buffer with obs_horizon initial frames
         print("Filling observation buffer ...")
@@ -354,7 +337,7 @@ class RobotDeployment:
         print(f"\n✅ Episode finished: {total_steps} steps in {elapsed_total:.1f}s")
 
         # Stop UR5e servoing
-        self.rtde_c.servoStop()
+        self.ur5.stop()
 
         # Reset Flowbot
         print("Resetting Flowbot ...")
@@ -366,8 +349,7 @@ class RobotDeployment:
         """Safely disconnect all hardware."""
         print("\nShutting down ...")
         try:
-            self.rtde_c.servoStop()
-            self.rtde_c.stopScript()
+            self.ur5.disconnect()
         except Exception as e:
             print(f"  UR5e shutdown error: {e}")
         try:
@@ -375,7 +357,7 @@ class RobotDeployment:
         except Exception as e:
             print(f"  Flowbot reset error: {e}")
         try:
-            self.cap.release()
+            self.cam.stop()
         except Exception:
             pass
         print("✅ Shutdown complete")
@@ -387,13 +369,11 @@ def main():
                         help='Path to trained checkpoint (.pt)')
     parser.add_argument('--robot_ip',      type=str,   required=True,
                         help='UR5e IP address (e.g. 192.168.1.100)')
-    parser.add_argument('--camera_id',     type=int,   default=0,
-                        help='Camera device ID')
     parser.add_argument('--flowbot_port',  type=str,   default='/dev/ttyACM0',
                         help='Arduino serial port for Flowbot')
     parser.add_argument('--flowbot_baud',  type=int,   default=115200,
                         help='Flowbot serial baud rate')
-    parser.add_argument('--max_steps',     type=int,   default=300,
+    parser.add_argument('--max_steps',     type=int,   default=400,
                         help='Max steps per episode')
     parser.add_argument('--num_episodes',  type=int,   default=1,
                         help='Number of episodes to run')
@@ -414,7 +394,6 @@ def main():
         robot = RobotDeployment(
             checkpoint_path=args.checkpoint,
             robot_ip=args.robot_ip,
-            camera_id=args.camera_id,
             flowbot_port=args.flowbot_port,
             flowbot_baud=args.flowbot_baud,
             device=args.device,
@@ -422,9 +401,9 @@ def main():
         )
 
         for ep in range(args.num_episodes):
-            print(f"\n{'='*60}")
+            print(f"\n{'='*30}")
             print(f"EPISODE {ep + 1} / {args.num_episodes}")
-            print(f"{'='*60}")
+            print(f"{'='*30}")
 
             robot.run_episode(
                 max_steps=args.max_steps,

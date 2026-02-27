@@ -211,12 +211,7 @@ class flowbot:
         pwm = np.array([0, 0, 0], dtype=np.int32)
         self.last_pwm = pwm
         self.pc = self.pc_init.copy()
-        cmd = f"{int(pwm[0])} {int(pwm[1])} {int(pwm[2])}\n"
-        try:
-            self.ser.write(cmd.encode("ascii"))
-            print("[PYTHON] Sent:", cmd.strip())
-        except Exception as e:
-            print("Serial write failed (reset):", e)
+        self.serial_sending(pwm)
 
     def step(self,dpc) -> np.ndarray:
         if not self._running:
@@ -239,13 +234,8 @@ class flowbot:
 
         if self.last_pwm is None or not np.array_equal(pwm, self.last_pwm):
             cmd = f"{int(pwm[0])} {int(pwm[1])} {int(pwm[2])}\n"
-            try:
-                self.ser.write(cmd.encode("ascii"))
-                # print("[PYTHON] Sent:", cmd.strip(), "pc:", self.pc)
-            except Exception as e:
-                print("Serial write failed:", e)
-            self.last_pwm = pwm
-            print("Sent pwm:", pwm, "for pc:", self.pc)
+        self.last_pwm = pwm
+        self.serial_sending(pwm)
 
         elapsed = time.time() - t0
         if elapsed < self.dt:
