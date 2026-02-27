@@ -2,7 +2,7 @@
 # Robot: UR5e + Flowbot soft manipulator (3 pneumatic valves via PWM)
 
 # Dataset
-dataset_path: "data/demo_data/Task3/dataset.zarr"  # Path to training dataset (Zarr format) please change Task 1, 2, or 3 as needed
+dataset_path: "/media/protac/Desk SSD/Task3/dataset.zarr"  # Path to training dataset (Zarr format) please change Task 1, 2, or 3 as needed
 obs_horizon: 2        # Number of observation frames
 pred_horizon: 16      # Number of action steps to predict
 action_horizon: 8     # Number of action steps to execute
@@ -25,7 +25,7 @@ film_step_embed_dim: 256  # Timestep embedding dim for FiLM UNet (Stanford: 256)
 film_kernel_size: 5       # Conv kernel size for FiLM UNet (Stanford: 5)
 
 # Vision pooling (auto: SpatialSoftmax when use_film_unet=true)
-use_spatial_softmax: null # null = auto (true if use_film_unet else false); or override explicitly
+use_spatial_softmax: true # null = auto (true if use_film_unet else false); or override explicitly
 num_keypoints: 32         # SpatialSoftmax keypoints → 64-D per frame (Stanford default)
 
 # Training
@@ -48,7 +48,7 @@ num_workers: 4        # DataLoader workers
 early_stopping_patience: 200  # Stop if no improvement for N post-warmup epochs (0 = disabled)
 
 # Checkpointing
-output_dir: "out_policies/checkpoints"
+output_dir: "/media/protac/Desk SSD/Nhan/trained_models"
 save_every: 50        # Save checkpoint every N epochs
 
 # Logging

@@ -207,7 +207,7 @@ def move_2_init_pos(ur5, start_pose, goal_pose, dt, duration=5.0,
         time.sleep(dt)
 
 @click.command()
-@click.option('--output', '-o', required=True, default = 'data_demo', help='output folder name')
+@click.option('--output', '-o', required=True, default = 'demo_data', help='output folder name')
 @click.option('--robot_ip', '-ri', required=True, default = '192.168.11.20', help='UR5e IP')
 @click.option('--arduino_port', default="/dev/ttyACM0")
 @click.option('--camera_serial', help='RealSense serial (auto-detect if None)')
@@ -228,8 +228,8 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
     print("="*60)
 
     # Create output
-    parent_dir = "/home/protac/Desktop/flow_contibot_learning/data/"
-    output_dir = Path(parent_dir + output)
+    parent_dir = Path(__file__).parent.parent
+    output_dir = Path(parent_dir / "data" / output)
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"\nOutput: {output_dir}")
 
