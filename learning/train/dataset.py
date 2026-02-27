@@ -95,19 +95,30 @@ class PickPlaceDataset(Dataset):
         """Compute min/max for normalization (Min-Max to [-1, 1]).
 
         x_norm = 2.0 * (x - min) / (max - min) - 1.0
+
+        Uses ALL frames to guarantee correct min/max (no sampling bias).
+        For large datasets (>10k frames) a seeded random sample is used
+        to keep loading time reasonable while being fully reproducible.
         """
         print("Computing normalization statistics (Min-Max to [-1, 1])...")
 
         total_len = int(self.episode_ends[-1])
-        num_samples = min(1000, total_len)
-        sample_indices = np.random.choice(total_len, num_samples, replace=False)
-        sample_indices = sorted(sample_indices)
+        FULL_SCAN_THRESHOLD = 10_000  # use all frames below this size
 
-        robot_states = []
-        pwm_states = []
-        for idx in sample_indices:
-            robot_states.append(self.zarr_root['data/robot_eef_pose'][idx])
-            pwm_states.append(self.zarr_root['data/pwm_signals'][idx])
+        if total_len <= FULL_SCAN_THRESHOLD:
+            # Load everything — guaranteed correct min/max
+            robot_states_all = self.zarr_root['data/robot_eef_pose'][:]  # (T, 6)
+            pwm_states_all   = self.zarr_root['data/pwm_signals'][:]     # (T, 3)
+            robot_states = robot_states_all
+            pwm_states   = pwm_states_all
+            print(f"  Using all {total_len} frames for stats")
+        else:
+            # Seeded random sample — reproducible across runs
+            rng = np.random.RandomState(42)
+            sample_indices = sorted(rng.choice(total_len, 5000, replace=False))
+            robot_states = self.zarr_root['data/robot_eef_pose'].oindex[sample_indices]
+            pwm_states   = self.zarr_root['data/pwm_signals'].oindex[sample_indices]
+            print(f"  Using 5000/{total_len} seeded-random frames for stats")
 
         robot_states = np.array(robot_states)  # (N, 6)
         pwm_states = np.array(pwm_states)      # (N, 3)

@@ -26,9 +26,9 @@ from pathlib import Path
 def analyze_dataset(dataset_path, show_plots=True):
     """Analyze dataset and print statistics"""
 
-    print("="*80)
+    print("="*30)
     print("DATASET ANALYSIS - FLOWBOT")
-    print("="*80)
+    print("="*30)
     print(f"\nDataset path: {dataset_path}\n")
 
     # Load dataset
@@ -39,9 +39,9 @@ def analyze_dataset(dataset_path, show_plots=True):
     num_episodes = len(episode_ends)
     total_timesteps = int(episode_ends[-1]) if num_episodes > 0 else 0
 
-    print(f"{'='*80}")
+    print(f"{'='*30}")
     print(f"BASIC STATISTICS")
-    print(f"{'='*80}")
+    print(f"{'='*30}")
     print(f"Number of episodes: {num_episodes}")
     print(f"Total timesteps: {total_timesteps}")
 
@@ -72,9 +72,9 @@ def analyze_dataset(dataset_path, show_plots=True):
         print("\n⚠️  No camera data found!")
 
     # Analyze robot TCP poses
-    print(f"\n{'='*80}")
+    print(f"\n{'='*30}")
     print(f"ROBOT TCP POSE DISTRIBUTION")
-    print(f"{'='*80}")
+    print(f"{'='*30}")
 
     print(f"\nPosition range (meters):")
     for i, axis in enumerate(['X', 'Y', 'Z']):
@@ -91,9 +91,9 @@ def analyze_dataset(dataset_path, show_plots=True):
         print(f"  {axis}: [{min_val:.4f}, {max_val:.4f}] (range: {range_val:.4f})")
 
     # Analyze Z-axis movement per episode
-    print(f"\n{'='*80}")
+    print(f"\n{'='*30}")
     print(f"Z-AXIS MOVEMENT PER EPISODE")
-    print(f"{'='*80}")
+    print(f"{'='*30}")
 
     z_descents = []
     z_starts = []
@@ -135,9 +135,9 @@ def analyze_dataset(dataset_path, show_plots=True):
     print(f"  Std:  {z_descents.std():.4f} m ({z_descents.std()*100:.2f} cm)")
 
     # Analyze flowbot PWM signals
-    print(f"\n{'='*80}")
+    print(f"\n{'='*30}")
     print(f"FLOWBOT PWM SIGNAL DISTRIBUTION")
-    print(f"{'='*80}")
+    print(f"{'='*30}")
 
     pwm_labels = ['PWM1', 'PWM2', 'PWM3']
     print(f"\nPWM signal ranges (integer values):")
@@ -201,9 +201,9 @@ def analyze_dataset(dataset_path, show_plots=True):
 
     # Create visualizations
     if show_plots and num_episodes > 0:
-        print(f"\n{'='*80}")
+        print(f"\n{'='*30}")
         print(f"GENERATING VISUALIZATIONS")
-        print(f"{'='*80}")
+        print(f"{'='*30}")
 
         fig, axes = plt.subplots(2, 3, figsize=(18, 12))
         fig.suptitle(f'Dataset Analysis (Flowbot): {Path(dataset_path).name}', fontsize=16)
@@ -283,9 +283,9 @@ def analyze_dataset(dataset_path, show_plots=True):
         except Exception:
             pass
 
-    print(f"\n{'='*80}")
+    print(f"\n{'='*30}")
     print(f"ANALYSIS COMPLETE")
-    print(f"{'='*80}\n")
+    print(f"{'='*30}\n")
 
 
 def main():

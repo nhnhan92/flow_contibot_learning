@@ -2,7 +2,7 @@
 # Robot: UR5e + Flowbot soft manipulator (3 pneumatic valves via PWM)
 
 # Dataset
-dataset_path: "data/demo_data/dataset.zarr"
+dataset_path: "data/demo_data/Task3/dataset.zarr"  # Path to training dataset (Zarr format) please change Task 1, 2, or 3 as needed
 obs_horizon: 2        # Number of observation frames
 pred_horizon: 16      # Number of action steps to predict
 action_horizon: 8     # Number of action steps to execute
@@ -43,6 +43,9 @@ lr_min_factor: 0.01    # Cosine decays to peak_lr * 0.01 at the end
 # Data
 val_ratio: 0.1        # Validation split ratio
 num_workers: 4        # DataLoader workers
+
+# Early stopping
+early_stopping_patience: 200  # Stop if no improvement for N post-warmup epochs (0 = disabled)
 
 # Checkpointing
 output_dir: "train/checkpoints"

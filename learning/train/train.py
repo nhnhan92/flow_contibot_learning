@@ -263,7 +263,7 @@ def main():
     print("="*60)
 
     best_val_loss = float('inf')
-    patience = 100  # Stop if no improvement for 100 epochs
+    patience = config.get('early_stopping_patience', 200)
     patience_counter = 0
     min_improvement = 1e-6  # Minimum improvement to reset patience
 
@@ -345,14 +345,18 @@ def main():
             }, best_path)
             print(f"  ✅ New best! Saved: {best_path} (improved by {improvement:.6f})")
         else:
-            patience_counter += 1
-            print(f"  No improvement ({patience_counter}/{patience})")
+            # Don't count patience during warmup — LR is still ramping up
+            if epoch < warmup_epochs:
+                print(f"  No improvement (warmup phase, patience paused)")
+            else:
+                patience_counter += 1
+                print(f"  No improvement ({patience_counter}/{patience})")
 
-            # Early stopping
-            if patience_counter >= patience:
-                print(f"\n⚠️  Early stopping triggered! No improvement for {patience} epochs.")
-                print(f"   Best validation loss: {best_val_loss:.4f}")
-                break
+                # Early stopping
+                if patience_counter >= patience:
+                    print(f"\n⚠️  Early stopping triggered! No improvement for {patience} epochs.")
+                    print(f"   Best validation loss: {best_val_loss:.4f}")
+                    break
 
     # Save final model
     final_path = output_dir / 'final_model.pt'

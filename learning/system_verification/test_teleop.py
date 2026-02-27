@@ -6,8 +6,8 @@ Test Teleoperation: Control UR5e with SpaceMouse
 Không cần camera hay gripper.
 
 Usage:
-    cd ~/Desktop/my_pickplace
-    python scripts/test_teleop.py --robot_ip 150.65.146.87
+    cd ~/Desktop/flow_contibot_learning/learning
+    python system_verification/test_teleop.py --robot_ip 150.65.146.87
 
 Controls:
     SpaceMouse:
@@ -30,13 +30,13 @@ import time
 import click
 import numpy as np
 # Add paths
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PICKPLACE_DIR = os.path.dirname(SCRIPT_DIR)
-sys.path.insert(0, PICKPLACE_DIR)
+SYSVER_DIR = os.path.dirname(os.path.abspath(__file__))
+LEARNING_DIR = os.path.dirname(SYSVER_DIR)
+sys.path.insert(0, LEARNING_DIR)
 import scipy.spatial.transform as st
 
-from custom.spacemouse import SpaceMouse
-from custom.ur5e_rtde import UR5eRobot
+from hardware.spacemouse import SpaceMouse
+from hardware.ur5e_rtde import UR5eRobot
 
 
 def print_status(tcp_pose, target_pose, speed_scale):

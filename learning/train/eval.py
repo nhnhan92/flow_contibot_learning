@@ -40,6 +40,9 @@ class DiffusionPolicyInference:
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
 
         self.config = checkpoint['config']
+        # Store full checkpoint so deploy scripts can access normalization stats
+        # via policy.checkpoint['state_min'], policy.checkpoint['action_range'], etc.
+        self.checkpoint = checkpoint
 
         # Create model
         self.model = DiffusionPolicy(

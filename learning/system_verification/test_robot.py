@@ -3,8 +3,8 @@
 Test UR5e Robot Connection via RTDE
 
 Usage:
-    cd ~/Desktop/my_pickplace
-    python scripts/test_robot.py --robot_ip 192.168.10.20
+    cd ~/Desktop/flow_contibot_learning/learning
+    python system_verification/test_robot.py --robot_ip 192.168.10.20
 """
 
 import sys
@@ -14,9 +14,9 @@ import click
 import numpy as np
 
 # Add paths
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PICKPLACE_DIR = os.path.dirname(SCRIPT_DIR)
-sys.path.insert(0, PICKPLACE_DIR)
+SYSVER_DIR = os.path.dirname(os.path.abspath(__file__))
+LEARNING_DIR = os.path.dirname(SYSVER_DIR)
+sys.path.insert(0, LEARNING_DIR)
 
 
 def test_rtde_receive(robot_ip: str) -> bool:

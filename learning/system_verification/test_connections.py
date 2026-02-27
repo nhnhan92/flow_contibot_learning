@@ -3,7 +3,7 @@
 Test all robot connections before deployment
 
 Usage:
-    python deploy/test_connections.py \
+    python system_verification/test_connections.py \
         --robot_ip 192.168.1.100 \
         --camera_id 0 \
         --flowbot_port /dev/ttyACM0
@@ -20,8 +20,8 @@ import time
 import argparse
 import numpy as np
 
-DEPLOY_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.dirname(DEPLOY_DIR)
+SYSVER_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(SYSVER_DIR)
 sys.path.insert(0, PROJECT_DIR)
 
 FLOWBOT_DIR = os.path.join(PROJECT_DIR, 'flowbot')

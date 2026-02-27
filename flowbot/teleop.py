@@ -19,7 +19,7 @@ import sys
 FILE_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(FILE_DIR)
 sys.path.insert(0, PARENT_DIR)
-from learning.custom.spacemouse import _build_spacemouse
+from learning.hardware.spacemouse import _build_spacemouse
 
 # -------------------------
 # Control settings
@@ -46,7 +46,7 @@ OPTITRACK_ORIGIN_M = np.array([0.026365965604782104, -0.20626311004161835, 0.182
 OPTITRACK_TRAIL_LEN = 300
 
 def main():
-    from learning.custom import flowbot
+    from learning.hardware import flowbot
     import platform
     ap = argparse.ArgumentParser()
     ap.add_argument("--baud", type=int, default=115200)

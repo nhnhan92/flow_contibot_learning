@@ -7,7 +7,7 @@ Action/State space (9D):
     - Flowbot PWM signals: pwm1, pwm2, pwm3 (dims 6-8)
 
 Usage:
-    python train/test_checkpoint_on_episode.py --checkpoint train/checkpoints/checkpoint_epoch_1000.pt --episode 5
+    python system_verification/test_checkpoint_on_episode.py --checkpoint train/checkpoints/checkpoint_epoch_1000.pt --episode 5
 """
 
 import sys

@@ -3,7 +3,7 @@
 Test if model uses visual information or just robot state
 
 Usage:
-    python train/test_visual_importance.py --checkpoint train/checkpoints/best_model.pt
+    python system_verification/test_visual_importance.py --checkpoint train/checkpoints/best_model.pt
 """
 
 import sys

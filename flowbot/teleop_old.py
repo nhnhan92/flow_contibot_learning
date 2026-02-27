@@ -129,7 +129,7 @@ def _build_spacemouse(device_index: int = 1,os_name: str = 'linux') -> _BaseSpac
 
     # Linux: libspnav spacemouse.py
     if "linux" in os_name:
-        from learning.custom.spacemouse import SpaceMouse as _SpaceMouseLibspnav
+        from learning.hardware.spacemouse import SpaceMouse as _SpaceMouseLibspnav
 
         class _LinuxSpaceMouse(_BaseSpaceMouse):
             def __init__(self, device_index: int):

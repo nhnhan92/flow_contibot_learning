@@ -3,8 +3,8 @@
 Test SpaceMouse using spacenavd directly via ctypes
 
 Usage:
-    cd ~/Desktop/my_pickplace
-    python scripts/test_spacemouse.py
+    cd ~/Desktop/flow_contibot_learning/learning
+    python system_verification/test_spacemouse.py
 """
 
 import time

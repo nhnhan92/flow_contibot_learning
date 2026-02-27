@@ -40,10 +40,10 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PICKPLACE_DIR = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, PICKPLACE_DIR)
 
-from custom.ur5e_rtde import UR5eRobot
-from custom.spacemouse import _build_spacemouse
-from custom.flowbot import flowbot
-from custom.realsense_camera import RealSenseCamera
+from hardware.ur5e_rtde import UR5eRobot
+from hardware.spacemouse import _build_spacemouse
+from hardware.flowbot import flowbot
+from hardware.realsense_camera import RealSenseCamera
 # Keyboard
 import select
 import termios

@@ -10,9 +10,9 @@ Kiểm tra:
 5. Latency - độ trễ
 
 Usage:
-    cd ~/Desktop/my_pickplace
-    python scripts/test_camera.py
-    python scripts/test_camera.py --no-display  # Không hiển thị GUI
+    cd ~/Desktop/flow_contibot_learning/learning
+    python system_verification/test_camera.py
+    python system_verification/test_camera.py --no-display
 """
 
 import time

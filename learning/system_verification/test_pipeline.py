@@ -7,7 +7,7 @@ State/Action space (9D):
     - Flowbot PWM signals: pwm1, pwm2, pwm3 (3D)
 
 Usage:
-    python train/test_pipeline.py --config train/config.yaml
+    python system_verification/test_pipeline.py --config config/config_train_flowbot.yaml
 """
 
 import os
@@ -16,8 +16,8 @@ import yaml
 import torch
 
 # Add parent directory to path
-TRAIN_DIR = os.path.dirname(os.path.abspath(__file__))
-LEARNING_DIR = os.path.dirname(TRAIN_DIR)
+SYSVER_DIR = os.path.dirname(os.path.abspath(__file__))
+LEARNING_DIR = os.path.dirname(SYSVER_DIR)
 sys.path.insert(0, LEARNING_DIR)
 
 from train.dataset import PickPlaceDataset

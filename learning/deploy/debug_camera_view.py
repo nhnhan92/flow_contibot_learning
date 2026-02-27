@@ -12,8 +12,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cv2
 import numpy as np
-from custom.realsense_camera import RealSenseCamera
-from custom.ur5e_rtde import UR5eRobot
+from hardware.realsense_camera import RealSenseCamera
+from hardware.ur5e_rtde import UR5eRobot
 
 def main():
     print("="*60)
