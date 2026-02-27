@@ -32,14 +32,7 @@ import zarr
 import scipy.spatial.transform as st
 from pathlib import Path
 import cv2
-from numcodecs.zarr3 import Blosc
-
-
-# Setup paths
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PICKPLACE_DIR = os.path.dirname(SCRIPT_DIR)
-sys.path.insert(0, PICKPLACE_DIR)
-
+from zarr.codecs.numcodecs import Blosc
 from hardware.ur5e_rtde import UR5eRobot
 from hardware.spacemouse import _build_spacemouse
 from hardware.flowbot import flowbot
