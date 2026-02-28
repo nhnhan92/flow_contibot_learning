@@ -476,9 +476,10 @@ def main():
                         help='Skip moving to start pose at beginning of each episode')
     parser.add_argument('--quiet',         action='store_true',
                         help='Reduce per-step output')
-    parser.add_argument('--log_dir',       type=str,   default="/deploy_log",
+    parser.add_argument('--log_dir',       type=str,   default=None,
                         help='Directory to save deployment logs (.npz per episode). '
-                             'If not set, no log is saved.')
+                             'If not set, logging is disabled. '
+                             'Relative paths are resolved from the deploy/ directory.')
     args = parser.parse_args()
 
     if not os.path.exists(args.checkpoint):
@@ -495,11 +496,14 @@ def main():
             device=args.device,
             verbose=not args.quiet,
         )
-        log_dir = Path(DEPLOY_DIR) / args.log_dir if args.log_dir else None
-        log_dir.mkdir(parents=True, exist_ok=True)
-        logger = DeploymentLogger(log_dir, args.checkpoint) if log_dir else None
-        if logger:
+        if args.log_dir:
+            log_dir = Path(args.log_dir)
+            if not log_dir.is_absolute():
+                log_dir = Path(DEPLOY_DIR) / log_dir
+            logger = DeploymentLogger(str(log_dir), args.checkpoint)
             print(f"Logging enabled → {log_dir}")
+        else:
+            logger = None
 
         for ep in range(args.num_episodes):
             print(f"\n{'='*30}")
