@@ -30,8 +30,9 @@ from collections import deque
 
 # Add parent directory to path
 DEPLOY_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.dirname(DEPLOY_DIR)
-sys.path.insert(0, PROJECT_DIR)
+LEARNING_DIR = os.path.dirname(DEPLOY_DIR)
+PROJECT_ROOT = os.path.dirname(LEARNING_DIR)
+sys.path.insert(0, LEARNING_DIR)
 from hardware.ur5e_rtde import UR5eRobot
 from hardware.flowbot import flowbot
 from hardware.realsense_camera import RealSenseCamera
@@ -183,7 +184,7 @@ class RobotDeployment:
         # ── Flowbot ───────────────────────────────────────────────────────────
         print(f"\n[4/4] Connecting to Flowbot on {flowbot_port} ...")
         self.fb = flowbot(serial_port=flowbot_port,
-                          baud_rate=flowbot_baud,
+                          baud=flowbot_baud,
                           pwm_min=PWM_MIN,
                           pwm_max=PWM_MAX,
                           enable_plot=False,
@@ -459,7 +460,7 @@ def main():
     parser = argparse.ArgumentParser(description='Deploy Diffusion Policy on UR5e + Flowbot')
     parser.add_argument('--checkpoint',    type=str,   required=True,
                         help='Path to trained checkpoint (.pt)')
-    parser.add_argument('--robot_ip',      type=str,   required=True,
+    parser.add_argument('--robot_ip',      type=str, default= "150.65.146.87",
                         help='UR5e IP address (e.g. 192.168.1.100)')
     parser.add_argument('--flowbot_port',  type=str,   default='/dev/ttyACM0',
                         help='Arduino serial port for Flowbot')
@@ -475,7 +476,7 @@ def main():
                         help='Skip moving to start pose at beginning of each episode')
     parser.add_argument('--quiet',         action='store_true',
                         help='Reduce per-step output')
-    parser.add_argument('--log_dir',       type=str,   default="/home/nhnhan/Desktop/flow_contibot_learning/learning/deploy/deploy_log/",
+    parser.add_argument('--log_dir',       type=str,   default="/deploy_log",
                         help='Directory to save deployment logs (.npz per episode). '
                              'If not set, no log is saved.')
     args = parser.parse_args()
@@ -494,10 +495,11 @@ def main():
             device=args.device,
             verbose=not args.quiet,
         )
-
-        logger = DeploymentLogger(args.log_dir, args.checkpoint) if args.log_dir else None
+        log_dir = Path(DEPLOY_DIR) / args.log_dir if args.log_dir else None
+        log_dir.mkdir(parents=True, exist_ok=True)
+        logger = DeploymentLogger(log_dir, args.checkpoint) if log_dir else None
         if logger:
-            print(f"Logging enabled → {args.log_dir}")
+            print(f"Logging enabled → {log_dir}")
 
         for ep in range(args.num_episodes):
             print(f"\n{'='*30}")
