@@ -20,6 +20,7 @@ Action (9D): target robot_eef_pose (6D) + target pwm (3D)
 import os
 import sys
 import time
+import datetime
 import argparse
 import numpy as np
 import torch
@@ -53,6 +54,80 @@ SERVO_SPEED = 0.1       # m/s
 SERVO_ACCEL = 0.1     # m/s^2
 SERVO_LOOKAHEAD = 0.1   # s
 SERVO_GAIN = 300
+
+
+class DeploymentLogger:
+    """
+    Logs model predictions and robot states during a deployment episode.
+
+    Saved per episode (.npz):
+        timestamps         (T,)              wall-clock time of each executed step
+        tcp_poses          (T, 6)            actual TCP pose read from robot at each step
+        pwm_actual         (T, 3)            actual PWM values read from Flowbot at each step
+        executed_actions   (T, 9)            full 9D action commanded at each step (denormalised)
+        pwm_commanded      (T, 3)            integer PWM sent after clamping
+        predicted_horizons (N_plans, P, 9)   full pred_horizon action sequence for each plan
+        plan_times_ms      (N_plans,)        DDIM inference latency per plan (milliseconds)
+        plan_step_indices  (N_plans,)        step index at which each plan was triggered
+
+    Load later with:
+        data = np.load('episode_000_20260228_120000.npz')
+        tcp  = data['tcp_poses']          # (T, 6)
+        pred = data['predicted_horizons'] # (N_plans, pred_horizon, 9)
+    """
+
+    def __init__(self, log_dir: str, checkpoint_path: str):
+        self.log_dir = Path(log_dir)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.checkpoint_path = str(checkpoint_path)
+        self._reset()
+
+    def _reset(self):
+        self._timestamps        = []
+        self._tcp_poses         = []
+        self._pwm_actual        = []
+        self._executed_actions  = []
+        self._pwm_commanded     = []
+        self._predicted_horizons = []
+        self._plan_times_ms     = []
+        self._plan_step_indices = []
+
+    def log_plan(self, step_idx: int, predicted_actions: np.ndarray, plan_time_s: float):
+        """Call once per DDIM inference (before executing the action horizon)."""
+        self._predicted_horizons.append(predicted_actions.copy())
+        self._plan_times_ms.append(plan_time_s * 1000.0)
+        self._plan_step_indices.append(step_idx)
+
+    def log_step(self, state_raw: np.ndarray, action: np.ndarray, pwm_commanded: np.ndarray):
+        """Call once per executed step (after _update_obs_buffer)."""
+        self._timestamps.append(time.time())
+        self._tcp_poses.append(state_raw[:6].copy())
+        self._pwm_actual.append(state_raw[6:].copy())
+        self._executed_actions.append(action.copy())
+        self._pwm_commanded.append(pwm_commanded.copy())
+
+    def save(self, episode_idx: int, total_steps: int, duration_s: float) -> Path:
+        """Save collected data for one episode and reset buffers."""
+        ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        out_path = self.log_dir / f"episode_{episode_idx:03d}_{ts}.npz"
+
+        np.savez_compressed(
+            out_path,
+            timestamps         = np.array(self._timestamps),
+            tcp_poses          = np.array(self._tcp_poses),
+            pwm_actual         = np.array(self._pwm_actual),
+            executed_actions   = np.array(self._executed_actions),
+            pwm_commanded      = np.array(self._pwm_commanded),
+            predicted_horizons = np.array(self._predicted_horizons),
+            plan_times_ms      = np.array(self._plan_times_ms),
+            plan_step_indices  = np.array(self._plan_step_indices),
+            total_steps        = total_steps,
+            duration_s         = duration_s,
+            checkpoint_path    = self.checkpoint_path,
+        )
+        print(f"  Log saved: {out_path}")
+        self._reset()
+        return out_path
 
 
 class RobotDeployment:
@@ -184,12 +259,13 @@ class RobotDeployment:
             self.image_buffer.append(image_norm.copy())
 
     def _update_obs_buffer(self):
-        """Append one new observation to the rolling buffer."""
+        """Append one new observation to the rolling buffer. Returns state_raw for logging."""
         state_raw, image_raw = self._get_raw_observation()
         state_norm = self._preprocess_state(state_raw)
         image_norm = self._preprocess_image(image_raw)
         self.state_buffer.append(state_norm)
         self.image_buffer.append(image_norm)
+        return state_raw
 
     def _get_obs_tensors(self):
         """
@@ -257,6 +333,8 @@ class RobotDeployment:
                 f"PWM: {pwm_int.tolist()}"
             )
 
+        return pwm_int
+
     # ── Start position ────────────────────────────────────────────────────────
 
     def move_to_start(self, speed: float = 0.3, accel: float = 0.3):
@@ -274,7 +352,8 @@ class RobotDeployment:
 
     # ── Main episode loop ─────────────────────────────────────────────────────
 
-    def run_episode(self, max_steps: int = 400, move_to_start: bool = True):
+    def run_episode(self, max_steps: int = 400, move_to_start: bool = True,
+                    logger: 'DeploymentLogger | None' = None, episode_idx: int = 0):
         """
         Run one deployment episode with receding-horizon control.
 
@@ -284,6 +363,9 @@ class RobotDeployment:
         Args:
             max_steps    : Hard step limit (safety stop)
             move_to_start: If True, move robot to start before running
+            logger       : Optional DeploymentLogger; if provided, all predictions
+                           and states are recorded and saved at episode end
+            episode_idx  : Episode number (used for the log filename)
         """
         if move_to_start:
             self.move_to_start()
@@ -309,6 +391,9 @@ class RobotDeployment:
                 if self.verbose:
                     print(f"\nStep {total_steps} | Plan time: {t_plan*1000:.1f} ms")
 
+                if logger is not None:
+                    logger.log_plan(total_steps, actions, t_plan)
+
                 # ── Execute: action_horizon steps from the plan ───────────────
                 for step_i in range(self.action_horizon):
                     if total_steps >= max_steps:
@@ -316,11 +401,14 @@ class RobotDeployment:
 
                     t_step_start = time.time()
 
-                    action = actions[step_i]    # (9,)
-                    self._execute_action(action)
+                    action = actions[step_i]            # (9,)
+                    pwm_int = self._execute_action(action)
 
-                    # Update observation buffer after executing action
-                    self._update_obs_buffer()
+                    # Update obs buffer and get raw state for logging
+                    state_raw = self._update_obs_buffer()
+
+                    if logger is not None:
+                        logger.log_step(state_raw, action, pwm_int)
 
                     total_steps += 1
 
@@ -342,6 +430,10 @@ class RobotDeployment:
         # Reset Flowbot
         print("Resetting Flowbot ...")
         self.fb.reset()
+
+        # Save deployment log
+        if logger is not None:
+            logger.save(episode_idx, total_steps, elapsed_total)
 
     # ── Cleanup ───────────────────────────────────────────────────────────────
 
@@ -383,6 +475,9 @@ def main():
                         help='Skip moving to start pose at beginning of each episode')
     parser.add_argument('--quiet',         action='store_true',
                         help='Reduce per-step output')
+    parser.add_argument('--log_dir',       type=str,   default="/home/nhnhan/Desktop/flow_contibot_learning/learning/deploy/deploy_log/",
+                        help='Directory to save deployment logs (.npz per episode). '
+                             'If not set, no log is saved.')
     args = parser.parse_args()
 
     if not os.path.exists(args.checkpoint):
@@ -400,6 +495,10 @@ def main():
             verbose=not args.quiet,
         )
 
+        logger = DeploymentLogger(args.log_dir, args.checkpoint) if args.log_dir else None
+        if logger:
+            print(f"Logging enabled → {args.log_dir}")
+
         for ep in range(args.num_episodes):
             print(f"\n{'='*30}")
             print(f"EPISODE {ep + 1} / {args.num_episodes}")
@@ -408,6 +507,8 @@ def main():
             robot.run_episode(
                 max_steps=args.max_steps,
                 move_to_start=not args.no_start_pose,
+                logger=logger,
+                episode_idx=ep,
             )
 
             if ep < args.num_episodes - 1:
