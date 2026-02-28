@@ -46,13 +46,13 @@ PWM_MAX = 26
 DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
 
 # Control frequency (Hz)
-CONTROL_FREQ = 10.0
+CONTROL_FREQ = 5.0
 DT = 1.0 / CONTROL_FREQ
-FLOWBOT_FREQ = 10  # Flowbot command frequency — must match CONTROL_FREQ
+FLOWBOT_FREQ = 5.0  # Flowbot command frequency — must match CONTROL_FREQ
 
 # servo_l speed/acceleration (lower = smoother)
-SERVO_SPEED = 0.1       # m/s
-SERVO_ACCEL = 0.1     # m/s^2
+SERVO_SPEED = 0.01      # m/s
+SERVO_ACCEL = 0.01     # m/s^2
 SERVO_LOOKAHEAD = 0.1   # s
 SERVO_GAIN = 300
 
@@ -338,7 +338,7 @@ class RobotDeployment:
 
     # ── Start position ────────────────────────────────────────────────────────
 
-    def move_to_start(self, speed: float = 0.3, accel: float = 0.3):
+    def move_to_start(self, speed: float = 0.1, accel: float = 0.1):
         """
         Move UR5e to DEFAULT_START_POSE using moveL, then reset flowbot.
         """
@@ -466,7 +466,7 @@ def main():
                         help='Arduino serial port for Flowbot')
     parser.add_argument('--flowbot_baud',  type=int,   default=115200,
                         help='Flowbot serial baud rate')
-    parser.add_argument('--max_steps',     type=int,   default=400,
+    parser.add_argument('--max_steps',     type=int,   default=300,
                         help='Max steps per episode')
     parser.add_argument('--num_episodes',  type=int,   default=1,
                         help='Number of episodes to run')

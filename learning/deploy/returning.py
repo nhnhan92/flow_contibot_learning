@@ -36,8 +36,8 @@ DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
 def return_to_start(
     robot_ip: str,
     target_pose: list,
-    speed: float = 0.3,
-    accel: float = 0.3,
+    speed: float = 0.2,
+    accel: float = 0.2,
     flowbot_port: str = None,
     flowbot_baud: int = 115200,
 ):
@@ -118,17 +118,17 @@ def main():
     parser = argparse.ArgumentParser(
         description='Return UR5e to start position and reset Flowbot'
     )
-    parser.add_argument('--robot_ip',     type=str,   required=True,
+    parser.add_argument('--robot_ip',     type=str,   default= "150.65.146.87",
                         help='UR5e IP address (e.g. 192.168.1.100)')
     parser.add_argument('--pose',         type=float, nargs=6,
                         default=DEFAULT_START_POSE,
                         metavar=('X', 'Y', 'Z', 'RX', 'RY', 'RZ'),
                         help='Target TCP pose [x y z rx ry rz] '
                              '(default: collection start pose)')
-    parser.add_argument('--speed',        type=float, default=0.3,
-                        help='moveL speed (m/s, default 0.3)')
-    parser.add_argument('--accel',        type=float, default=0.3,
-                        help='moveL acceleration (m/s^2, default 0.3)')
+    parser.add_argument('--speed',        type=float, default=0.2,
+                        help='moveL speed (m/s, default 0.2)')
+    parser.add_argument('--accel',        type=float, default=0.2,
+                        help='moveL acceleration (m/s^2, default 0.2)')
     parser.add_argument('--flowbot_port', type=str,   default=None,
                         help='Flowbot serial port (e.g. /dev/ttyACM0). '
                              'If omitted, only the robot is moved.')
