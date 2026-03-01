@@ -189,12 +189,12 @@ def visualize_episode(predicted_actions_list, actual_actions_list, ep_idx):
 
     # Plot 1: XYZ positions
     ax = axes[0, 0]
-    ax.plot(timesteps[:300], predicted[:300, 0], 'r-', label='Pred X', alpha=0.7)
-    ax.plot(timesteps[:300], actual[:300, 0],    'r--', label='Actual X')
-    ax.plot(timesteps[:300], predicted[:300, 1], 'g-', label='Pred Y', alpha=0.7)
-    ax.plot(timesteps[:300], actual[:300, 1],    'g--', label='Actual Y')
-    ax.plot(timesteps[:300], predicted[:300, 2], 'b-', label='Pred Z', alpha=0.7)
-    ax.plot(timesteps[:300], actual[:300, 2],    'b--', label='Actual Z')
+    ax.plot(timesteps[:], predicted[:, 0], 'r-', label='Pred X', alpha=0.7)
+    ax.plot(timesteps[:], actual[:, 0],    'r--', label='Actual X')
+    ax.plot(timesteps[:], predicted[:, 1], 'g-', label='Pred Y', alpha=0.7)
+    ax.plot(timesteps[:], actual[:, 1],    'g--', label='Actual Y')
+    ax.plot(timesteps[:], predicted[:, 2], 'b-', label='Pred Z', alpha=0.7)
+    ax.plot(timesteps[:], actual[:, 2],    'b--', label='Actual Z')
     ax.set_xlabel('Timestep')
     ax.set_ylabel('Position (m)')
     ax.set_title('UR5e TCP Position Trajectory')

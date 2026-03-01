@@ -309,8 +309,8 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
 
         while True:
             loop_start = time.time()
-            releasing_act = False
-            # Keyboard
+
+            # ── 1. Keyboard ───────────────────────────────────────────────────
             if select.select([sys.stdin], [], [], 0)[0]:
                 key = sys.stdin.read(1)
 
@@ -339,78 +339,71 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
                         print(f"\n🔄 Moving robot back to start pose...")
                         try:
                             tcp_pose = ur5.get_tcp_pose()
-                            move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, duration=3.0,gain=150)
+                            move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, duration=3.0, gain=150)
                             print(f"✅ Robot returned to start pose!\n")
                             target_pose = init_pose.copy()
 
                             fb.reset()  # Reset flowbot
-                            fb.update_plot() 
+                            fb.update_plot()
                         except Exception as e:
                             print(f"⚠️  Failed to return to start: {e}\n")
                     elif is_recording:
                         print("\n⚠️  No data recorded!\n")
                         is_recording = False
 
-            # Get camera frame FIRST (synchronized timestamp)
+            # ── 2. SpaceMouse → send servo command BEFORE sleep ───────────────
+            button_status = sm.get_button_status()
+            if button_status[1] and not button_status[0]:          # right btn: flowbot
+                xyz_fb = sm.get_latest_xyz()
+                xyz_fb[2] = -xyz_fb[2]
+                xyz_fb = np.where(np.abs(xyz_fb) < deadzone, 0.0, xyz_fb)
+                fb.step(xyz_fb)
+                fb.update_plot()
+
+            elif button_status[0] and not button_status[1]:        # left btn: UR5e
+                xyz_ur5 = sm.get_latest_xyz()
+                vel_linear  = xyz_ur5[:3] * max_pos_speed * dt
+                vel_angular = xyz_ur5[3:] * max_rot_speed * dt
+                vel_angular[:] = 0
+
+                target_pose[:3] += vel_linear
+                if np.any(vel_angular != 0):
+                    drot = st.Rotation.from_euler('xyz', vel_angular)
+                    current_rot = st.Rotation.from_rotvec(target_pose[3:])
+                    target_pose[3:] = (drot * current_rot).as_rotvec()
+
+                try:
+                    ur5.servo_tcp_pose(target_pose=target_pose, velocity=0.1,
+                                       acceleration=0.1, dt=dt, lookahead_time=0.1, gain=300)
+                except Exception as e:
+                    print(f"\nControl error: {e}")
+                    tcp_pose = ur5.get_tcp_pose()
+                    target_pose = tcp_pose.copy()
+
+            elif button_status[0] and button_status[1]:            # both btns: release
+                print("======== RELEASING =========")
+                fb.reset()
+                fb.update_plot()
+                fb.release()
+
+            # ── 3. Sleep BEFORE reading observations ──────────────────────────
+
+            elapsed = time.time() - loop_start
+            if elapsed < dt:
+                time.sleep(dt - elapsed)
+
+            # ── 4. Read ALL observations after robot has settled ──────────────
             camera_frame = None
             if with_camera and camera:
                 try:
-                    
                     camera_frame, _ = camera.get_frames()
-                    
-                    # cam_obs.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                    # cam_obs.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                    # camera_frame = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
-                      # Convert to RGB
                     ret, frame = cam_obs.read()
                     cv2.imshow("Camera", frame)
                     cv2.waitKey(1)
                 except Exception as e:
                     print(f"\n⚠️  Camera error: {e}\n")
 
-            # SpaceMouse
-            button_status = sm.get_button_status()
-            if button_status[1] and not button_status[0]: ### right button is held
-                xyz_fb = sm.get_latest_xyz()
-                xyz_fb[2] = -xyz_fb[2] 
-                xyz_fb = np.where(np.abs(xyz_fb) < deadzone, 0.0, xyz_fb)
-                fb.step(xyz_fb)
-                fb.update_plot() 
-            elif button_status[0] and not button_status[1]: ### left button is held
-                xyz_ur5 = sm.get_latest_xyz()
-
-                vel_linear = xyz_ur5[:3] * max_pos_speed * dt
-                vel_angular = xyz_ur5[3:] * max_rot_speed * dt
-                vel_angular[:] = 0
-                # if not sm.is_button_pressed(1):
-                #     vel_angular[:] = 0
-                # else:
-                #     vel_linear[:] = 0
-
-                # Update target pose
-                target_pose[:3] += vel_linear
-                if np.any(vel_angular != 0):
-                    drot = st.Rotation.from_euler('xyz', vel_angular)
-                    current_rot = st.Rotation.from_rotvec(target_pose[3:])
-                    target_pose[3:] = (drot * current_rot).as_rotvec()
-            
-            # Execute command
-                try:
-                    ur5.servo_tcp_pose(target_pose=target_pose,velocity=0.1,
-                                    acceleration=0.1,dt=dt,lookahead_time=0.1,gain=300)
-                except Exception as e:
-                    print(f"\nControl error: {e}")
-                    # Try to recover
-                    tcp_pose = ur5.get_tcp_pose()
-                    target_pose = tcp_pose.copy()
-
-            elif button_status[0] and button_status[1]:
-                print("======== RELEASING =========")
-                
-                fb.reset()  
-                fb.update_plot() 
-                fb.release()
-            # Collect data - ALL with SAME timestamp
+            # ── 5. Save to buffer (camera, TCP, PWM all at same settled pose) ─
             if is_recording:
                 if with_camera and camera_frame is None:
                     print("\n⚠️  Warning: No camera frame!\n")
@@ -427,18 +420,13 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
                     camera_frame=camera_frame
                 )
 
-            # Status
+            # ── 6. Status ─────────────────────────────────────────────────────
             iter_count += 1
             if iter_count % (frequency * 2) == 0:
-                status = "REC" if is_recording else "---"
+                status  = "REC" if is_recording else "---"
                 n_steps = len(episode_buffer) if is_recording else 0
                 cam_str = "CAM" if (with_camera and camera_frame is not None) else "---"
                 print(f"[{status}][{cam_str}] iter={iter_count:4d} eps={episode_count} steps={n_steps:3d}")
-
-            # Maintain frequency
-            elapsed = time.time() - loop_start
-            if elapsed < dt:
-                time.sleep(dt - elapsed)
 
     except KeyboardInterrupt:
         print("\n\nInterrupted!")
