@@ -45,14 +45,14 @@ PWM_MAX = 26
 # Default start pose (from collect_demos_with_camera.py)
 DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
 
-# Control frequency (Hz)
-CONTROL_FREQ = 5.0
+# Control frequency (Hz) — must match data collection frequency (demo_collect.py --frequency)
+CONTROL_FREQ = 10.0
 DT = 1.0 / CONTROL_FREQ
-FLOWBOT_FREQ = 5.0  # Flowbot command frequency — must match CONTROL_FREQ
+FLOWBOT_FREQ = 10.0  # Flowbot command frequency — must match CONTROL_FREQ
 
-# servo_l speed/acceleration (lower = smoother)
-SERVO_SPEED = 0.01      # m/s
-SERVO_ACCEL = 0.01     # m/s^2
+# servo_l speed/acceleration — match data collection (demo_collect.py velocity=0.1)
+SERVO_SPEED = 0.1       # m/s
+SERVO_ACCEL = 0.1      # m/s^2
 SERVO_LOOKAHEAD = 0.1   # s
 SERVO_GAIN = 300
 
@@ -405,19 +405,25 @@ class RobotDeployment:
                     action = actions[step_i]            # (9,)
                     pwm_int = self._execute_action(action)
 
-                    # Update obs buffer and get raw state for logging
+                    # Pace to CONTROL_FREQ first — let the robot move toward the target.
+                    # IMPORTANT: the sleep must come BEFORE reading the observation so that
+                    # obs[-1] captures where the robot IS after executing this action, not
+                    # where it was before (which is what the data collection script stores
+                    # at index t for step t: position = result of step t-1's command).
+                    # Reading before sleep would give obs[-1] ≈ action[step_i - 1], causing
+                    # the model to predict action[0] one step backward at every plan boundary.
+                    elapsed = time.time() - t_step_start
+                    sleep_time = DT - elapsed
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+
+                    # Update obs buffer AFTER robot has moved toward target
                     state_raw = self._update_obs_buffer()
 
                     if logger is not None:
                         logger.log_step(state_raw, action, pwm_int)
 
                     total_steps += 1
-
-                    # Pace to CONTROL_FREQ
-                    elapsed = time.time() - t_step_start
-                    sleep_time = DT - elapsed
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
 
         except KeyboardInterrupt:
             print("\n⚠️  Episode interrupted by user")
