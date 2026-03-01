@@ -28,16 +28,26 @@ import sys
 import time
 import argparse
 import numpy as np
+import cv2
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from collections import deque
 
 DEPLOY_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(DEPLOY_DIR)
-FLOWBOT_DIR = os.path.join(PROJECT_DIR, 'flowbot')
 sys.path.insert(0, PROJECT_DIR)
-sys.path.insert(0, FLOWBOT_DIR)
 
 from train.eval import DiffusionPolicyInference
+from hardware.ur5e_rtde import UR5eRobot
+from hardware.flowbot import flowbot
+from hardware.realsense_camera import RealSenseCamera
+
+# ── Constants (must match deploy_flowbot_w_policy.py) ─────────────────────────
+CONTROL_FREQ = 10.0
+DT = 1.0 / CONTROL_FREQ
+FLOWBOT_FREQ = 10.0
+PWM_MIN = 1
+PWM_MAX = 26
 
 
 def _preprocess_state(state_raw, state_min, state_range):
@@ -67,103 +77,168 @@ def _denormalize_actions(actions_norm, action_min, action_range):
 
 # ── Live mode ─────────────────────────────────────────────────────────────────
 
-def debug_live(policy, robot_ip, camera_id, num_steps=20, sleep_s=0.5):
+def debug_live(policy, robot_ip, flowbot_port=None,
+               num_steps=100, camera_width=640, camera_height=480,
+               image_size=(216, 288)):
     """
-    Continuously read live robot state + camera and print model predictions.
+    Continuously read live robot state + RealSense camera and print model predictions.
+    Matches the hardware setup and observation pipeline of deploy_flowbot_w_policy.py.
     The robot receives NO commands.
+
+    Args:
+        policy       : DiffusionPolicyInference instance
+        robot_ip     : UR5e IP address
+        flowbot_port : Serial port for Flowbot (e.g. /dev/ttyACM0).
+                       If None, zero PWM is used for the state vector.
+        num_steps    : Number of inference steps to run
+        camera_width : RealSense capture width
+        camera_height: RealSense capture height
+        image_size   : (H, W) to resize/crop images to (must match training)
     """
-    import cv2
-    try:
-        import rtde_receive
-    except ImportError:
-        print("❌ rtde_receive not installed.")
-        return
+    import torch
 
-    config      = policy.config
-    obs_horizon = config['obs_horizon']
-    image_size  = tuple(config['image_size'])
-    state_min   = policy.checkpoint['state_min']
-    state_range = policy.checkpoint['state_range']
-    action_min  = policy.checkpoint['action_min']
-    action_range= policy.checkpoint['action_range']
+    config         = policy.config
+    obs_horizon    = config['obs_horizon']
+    action_horizon = config['action_horizon']
+    image_size_tup = tuple(image_size)
+    state_min      = policy.checkpoint['state_min']
+    state_range    = policy.checkpoint['state_range']
+    action_min     = policy.checkpoint['action_min']
+    action_range   = policy.checkpoint['action_range']
 
-    try:
-        from flowbot import Flowbot
-        fb = Flowbot()    # default port; read-only, no commands
-        time.sleep(2.0)
+    # ── Hardware setup (same as RobotDeployment.__init__) ─────────────────────
+    print(f"\n[1/3] Opening RealSense camera ({camera_width}x{camera_height}) ...")
+    cam = RealSenseCamera(width=camera_width, height=camera_height, enable_depth=False)
+    print("      Camera OK")
+
+    print(f"\n[2/3] Connecting to UR5e at {robot_ip} ...")
+    ur5 = UR5eRobot(robot_ip=robot_ip, frequency=CONTROL_FREQ)
+    print("      UR5e connected")
+
+    has_flowbot = False
+    fb = None
+    if flowbot_port is not None:
+        print(f"\n[3/3] Connecting to Flowbot on {flowbot_port} ...")
+        fb = flowbot(serial_port=flowbot_port,
+                     pwm_min=PWM_MIN,
+                     pwm_max=PWM_MAX,
+                     enable_plot=False,
+                     frequency=FLOWBOT_FREQ,
+                     max_pos_speed=30)
+        fb.start()
+        time.sleep(2.0)   # Arduino reset delay
         has_flowbot = True
-    except Exception:
-        has_flowbot = False
-        print("⚠️  Flowbot not connected — using zero PWM for state")
+        print("      Flowbot connected")
+    else:
+        print("\n[3/3] Flowbot skipped — using zero PWM for state")
 
-    print(f"\nConnecting to UR5e at {robot_ip} ...")
-    rtde_r = rtde_receive.RTDEReceiveInterface(robot_ip)
+    # ── Observation helpers (matching RobotDeployment._get_raw_observation) ───
+    def get_raw_obs():
+        tcp_pose  = ur5.get_tcp_pose()                                       # (6,)
+        pwm       = np.array(fb.last_pwm if has_flowbot else [0, 0, 0],
+                             dtype=np.float32)                               # (3,)
+        state_raw = np.concatenate([tcp_pose, pwm])                         # (9,)
 
-    print(f"Opening camera id={camera_id} ...")
-    cap = cv2.VideoCapture(camera_id)
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open camera {camera_id}")
-    for _ in range(5):
-        cap.read()
+        camera_frame, _ = cam.get_frames()
+        if camera_frame is None:
+            raise RuntimeError("Camera read failed")
 
-    from collections import deque
+        # Centre-crop + resize (identical to dataset.py & deploy_flowbot_w_policy.py)
+        h, w          = camera_frame.shape[:2]
+        target_h, target_w = image_size_tup
+        crop_h = min(h, int(target_h * 1.5))
+        crop_w = min(w, int(target_w * 1.5))
+        sh = (h - crop_h) // 2
+        sw = (w - crop_w) // 2
+        img = camera_frame[sh:sh + crop_h, sw:sw + crop_w]
+        img = cv2.resize(img, (target_w, target_h))
+        return state_raw, img
+
+    def preprocess_state(s):
+        return (2.0 * (s - state_min) / state_range - 1.0).astype(np.float32)
+
+    def preprocess_image(img):
+        img = (img.astype(np.float32) / 127.5) - 1.0
+        return img.transpose(2, 0, 1)   # (3, H, W)
+
+    # ── Fill observation buffers ───────────────────────────────────────────────
     state_buf = deque(maxlen=obs_horizon)
     image_buf = deque(maxlen=obs_horizon)
 
-    # ── Fill buffers ──────────────────────────────────────────────────────────
-    print("Filling observation buffer ...")
+    print("\nFilling observation buffer ...")
+    state_raw, img_raw = get_raw_obs()
     for _ in range(obs_horizon):
-        tcp = np.array(rtde_r.getActualTCPPose(), dtype=np.float32)
-        pwm = np.array(fb.last_pwm if has_flowbot else [0, 0, 0], dtype=np.float32)
-        state_raw = np.concatenate([tcp, pwm])
-        state_norm = _preprocess_state(state_raw, state_min, state_range)
-        state_buf.append(state_norm)
+        state_buf.append(preprocess_state(state_raw).copy())
+        image_buf.append(preprocess_image(img_raw).copy())
 
-        ret, frame = cap.read()
-        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image_norm = _preprocess_image(image_rgb, image_size)
-        image_buf.append(image_norm)
+    print(f"\nRunning {num_steps} prediction steps at {CONTROL_FREQ:.0f} Hz "
+          f"(robot NOT commanded) ...\n")
 
-    print(f"\nRunning {num_steps} prediction steps (robot NOT commanded) ...\n")
+    try:
+        for step in range(num_steps):
+            t_step = time.time()
 
-    import torch
-    for step in range(num_steps):
-        obs_state = torch.from_numpy(np.stack(list(state_buf))).unsqueeze(0)   # (1,T,9)
-        obs_image = torch.from_numpy(np.stack(list(image_buf))).unsqueeze(0)   # (1,T,3,H,W)
+            obs_state = torch.from_numpy(
+                np.stack(list(state_buf))        # (obs_horizon, 9)
+            ).unsqueeze(0)                       # (1, obs_horizon, 9)
+            obs_image = torch.from_numpy(
+                np.stack(list(image_buf))        # (obs_horizon, 3, H, W)
+            ).unsqueeze(0)                       # (1, obs_horizon, 3, H, W)
 
-        t0 = time.time()
-        actions_norm = policy.predict(
-            obs_state.squeeze(0), obs_image.squeeze(0)
-        ).numpy()
-        infer_ms = (time.time() - t0) * 1000
+            t_infer = time.time()
+            actions_norm = policy.predict(
+                obs_state.squeeze(0), obs_image.squeeze(0)
+            ).numpy()                            # (pred_horizon, 9)
+            infer_ms = (time.time() - t_infer) * 1000
 
-        actions = _denormalize_actions(actions_norm, action_min, action_range)
+            actions = _denormalize_actions(actions_norm, action_min, action_range)
 
-        # Print first action in the plan
-        a0 = actions[0]
-        tcp_now = np.array(rtde_r.getActualTCPPose())
-        pwm_now = np.array(fb.last_pwm if has_flowbot else [0, 0, 0])
+            # ── Print ─────────────────────────────────────────────────────────
+            tcp_now = state_raw[:6]
+            pwm_now = state_raw[6:].astype(int)
 
-        print(f"Step {step+1:3d}  [{infer_ms:.0f} ms]")
-        print(f"  Current  TCP: [{tcp_now[0]:.3f}, {tcp_now[1]:.3f}, {tcp_now[2]:.3f}]  "
-              f"PWM: {pwm_now.tolist()}")
-        print(f"  Pred[0]  TCP: [{a0[0]:.3f}, {a0[1]:.3f}, {a0[2]:.3f}]  "
-              f"PWM: [{a0[6]:.1f}, {a0[7]:.1f}, {a0[8]:.1f}]")
+            print(f"\n{'='*62}")
+            print(f"Step {step+1:3d}/{num_steps}  [inference: {infer_ms:.0f} ms]")
+            print(f"  Current  TCP: [{tcp_now[0]:.3f}, {tcp_now[1]:.3f}, {tcp_now[2]:.3f}]  "
+                  f"PWM: {pwm_now.tolist()}")
+            print(f"  Predicted {action_horizon} actions (action_horizon):")
+            for i in range(action_horizon):
+                a = actions[i]
+                delta_x = a[0] - tcp_now[0]
+                print(f"    [{i:2d}] TCP: [{a[0]:.3f}, {a[1]:.3f}, {a[2]:.3f}]  "
+                      f"ΔX={delta_x:+.3f}  "
+                      f"PWM: [{a[6]:.1f}, {a[7]:.1f}, {a[8]:.1f}]")
 
-        # Update buffers
-        tcp = np.array(rtde_r.getActualTCPPose(), dtype=np.float32)
-        pwm = np.array(fb.last_pwm if has_flowbot else [0, 0, 0], dtype=np.float32)
-        state_raw = np.concatenate([tcp, pwm])
-        state_buf.append(_preprocess_state(state_raw, state_min, state_range))
+            # ── Pace to CONTROL_FREQ, then update obs buffer ───────────────────
+            # Sleep BEFORE reading obs (same pattern as deploy_flowbot_w_policy.py)
+            elapsed = time.time() - t_step
+            sleep_time = DT - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
-        ret, frame = cap.read()
-        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image_buf.append(_preprocess_image(image_rgb, image_size))
+            state_raw, img_raw = get_raw_obs()
+            state_buf.append(preprocess_state(state_raw))
+            image_buf.append(preprocess_image(img_raw))
 
-        time.sleep(sleep_s)
+    except KeyboardInterrupt:
+        print("\n⚠️  Interrupted by user")
 
-    cap.release()
-    rtde_r.disconnect()
+    finally:
+        print("\nCleaning up ...")
+        try:
+            ur5.disconnect()
+        except Exception:
+            pass
+        if fb is not None:
+            try:
+                fb.stop()
+            except Exception:
+                pass
+        try:
+            cam.stop()
+        except Exception:
+            pass
+        print("✅ Debug live done")
 
 
 # ── Offline mode ──────────────────────────────────────────────────────────────
@@ -332,14 +407,20 @@ def main():
                         help='Inference device (cpu recommended for debugging)')
 
     # Live mode
-    parser.add_argument('--robot_ip',     type=str, default=None,
-                        help='UR5e IP for live mode')
-    parser.add_argument('--camera_id',    type=int, default=0,
-                        help='Camera device ID for live mode')
-    parser.add_argument('--num_steps',    type=int, default=20,
+    parser.add_argument('--robot_ip',      type=str,   default="150.65.146.87",
+                        help='UR5e IP address')
+    parser.add_argument('--flowbot_port',  type=str,   default=None,
+                        help='Flowbot serial port (e.g. /dev/ttyACM0). '
+                             'If omitted, zero PWM is used for state.')
+    parser.add_argument('--num_steps',     type=int,   default=100,
                         help='Number of prediction steps (live mode)')
-    parser.add_argument('--sleep',        type=float, default=0.5,
-                        help='Sleep between steps in seconds (live mode)')
+    parser.add_argument('--camera_width',  type=int,   default=640,
+                        help='RealSense capture width')
+    parser.add_argument('--camera_height', type=int,   default=480,
+                        help='RealSense capture height')
+    parser.add_argument('--image_size',    type=int,   nargs=2, default=[216, 288],
+                        metavar=('H', 'W'),
+                        help='Image crop/resize size fed to the policy (default: 216 288)')
 
     # Offline mode
     parser.add_argument('--dataset_path', type=str, default=None,
@@ -363,8 +444,15 @@ def main():
         debug_offline(policy, args.dataset_path, args.episode)
     elif args.robot_ip is not None:
         # Live mode
-        debug_live(policy, args.robot_ip, args.camera_id,
-                   num_steps=args.num_steps, sleep_s=args.sleep)
+        debug_live(
+            policy,
+            robot_ip=args.robot_ip,
+            flowbot_port=args.flowbot_port,
+            num_steps=args.num_steps,
+            camera_width=args.camera_width,
+            camera_height=args.camera_height,
+            image_size=tuple(args.image_size),
+        )
     else:
         print("❌ Provide either --robot_ip (live) or --dataset_path (offline)")
         return 1
