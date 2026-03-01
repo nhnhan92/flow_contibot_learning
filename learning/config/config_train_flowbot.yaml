@@ -37,7 +37,7 @@ ema_max_value: 0.9999  # EMA adaptive decay upper bound (UNet-only, Stanford def
 seed: 42
 
 # LR schedule: linear warmup → cosine decay
-warmup_epochs: 500     # Linear warmup from 0 → peak_lr over first 500 epochs (~16%)
+warmup_epochs: 200     # Linear warmup from 0 → peak_lr over first 500 epochs (~16%)
 lr_min_factor: 0.01    # Cosine decays to peak_lr * 0.01 at the end
 
 # Data
