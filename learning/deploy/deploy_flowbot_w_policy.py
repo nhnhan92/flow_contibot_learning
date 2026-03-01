@@ -405,19 +405,25 @@ class RobotDeployment:
                     action = actions[step_i]            # (9,)
                     pwm_int = self._execute_action(action)
 
-                    # Update obs buffer and get raw state for logging
+                    # Pace to CONTROL_FREQ first — let the robot move toward the target.
+                    # IMPORTANT: the sleep must come BEFORE reading the observation so that
+                    # obs[-1] captures where the robot IS after executing this action, not
+                    # where it was before (which is what the data collection script stores
+                    # at index t for step t: position = result of step t-1's command).
+                    # Reading before sleep would give obs[-1] ≈ action[step_i - 1], causing
+                    # the model to predict action[0] one step backward at every plan boundary.
+                    elapsed = time.time() - t_step_start
+                    sleep_time = DT - elapsed
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+
+                    # Update obs buffer AFTER robot has moved toward target
                     state_raw = self._update_obs_buffer()
 
                     if logger is not None:
                         logger.log_step(state_raw, action, pwm_int)
 
                     total_steps += 1
-
-                    # Pace to CONTROL_FREQ
-                    elapsed = time.time() - t_step_start
-                    sleep_time = DT - elapsed
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
 
         except KeyboardInterrupt:
             print("\n⚠️  Episode interrupted by user")
@@ -466,7 +472,7 @@ def main():
                         help='Arduino serial port for Flowbot')
     parser.add_argument('--flowbot_baud',  type=int,   default=115200,
                         help='Flowbot serial baud rate')
-    parser.add_argument('--max_steps',     type=int,   default=300,
+    parser.add_argument('--max_steps',     type=int,   default=320,
                         help='Max steps per episode')
     parser.add_argument('--num_episodes',  type=int,   default=1,
                         help='Number of episodes to run')
