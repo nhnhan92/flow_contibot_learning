@@ -46,13 +46,13 @@ PWM_MAX = 26
 DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
 
 # Control frequency (Hz)
-CONTROL_FREQ = 5.0
+CONTROL_FREQ = 10.0
 DT = 1.0 / CONTROL_FREQ
-FLOWBOT_FREQ = 5.0  # Flowbot command frequency — must match CONTROL_FREQ
+FLOWBOT_FREQ = 10.0  # Flowbot command frequency — must match CONTROL_FREQ
 
 # servo_l speed/acceleration (lower = smoother)
-SERVO_SPEED = 0.01      # m/s
-SERVO_ACCEL = 0.01     # m/s^2
+SERVO_SPEED = 0.1      # m/s
+SERVO_ACCEL = 0.1     # m/s^2
 SERVO_LOOKAHEAD = 0.1   # s
 SERVO_GAIN = 300
 
@@ -533,3 +533,38 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+#     Step 56 | Plan time: 49.8 ms
+# [PYTHON] Sent: 1 1 1
+#   TCP: [0.096, -0.466, 0.411]  PWM: [1, 1, 1]
+# [PYTHON] Sent: 1 1 1
+#   TCP: [0.086, -0.468, 0.412]  PWM: [1, 1, 1]
+# [PYTHON] Sent: 1 1 1
+#   TCP: [0.082, -0.469, 0.408]  PWM: [1, 1, 1]
+# [PYTHON] Sent: 1 1 1
+#   TCP: [0.073, -0.471, 0.405]  PWM: [1, 1, 1]
+# [PYTHON] Sent: 1 1 1
+#   TCP: [0.069, -0.472, 0.405]  PWM: [1, 1, 1]
+# [PYTHON] Sent: 1 1 1
+#   TCP: [0.061, -0.472, 0.404]  PWM: [1, 1, 1]
+# [PYTHON] Sent: 1 1 1
+#   TCP: [0.056, -0.474, 0.403]  PWM: [1, 1, 1]
+# [PYTHON] Sent: 1 1 1
+#   TCP: [0.050, -0.474, 0.404]  PWM: [1, 1, 1]
+
+# Step 64 | Plan time: 50.1 ms
+# [PYTHON] Sent: 1 1 1
+#   TCP: [0.075, -0.468, 0.408]  PWM: [1, 1, 1]
+# [PYTHON] Sent: 1 1 1
+#   TCP: [0.067, -0.470, 0.408]  PWM: [1, 1, 1]
+# [PYTHON] Sent: 1 1 1
+#   TCP: [0.062, -0.471, 0.408]  PWM: [1, 1, 1]
+# [PYTHON] Sent: 1 1 1
+#   TCP: [0.055, -0.472, 0.409]  PWM: [1, 1, 1]
+# [PYTHON] Sent: 1 1 1
+#   TCP: [0.049, -0.474, 0.407]  PWM: [1, 1, 1]
+# [PYTHON] Sent: 1 1 1
+#   TCP: [0.043, -0.475, 0.407]  PWM: [1, 1, 1]
+# [PYTHON] Sent: 1 1 1
+#   TCP: [0.037, -0.477, 0.405]  PWM: [1, 1, 1]
+# [PYTHON] Sent: 1 1 1
+#   TCP: [0.031, -0.479, 0.405]  PWM: [1, 1, 1]
