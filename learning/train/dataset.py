@@ -21,12 +21,16 @@ class PickPlaceDataset(Dataset):
         - robot_eef_pose: (T, 6) - UR5e end-effector TCP pose [x, y, z, rx, ry, rz]
         - robot_joint:    (T, 6) - UR5e joint angles (not used for training)
         - pwm_signals:    (T, 3) - Flowbot PWM signals [pwm1, pwm2, pwm3]
-        - action:         (T, 6) - commanded UR5e target TCP pose (not used; we use future eef_pose)
+        - action:         (T, 6) - commanded UR5e target TCP pose (spacemouse target)
         - camera_0:       (T, H, W, 3) - RGB images
         - timestamp:      (T,) - timestamps
 
     State  (9D): robot_eef_pose (6D) + pwm_signals (3D)
-    Action (9D): future robot_eef_pose (6D) + future pwm_signals (3D)
+    Action (9D): target TCP pose from data/action (6D) + pwm_signals (3D)
+
+    Using data/action (commanded target_pose) rather than data/robot_eef_pose for action
+    labels ensures action[0] != obs[-1]: the first predicted action is the command that
+    moves the robot forward, not a copy of the current position.
     """
 
     def __init__(
@@ -107,38 +111,43 @@ class PickPlaceDataset(Dataset):
 
         if total_len <= FULL_SCAN_THRESHOLD:
             # Load everything — guaranteed correct min/max
-            robot_states_all = self.zarr_root['data/robot_eef_pose'][:]  # (T, 6)
-            pwm_states_all   = self.zarr_root['data/pwm_signals'][:]     # (T, 3)
-            robot_states = robot_states_all
-            pwm_states   = pwm_states_all
+            robot_states  = self.zarr_root['data/robot_eef_pose'][:]  # (T, 6)
+            pwm_states    = self.zarr_root['data/pwm_signals'][:]     # (T, 3)
+            robot_actions = self.zarr_root['data/action'][:]          # (T, 6) target_pose
             print(f"  Using all {total_len} frames for stats")
         else:
             # Seeded random sample — reproducible across runs
             rng = np.random.RandomState(42)
             sample_indices = sorted(rng.choice(total_len, 5000, replace=False))
-            robot_states = self.zarr_root['data/robot_eef_pose'].oindex[sample_indices]
-            pwm_states   = self.zarr_root['data/pwm_signals'].oindex[sample_indices]
+            robot_states  = self.zarr_root['data/robot_eef_pose'].oindex[sample_indices]
+            pwm_states    = self.zarr_root['data/pwm_signals'].oindex[sample_indices]
+            robot_actions = self.zarr_root['data/action'].oindex[sample_indices]
             print(f"  Using 5000/{total_len} seeded-random frames for stats")
 
-        robot_states = np.array(robot_states)  # (N, 6)
-        pwm_states = np.array(pwm_states)      # (N, 3)
+        robot_states  = np.array(robot_states)   # (N, 6)
+        pwm_states    = np.array(pwm_states)     # (N, 3)
+        robot_actions = np.array(robot_actions)  # (N, 6)
 
         eps = 1e-6
 
-        # State: robot_pose (6D) + pwm (3D) = 9D
+        # State: actual robot_eef_pose (6D) + pwm (3D) = 9D
         self.state_min = np.concatenate([robot_states.min(0), pwm_states.min(0)])
         self.state_max = np.concatenate([robot_states.max(0), pwm_states.max(0)])
         self.state_range = self.state_max - self.state_min + eps
 
-        # Action uses the same structure (future robot_pose + future pwm)
-        self.action_min = self.state_min.copy()
-        self.action_max = self.state_max.copy()
-        self.action_range = self.state_range.copy()
+        # Action: commanded target_pose (6D) + pwm (3D) = 9D  — stats from data/action
+        self.action_min = np.concatenate([robot_actions.min(0), pwm_states.min(0)])
+        self.action_max = np.concatenate([robot_actions.max(0), pwm_states.max(0)])
+        self.action_range = self.action_max - self.action_min + eps
 
-        print(f"  State/Action range (XYZ): "
+        print(f"  State  range (XYZ): "
               f"X=[{self.state_min[0]:.4f}, {self.state_max[0]:.4f}], "
               f"Y=[{self.state_min[1]:.4f}, {self.state_max[1]:.4f}], "
               f"Z=[{self.state_min[2]:.4f}, {self.state_max[2]:.4f}]")
+        print(f"  Action range (XYZ): "
+              f"X=[{self.action_min[0]:.4f}, {self.action_max[0]:.4f}], "
+              f"Y=[{self.action_min[1]:.4f}, {self.action_max[1]:.4f}], "
+              f"Z=[{self.action_min[2]:.4f}, {self.action_max[2]:.4f}]")
         print(f"  PWM range: "
               f"[{self.state_min[6]:.1f}, {self.state_max[6]:.1f}], "
               f"[{self.state_min[7]:.1f}, {self.state_max[7]:.1f}], "
@@ -214,10 +223,12 @@ class PickPlaceDataset(Dataset):
         else:
             images = np.zeros((self.obs_horizon, 3, *self.image_size), dtype=np.float32)
 
-        # Future actions: robot_eef_pose (6D) + pwm_signals (3D) = 9D
+        # Future actions: target_pose from data/action (6D) + pwm_signals (3D) = 9D
+        # Using data/action (commanded target_pose) instead of data/robot_eef_pose so that
+        # action[0] != obs[-1]: the spacemouse target is always ahead of the actual TCP.
         action_start = sample_idx
         action_end = sample_idx + self.pred_horizon
-        robot_actions = self.zarr_root['data/robot_eef_pose'][action_start:action_end]
+        robot_actions = self.zarr_root['data/action'][action_start:action_end]
         pwm_actions = self.zarr_root['data/pwm_signals'][action_start:action_end].astype(np.float32)
 
         actions = np.concatenate([robot_actions, pwm_actions], axis=-1)  # (pred_horizon, 9)
@@ -256,8 +267,10 @@ def test_dataset():
     print(f"  obs_image shape: {sample['obs_image'].shape}")   # (2, 3, H, W)
     print(f"  actions shape:   {sample['actions'].shape}")     # (16, 9)
 
-    print(f"\n  State (t):  pose={sample['obs_state'][-1, :6]}, pwm={sample['obs_state'][-1, 6:]}")
-    print(f"  Action [0]: pose={sample['actions'][0, :6]},     pwm={sample['actions'][0, 6:]}")
+    print(f"\n  State (t):   pose={sample['obs_state'][-1, :6]}, pwm={sample['obs_state'][-1, 6:]}")
+    print(f"  Action [0]:  pose={sample['actions'][0, :6]},    pwm={sample['actions'][0, 6:]}")
+    print(f"\n  Δpose (action[0] - obs[-1]): {sample['actions'][0, :6] - sample['obs_state'][-1, :6]}")
+    print(f"  (should be non-zero — action[0] is target_pose, not current position)")
 
 
 if __name__ == '__main__':
