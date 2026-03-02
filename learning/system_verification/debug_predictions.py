@@ -46,7 +46,7 @@ from hardware.realsense_camera import RealSenseCamera
 CONTROL_FREQ = 10.0
 DT = 1.0 / CONTROL_FREQ
 FLOWBOT_FREQ = 10.0
-PWM_MIN = 1
+PWM_MIN = 0   # 0 = fully deflated (release)
 PWM_MAX = 26
 
 

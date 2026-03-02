@@ -39,7 +39,7 @@ from hardware.realsense_camera import RealSenseCamera
 from train.eval import DiffusionPolicyInference
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-PWM_MIN = 1
+PWM_MIN = 0   # 0 = fully deflated (release); model must be able to command this
 PWM_MAX = 26
 
 # Default start pose (from collect_demos_with_camera.py)
