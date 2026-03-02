@@ -192,8 +192,8 @@ def move_2_init_pos(ur5, start_pose, goal_pose, dt, duration=5.0,
         time.sleep(dt)
 
 @click.command()
-@click.option('--output', '-o', required=True, default = 'demo_data', help='output folder name')
-@click.option('--robot_ip', '-ri', required=True, default = '192.168.11.20', help='UR5e IP')
+@click.option('--output', '-o', required=True, default = None, help='output folder name')
+@click.option('--robot_ip', '-ri', required=True, default = '150.65.146.87', help='UR5e IP')
 @click.option('--arduino_port', default="/dev/ttyACM0")
 @click.option('--camera_serial', help='RealSense serial (auto-detect if None)')
 @click.option('--no_camera', is_flag=True, help='Run without camera')
@@ -201,10 +201,10 @@ def move_2_init_pos(ur5, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--camera_height', default=480, type=int, help='Camera height')
 @click.option('--camera_fps', default=30, type=int, help='Camera FPS')
 @click.option('--frequency', '-f', default=10.0, type=float, help='Control Hz')
-@click.option('--flowbot_freqency', '-fb_freq', default=30.0, type=float, help='Control Hz for flowbot')
-@click.option('--max_pos_speed', default=0.1, type=float)
-@click.option('--max_rot_speed', default=0.2, type=float)
-@click.option('--deadzone', default=0.1, type=float, help='Spacemouse threshold')
+@click.option('--flowbot_freqency', '-fb_freq', default=10.0, type=float, help='Control Hz for flowbot')
+@click.option('--max_pos_speed', default=0.07, type=float)
+@click.option('--max_rot_speed', default=0.05, type=float)
+@click.option('--deadzone', default=0.2, type=float, help='Spacemouse threshold')
 def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height,
          camera_fps, arduino_port,flowbot_freqency, frequency, max_pos_speed, max_rot_speed,deadzone):
 
@@ -213,11 +213,15 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
     print("="*60)
 
     # Create output
-    parent_dir = Path(__file__).parent.parent
-    output_dir = Path(parent_dir / "data" / output)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"\nOutput: {output_dir}")
-
+    if output is None:
+        parent_dir = Path(__file__).parent.parent
+        output_dir = Path(parent_dir / "data" / "demo_data")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"\nOutput: {output_dir}")
+    else:
+        output_dir = Path(output)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"\nOutput: {output_dir}")
     # Initialize camera
     camera = None
     with_camera = not no_camera
@@ -270,7 +274,7 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
 
     # Connect SpaceMouse
     print("\nConnecting SpaceMouse...")
-    sm = _build_spacemouse(os_name=os_name)
+    sm = _build_spacemouse(os_name=os_name, deadzone=deadzone)
     sm.start()
     print("✅ SpaceMouse connected!")
 
