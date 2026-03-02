@@ -73,7 +73,7 @@ class flowbot:
         
         if initial_pwm is None:
             # Start pc at workspace "origin": pwm = [1,1,1] if pwm_min=0, which is just above the minimum to avoid numerical issues in the model
-            pwm = np.array([self.pwm_min + 1, self.pwm_min +1 , self.pwm_min+1], dtype=int)  # [1,1,1] if pwm_min=0
+            pwm = np.array([self.pwm_min, self.pwm_min , self.pwm_min], dtype=int)  # [1,1,1] if pwm_min=0
             pb0 = self.flowbot.pwm_to_pressure(pwm)
             fk0 = self.flowbot.forward_kinematics_from_pressures(pb0)
             self.pc_init = np.asarray(fk0["pc"], dtype=float).reshape(3,)
@@ -232,8 +232,6 @@ class flowbot:
             print("IK failed:", e)
             pwm = np.array([0, 0, 0], dtype=np.int32)
 
-        if self.last_pwm is None or not np.array_equal(pwm, self.last_pwm):
-            cmd = f"{int(pwm[0])} {int(pwm[1])} {int(pwm[2])}\n"
         self.last_pwm = pwm
         self.serial_sending(pwm)
 
@@ -258,6 +256,7 @@ class flowbot:
             self.pl.update_point_handle(self.pc_handles,p)
 
     def release(self):
+
         cmd = "r\n"
         try:
             self.ser.write(cmd.encode("ascii"))

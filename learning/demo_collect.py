@@ -328,13 +328,14 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
                 elif key in ['r', 'R']:
                     print("\nResetting robot to initial pose...")
                     try:
+                        fb.reset()  # Reset flowbot
+                        fb.update_plot()
                         tcp_pose = ur5.get_tcp_pose()
-                        move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, duration=5.0, gain=150)
+                        move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, duration=3.0, gain=150)
                         print(f"✅ Robot reset to initial pose!\n")
                         target_pose = init_pose.copy()
 
-                        fb.reset()  # Reset flowbot
-                        fb.update_plot()
+                        
                     except Exception as e:
                         print(f"⚠️  Failed to reset robot: {e}\n")
                 elif key in ['c', 'C']:
