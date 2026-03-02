@@ -386,10 +386,12 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
                     drot = st.Rotation.from_euler('xyz', vel_angular)
                     current_rot = st.Rotation.from_rotvec(target_pose[3:])
                     target_pose[3:] = (drot * current_rot).as_rotvec()
+                    
 
                 try:
                     ur5.servo_tcp_pose(target_pose=target_pose, velocity=0.1,
                                        acceleration=0.1, dt=dt, lookahead_time=0.1, gain=300)
+                    print(f"Target pose updated: [{', '.join([f'{x:.3f}' for x in target_pose[:3]])}]")
                 except Exception as e:
                     print(f"\nControl error: {e}")
                     tcp_pose = ur5.get_tcp_pose()
