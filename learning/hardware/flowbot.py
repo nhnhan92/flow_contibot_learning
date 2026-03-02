@@ -72,8 +72,8 @@ class flowbot:
         self.ws, self.tri, self.bbox = self.load_workspace(self.flowbot)
         
         if initial_pwm is None:
-            # Start pc at workspace "origin": pwm = [5,5,5]
-            pwm = np.array([self.pwm_min, self.pwm_min, self.pwm_min], dtype=int)  # [5,5,5] if pwm_min=5
+            # Start pc at workspace "origin": pwm = [1,1,1] if pwm_min=0, which is just above the minimum to avoid numerical issues in the model
+            pwm = np.array([self.pwm_min + 1, self.pwm_min +1 , self.pwm_min+1], dtype=int)  # [1,1,1] if pwm_min=0
             pb0 = self.flowbot.pwm_to_pressure(pwm)
             fk0 = self.flowbot.forward_kinematics_from_pressures(pb0)
             self.pc_init = np.asarray(fk0["pc"], dtype=float).reshape(3,)

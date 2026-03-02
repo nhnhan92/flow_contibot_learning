@@ -205,8 +205,12 @@ def move_2_init_pos(ur5, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--max_pos_speed', default=0.07, type=float)
 @click.option('--max_rot_speed', default=0.05, type=float)
 @click.option('--deadzone', default=0.2, type=float, help='Spacemouse threshold')
+@click.option('--release_frames', default=10, type=int,
+              help='Frames to record after release (both-button press). '
+                   'At 10 Hz the default of 10 gives 1 s of released state.')
 def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height,
-         camera_fps, arduino_port,flowbot_freqency, frequency, max_pos_speed, max_rot_speed,deadzone):
+         camera_fps, arduino_port, flowbot_freqency, frequency, max_pos_speed,
+         max_rot_speed, deadzone, release_frames):
 
     print("="*60)
     print("   PICK-PLACE DATA COLLECTION WITH CAMERA")
@@ -399,9 +403,49 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
 
             elif button_status[0] and button_status[1]:            # both btns: release
                 print("======== RELEASING =========")
-                fb.reset()
+                fb.reset()        # sets last_pwm = [0,0,0] and sends "0 0 0"
                 fb.update_plot()
-                fb.release()
+                fb.release()      # sends 'r' hardware command
+
+                # ── Record release burst so the model learns the end state ────
+                # Capture `release_frames` steps at PWM=0 while holding robot
+                # position. Without this, the operator pressing 's' immediately
+                # after release would save 0 release frames in the episode.
+                if is_recording:
+                    print(f"  Recording {release_frames} release frames ...")
+                    for _ in range(release_frames):
+                        # Hold robot at current target during release
+                        try:
+                            ur5.servo_tcp_pose(target_pose=target_pose, velocity=0.1,
+                                               acceleration=0.1, dt=dt,
+                                               lookahead_time=0.1, gain=300)
+                        except Exception:
+                            pass
+
+                        # Sleep → observe (same pattern as main loop step 3→4)
+                        time.sleep(dt)
+
+                        rel_frame = None
+                        if with_camera and camera:
+                            try:
+                                rel_frame, _ = camera.get_frames()
+                            except Exception:
+                                pass
+
+                        if with_camera and rel_frame is None:
+                            continue
+
+                        rel_tcp    = ur5.get_tcp_pose()
+                        rel_joints = ur5.get_joint_angles()
+                        episode_buffer.add(
+                            timestamp=time.time(),
+                            robot_state=rel_tcp,
+                            joint_state=rel_joints,
+                            action=target_pose,      # robot not moving
+                            pwm_signals=fb.last_pwm, # = [0,0,0] after reset
+                            camera_frame=rel_frame,
+                        )
+                    print(f"  Release recorded ({release_frames} steps, PWM={fb.last_pwm.tolist()})")
 
             # ── 3. Sleep BEFORE reading observations ──────────────────────────
 
