@@ -48,7 +48,7 @@ int base3 = 148;
 int pww_init1 = base1 + pwm_init_extra;
 int pww_init2 = base2 + pwm_init_extra;
 int pww_init3 = base3 + pwm_init_extra;
-int init_min = 135;
+int init_min = 140;
 
 void applyPwm() {
   analogWrite(VALVE1_PIN, pwm1_cur);
