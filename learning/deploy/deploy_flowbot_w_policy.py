@@ -322,7 +322,6 @@ class RobotDeployment:
         Send one action step to the robot and flowbot, gated by predicted operation mode.
 
         Args:
-<<<<<<< HEAD
             action : np.ndarray (11,) — [x,y,z,rx,ry,rz, pwm1,pwm2,pwm3, ur5_active, flowbot_active]
 
         Returns:
@@ -348,25 +347,6 @@ class RobotDeployment:
 
         # Update tracked op_mode for next observation
         self.current_op_mode = op_mode_pred.astype(np.float32)
-=======
-            action : np.ndarray (9,) — [x,y,z,rx,ry,rz, pwm1,pwm2,pwm3]
-        """
-        # Flowbot: clamp, round to int, send
-        pwm_raw   = action[6:]
-        pwm_int   = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
-        tcp_target = action[:6].tolist()
-        if any(pwm_int[i] >= 1 for i in range(3)):
-            if not np.array_equal(pwm_int[:2], self.current_pwm[:2]) \
-            and any(pwm_int[i] > self.current_pwm[i] for i in range(2)):
-                print(pwm_int[:2], self.current_pwm[:2])
-                self.current_pwm = pwm_int.copy()
-                self.fb.serial_sending(pwm_int)
-                time.sleep(0.5)  # Small delay to ensure command is sent before next step
-        else: # UR5e: servo to target TCP pose (non-blocking)
-            
-            self.ur5.servo_tcp_pose(target_pose=tcp_target,velocity=SERVO_SPEED,
-                                    acceleration=SERVO_ACCEL,dt=DT,lookahead_time=SERVO_LOOKAHEAD,gain=SERVO_GAIN)
->>>>>>> eb51807fa86e193e050802f42b31631e3b9f9748
 
         if self.verbose:
             tcp = np.array(tcp_target, dtype=np.float32)
