@@ -429,11 +429,7 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
                 fb.reset()        # sets last_pwm = [0,0,0] and sends "0 0 0"
                 fb.update_plot()
                 fb.release()      # sends 'r' hardware command
-
-                # ── Record release burst so the model learns the end state ────
-                # Capture `release_frames` steps at PWM=0 while holding robot
-                # position. Without this, the operator pressing 's' immediately
-                # after release would save 0 release frames in the episode.
+ 
                 if is_recording:
                     print(f"  Recording {release_frames} release frames ...")
                     for _ in range(release_frames):

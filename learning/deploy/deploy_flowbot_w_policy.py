@@ -13,8 +13,8 @@ Hardware:
     - Flowbot soft pneumatic manipulator (3 valves via Arduino serial)
     - Intel RealSense camera (auto-detected)
 
-State  (11D): robot_eef_pose (6D: x,y,z,rx,ry,rz) + flowbot pwm (3D) + operation_mode (2D)
-Action (11D): target robot_eef_pose (6D) + target pwm (3D) + operation_mode (2D)
+State  (8D): robot TCP xyz (3D) + flowbot pwm (3D) + operation_mode (2D)  [rotation excluded]
+Action (8D): target TCP xyz (3D) + target pwm (3D) + operation_mode (2D)  [rotation excluded]
 """
 
 import os
@@ -45,6 +45,10 @@ PWM_MAX = 26
 # Default start pose (from collect_demos_with_camera.py)
 DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
 
+# Fixed TCP rotation used when executing XYZ-only actions from the policy.
+# Rotation is not predicted by the model (action_dim=8) so we hold it constant.
+TCP_FIXED_ROTATION = DEFAULT_START_POSE[3:]   # [rx, ry, rz]
+
 # Control frequency (Hz)
 CONTROL_FREQ =8.0
 DT = 1.0 / CONTROL_FREQ
@@ -58,6 +62,10 @@ SERVO_LOOKAHEAD = 0.1   # s
 SERVO_GAIN = 300
 
 
+class _ReleaseDetected(Exception):
+    """Internal sentinel: raised when op_mode [1,1] is predicted to exit episode loop."""
+
+
 class DeploymentLogger:
     """
     Logs model predictions and robot states during a deployment episode.
@@ -66,9 +74,9 @@ class DeploymentLogger:
         timestamps         (T,)              wall-clock time of each executed step
         tcp_poses          (T, 6)            actual TCP pose read from robot at each step
         pwm_actual         (T, 3)            actual PWM values read from Flowbot at each step
-        executed_actions   (T, 9)            full 9D action commanded at each step (denormalised)
+        executed_actions   (T, 8)            full 8D action commanded at each step (denormalised)
         pwm_commanded      (T, 3)            integer PWM sent after clamping
-        predicted_horizons (N_plans, P, 9)   full pred_horizon action sequence for each plan
+        predicted_horizons (N_plans, P, 8)   full pred_horizon action sequence for each plan
         plan_times_ms      (N_plans,)        DDIM inference latency per plan (milliseconds)
         plan_step_indices  (N_plans,)        step index at which each plan was triggered
 
@@ -103,8 +111,8 @@ class DeploymentLogger:
     def log_step(self, state_raw: np.ndarray, action: np.ndarray, pwm_commanded: np.ndarray):
         """Call once per executed step (after _update_obs_buffer)."""
         self._timestamps.append(time.time())
-        self._tcp_poses.append(state_raw[:6].copy())
-        self._pwm_actual.append(state_raw[6:].copy())
+        self._tcp_poses.append(state_raw[:3].copy())    # xyz only (rotation excluded)
+        self._pwm_actual.append(state_raw[3:6].copy())
         self._executed_actions.append(action.copy())
         self._pwm_commanded.append(pwm_commanded.copy())
 
@@ -210,17 +218,17 @@ class RobotDeployment:
         Read current robot state and camera image.
 
         Returns:
-            state_raw  : np.ndarray (11,)  — [x,y,z,rx,ry,rz, pwm1,pwm2,pwm3, ur5_active, flowbot_active]
+            state_raw  : np.ndarray (8,)  — [x,y,z, pwm1,pwm2,pwm3, ur5_active, flowbot_active]
             image_raw  : np.ndarray (H,W,3) uint8 — cropped camera frame
         """
-        # Robot TCP pose (6D)
+        # Robot TCP pose — use xyz only; rotation excluded from state (action_dim=8)
         tcp_pose = self.ur5.get_tcp_pose()
 
         # PWM from previous step — matches the physical state visible in the current image
         pwm = self.prev_pwm.copy()                                              # (3,)
 
         # Operation mode from last executed action (2D)
-        state_raw = np.concatenate([tcp_pose, pwm, self.current_op_mode])      # (11,)
+        state_raw = np.concatenate([tcp_pose[:3], pwm, self.current_op_mode])  # (8,)
 
         # Camera image
         camera_frame, _ = self.cam.get_frames()
@@ -277,12 +285,12 @@ class RobotDeployment:
         Stack buffer contents into tensors for the policy.
 
         Returns:
-            obs_state : torch.Tensor (1, obs_horizon, 9)
+            obs_state : torch.Tensor (1, obs_horizon, 8)
             obs_image : torch.Tensor (1, obs_horizon, 3, H, W)
         """
         obs_state = torch.from_numpy(
-            np.stack(list(self.state_buffer), axis=0)   # (obs_horizon, 9)
-        ).unsqueeze(0)                                   # (1, obs_horizon, 9)
+            np.stack(list(self.state_buffer), axis=0)   # (obs_horizon, 8)
+        ).unsqueeze(0)                                   # (1, obs_horizon, 8)
 
         obs_image = torch.from_numpy(
             np.stack(list(self.image_buffer), axis=0)   # (obs_horizon, 3, H, W)
@@ -297,20 +305,20 @@ class RobotDeployment:
         Run one DDIM inference step.
 
         Returns:
-            actions : np.ndarray (pred_horizon, 11) — denormalised actions
-                      [:6] = TCP pose, [6:9] = flowbot PWM (float), [9:11] = op_mode (~0 or ~1)
+            actions : np.ndarray (pred_horizon, 8) — denormalised actions
+                      [:3] = TCP xyz, [3:6] = flowbot PWM (float), [6:8] = op_mode (~0 or ~1)
         """
         obs_state, obs_image = self._get_obs_tensors()
         actions_norm = self.policy.predict(
-            obs_state.squeeze(0),   # (obs_horizon, 11)
+            obs_state.squeeze(0),   # (obs_horizon, 8)
             obs_image.squeeze(0),   # (obs_horizon, 3, H, W)
-        ).numpy()                   # (pred_horizon, 11)
+        ).numpy()                   # (pred_horizon, 8)
 
         # Denormalise: x = (x_norm + 1) * 0.5 * range + min
         action_min   = self.policy.checkpoint['action_min']
         action_range = self.policy.checkpoint['action_range']
         actions = (actions_norm + 1.0) * 0.5 * action_range + action_min
-        return actions              # (pred_horizon, 11)
+        return actions              # (pred_horizon, 8)
 
     # ── Action execution ──────────────────────────────────────────────────────
 
@@ -319,14 +327,16 @@ class RobotDeployment:
         Send one action step to the robot and flowbot, gated by predicted operation mode.
 
         Args:
-            action : np.ndarray (11,) — [x,y,z,rx,ry,rz, pwm1,pwm2,pwm3, ur5_active, flowbot_active]
+            action : np.ndarray (8,) — [x,y,z, pwm1,pwm2,pwm3, ur5_active, flowbot_active]
+                     Rotation (rx,ry,rz) is not predicted; TCP_FIXED_ROTATION is appended.
 
         Returns:
             pwm_int      : np.ndarray (3,) int — clamped PWM actually sent
             op_mode_pred : np.ndarray (2,) int — [ur5_active, flowbot_active]
         """
-        tcp_target = action[:6].tolist()
-        pwm_raw    = action[6:9]
+        # Reconstruct 6D TCP target: predicted xyz + fixed rotation
+        tcp_target = action[:3].tolist() + TCP_FIXED_ROTATION
+        pwm_raw    = action[3:6]
         pwm_int    = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
 
         # Drop protection: if any channel decreases vs last sent PWM, hold previous value
@@ -334,7 +344,7 @@ class RobotDeployment:
             pwm_int = self.current_pwm.copy()
 
         # Decode predicted operation mode (denorm ~[0,1] → binary)
-        op_mode_pred = np.clip(np.round(action[9:11]), 0, 1).astype(int)
+        op_mode_pred = np.clip(np.round(action[6:8]), 0, 1).astype(int)
 
         # Gate UR5 servo: only move when ur5_active
         if op_mode_pred[0] == 1:
@@ -431,8 +441,16 @@ class RobotDeployment:
                     # will reflect this value, not the command about to be issued.
                     self.prev_pwm = self.current_pwm.astype(np.float32)
 
-                    action = actions[step_i]            # (11,)
+                    action = actions[step_i]            # (8,)
                     pwm_int, op_mode_pred = self._execute_action(action)
+
+                    # Release phase detected: hold 1 s then end episode immediately
+                    if op_mode_pred[0] == 1 and op_mode_pred[1] == 1:
+                        print("\n🔓 Release phase detected — holding 1 s then stopping episode")
+                        self.fb.release()   # sends 'r' to Arduino (triggers suction release)
+                        time.sleep(1.0)
+                        total_steps += 1
+                        raise _ReleaseDetected
 
                     # Use longer step time when flowbot is actively actuating
                     # so the soft actuator has enough time to inflate/deflate
@@ -453,6 +471,8 @@ class RobotDeployment:
 
                     total_steps += 1
 
+        except _ReleaseDetected:
+            print("✅ Episode ended by release phase")
         except KeyboardInterrupt:
             print("\n⚠️  Episode interrupted by user")
 
