@@ -48,7 +48,7 @@ DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
 # Control frequency (Hz)
 CONTROL_FREQ = 10.0
 DT = 1.0 / CONTROL_FREQ
-DT_FLOWBOT = 1.0     # Step time (s) when flowbot is actively actuating
+DT_FLOWBOT = 0.7     # Step time (s) when flowbot is actively actuating
 FLOWBOT_FREQ = 10.0  # Flowbot command frequency — must match CONTROL_FREQ
 
 # servo_l speed/acceleration (lower = smoother)
@@ -332,6 +332,10 @@ class RobotDeployment:
         pwm_raw    = action[6:9]
         pwm_int    = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
 
+        # Drop protection: if any channel drops ≥ 2 units vs last sent PWM, hold previous value
+        if np.any(self.current_pwm - pwm_int >= 2):
+            pwm_int = self.current_pwm.copy()
+
         # Decode predicted operation mode (denorm ~[0,1] → binary)
         op_mode_pred = np.clip(np.round(action[9:11]), 0, 1).astype(int)
 
@@ -344,6 +348,7 @@ class RobotDeployment:
         # Gate flowbot PWM: only send when flowbot_active
         if op_mode_pred[1] == 1 and np.any(pwm_int >= PWM_MIN):
             self.fb.serial_sending(pwm_int)
+            self.current_pwm = pwm_int.copy()
 
         # Update tracked op_mode for next observation
         self.current_op_mode = op_mode_pred.astype(np.float32)
