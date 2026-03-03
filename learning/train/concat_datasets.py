@@ -187,8 +187,13 @@ def concat_datasets(source_paths, output_path, chunk_size=100, overwrite=False,
 
     # ── 6. Write episode_ends ─────────────────────────────────────────────────
     ep_ends_arr = np.array(all_ep_ends, dtype=np.int64)
-    meta_group.create_dataset('episode_ends', data=ep_ends_arr,
-                              chunks=(max(1, len(ep_ends_arr)),))
+    ep_ends_ds = meta_group.create_dataset(
+        'episode_ends',
+        shape=(len(ep_ends_arr),),
+        dtype=np.int64,
+        chunks=(max(1, len(ep_ends_arr)),),
+    )
+    ep_ends_ds[:] = ep_ends_arr
 
     # ── 7. Copy metadata (camera_info etc.) from first source if present ──────
     for group_name in ('camera_info',):
