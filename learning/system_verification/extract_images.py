@@ -150,7 +150,7 @@ def extract_images(
 
 def main():
     parser = argparse.ArgumentParser(description="Extract images from zarr dataset")
-    parser.add_argument('--dataset', type=str, default='Task3',
+    parser.add_argument('--dataset', type=str, default=None,
                         help='Task folder name under data/demo_data/ (e.g. Task0, Task3)')
     parser.add_argument('--output', type=str, default='data/extracted_images',
                         help='Output root directory')
@@ -169,10 +169,14 @@ def main():
                         help='Target image size after preprocessing (default: 216 288). '
                              'Must match config image_size used during training.')
     args = parser.parse_args()
-
-    data_dir  = Path(__file__).parent.parent.parent / 'data' / 'demo_data'
-    dataset   = data_dir / args.dataset / 'dataset.zarr'
-    output_dir = Path(args.output) / args.dataset
+    if args.dataset is None:
+        
+        data_dir  = Path(__file__).parent.parent.parent / 'data' / 'demo_data'
+        dataset   = data_dir / 'dataset.zarr'
+        output_dir = Path(args.output) 
+    else:
+        dataset = args.dataset
+        output_dir = Path(args.output)
 
     extract_images(
         dataset_path=dataset,
