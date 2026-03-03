@@ -146,13 +146,13 @@ def concat_datasets(source_paths, output_path, chunk_size=100, overwrite=False,
         dtype     = arr.dtype
 
         if key == 'camera_0':
-            data_group.create_dataset(
+            data_group.create_array(
                 key, shape=out_shape, dtype=dtype,
                 chunks=(1,) + arr.shape[1:],
-                compressor=Blosc(cname='lz4', clevel=3),
+                compressors=Blosc(cname='lz4', clevel=3),
             )
         else:
-            data_group.create_dataset(
+            data_group.create_array(
                 key, shape=out_shape, dtype=dtype,
                 chunks=(min(chunk_size, total_frames),) + arr.shape[1:],
             )
@@ -203,7 +203,7 @@ def concat_datasets(source_paths, output_path, chunk_size=100, overwrite=False,
             dst_grp = out.require_group(group_name)
             for key in src_grp.keys():
                 arr = np.array(src_grp[key])
-                ds = dst_grp.create_dataset(key, shape=arr.shape, dtype=arr.dtype)
+                ds = dst_grp.create_array(key, shape=arr.shape, dtype=arr.dtype)
                 ds[:] = arr
 
     print(f"\n✅ Done!  {total_eps} episodes | {total_frames} frames")

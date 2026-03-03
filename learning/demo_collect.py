@@ -100,7 +100,7 @@ def create_zarr_dataset(output_dir, with_camera=False, image_shape=None):
         root.create_group('data')
     if 'meta' not in root:
         meta = root.create_group('meta')
-        meta.create_dataset('episode_ends', shape=(0,), dtype=np.int64, chunks=(100,))
+        meta.create_array('episode_ends', shape=(0,), dtype=np.int64, chunks=(100,))
 
     # Store metadata
     if with_camera and 'camera_info' not in root:
@@ -132,21 +132,20 @@ def save_episode(zarr_root, episode_data):
             # Create dataset
             if key == 'camera_0':
                 # Images: use compression
-                data_group.create_dataset(
+                data_group.create_array(
                     key,
                     shape=(new_len,) + value.shape[1:],
                     dtype=value.dtype,
                     chunks=(1,) + value.shape[1:],  # Chunk per image
-                    compressor=Blosc(cname='lz4', clevel=3)
-                    # compressor = numcodecs.Blosc(cname='lz4', clevel=3)
+                    compressors=Blosc(cname='lz4', clevel=3),
                 )
             else:
                 # Regular data
-                data_group.create_dataset(
+                data_group.create_array(
                     key,
                     shape=(new_len,) + value.shape[1:],
                     dtype=value.dtype,
-                    chunks=(100,) + value.shape[1:]
+                    chunks=(100,) + value.shape[1:],
                 )
         else:
             # Resize
