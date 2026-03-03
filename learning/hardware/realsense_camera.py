@@ -71,7 +71,7 @@ class RealSenseCamera:
         Get color and depth frames
 
         Returns:
-            color: np.array (H, W, 3) BGR color image
+            color: np.array (H, W, 3) RGB color image  (stream configured as rs.format.rgb8)
             depth: np.array (H, W) depth image in mm (or None if depth disabled)
         """
         # Wait for frames
@@ -101,7 +101,7 @@ class RealSenseCamera:
         Get only color frame (faster if depth not needed)
 
         Returns:
-            np.array: (H, W, 3) BGR color image
+            np.array: (H, W, 3) RGB color image  (stream configured as rs.format.rgb8)
         """
         color, _ = self.get_frames()
         return color

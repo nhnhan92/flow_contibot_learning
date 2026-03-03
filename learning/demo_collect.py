@@ -56,15 +56,21 @@ class DataBuffer:
         self.joint_states = []
         self.actions = []
         self.pwm_signals = []
+        self.operation_modes = []
         if self.with_camera:
             self.camera_frames = []  # RGB images
 
-    def add(self, timestamp, robot_state, joint_state, pwm_signals, action, camera_frame=None):
+    def add(self, timestamp, robot_state, joint_state, pwm_signals, action,
+            operation_mode=None, camera_frame=None):
         self.timestamps.append(timestamp)
         self.robot_states.append(robot_state.copy())
         self.joint_states.append(joint_state.copy())
         self.actions.append(action.copy())
         self.pwm_signals.append(pwm_signals.copy())
+        if operation_mode is not None:
+            self.operation_modes.append(np.array(operation_mode, dtype=np.uint8))
+        else:
+            self.operation_modes.append(np.array([0, 0], dtype=np.uint8))
         if self.with_camera:
             if camera_frame is not None:
                 self.camera_frames.append(camera_frame.copy())
@@ -82,6 +88,7 @@ class DataBuffer:
             'robot_joint': np.array(self.joint_states),
             'pwm_signals': np.array(self.pwm_signals),
             'action': np.array(self.actions),
+            'operation_mode': np.array(self.operation_modes, dtype=np.uint8),  # (T, 2)
         }
 
         if self.with_camera:
@@ -372,6 +379,16 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
 
             # ── 2. SpaceMouse → send servo command BEFORE sleep ───────────────
             button_status = sm.get_button_status()
+            # Determine operation mode from button state
+            if button_status[0] and button_status[1]:              # both: release
+                op_mode = np.array([1, 1], dtype=np.uint8)
+            elif button_status[0] and not button_status[1]:        # left only: UR5
+                op_mode = np.array([1, 0], dtype=np.uint8)
+            elif button_status[1] and not button_status[0]:        # right only: flowbot
+                op_mode = np.array([0, 1], dtype=np.uint8)
+            else:
+                op_mode = np.array([0, 0], dtype=np.uint8)         # idle
+
             if button_status[1] and not button_status[0]:          # right btn: flowbot
                 xyz_fb = sm.get_latest_xyz()
                 xyz_fb[2] = -xyz_fb[2]
@@ -446,6 +463,7 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
                             joint_state=rel_joints,
                             action=target_pose,      # robot not moving
                             pwm_signals=fb.last_pwm, # = [0,0,0] after reset
+                            operation_mode=np.array([1, 1], dtype=np.uint8),
                             camera_frame=rel_frame,
                         )
                     print(f"  Release recorded ({release_frames} steps, PWM={fb.last_pwm.tolist()})")
@@ -468,7 +486,9 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
                     print(f"\n⚠️  Camera error: {e}\n")
 
             # ── 5. Save to buffer (camera, TCP, PWM all at same settled pose) ─
-            if is_recording:
+            # Skip idle frames (no button pressed) — they represent operator hesitation,
+            # not intentional actions, and would teach the model to stall mid-task.
+            if is_recording and np.any(op_mode):
                 if with_camera and camera_frame is None:
                     print("\n⚠️  Warning: No camera frame!\n")
                     continue
@@ -481,6 +501,7 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
                     joint_state=current_joints,
                     action=target_pose,
                     pwm_signals=fb.last_pwm,
+                    operation_mode=op_mode,
                     camera_frame=camera_frame
                 )
 

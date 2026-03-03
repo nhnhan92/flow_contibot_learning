@@ -10,8 +10,8 @@ image_size: [216, 288]  # Center crop from 480x640
 exclude_episodes: []  # Episodes to exclude from training (e.g. incomplete)
 
 # Model architecture
-action_dim: 9         # Robot TCP pose (x, y, z, rx, ry, rz) + flowbot PWM (3)
-state_dim: 9          # Robot TCP pose (6) + flowbot PWM (3)
+action_dim: 11        # Robot TCP pose (6) + flowbot PWM (3) + operation_mode (2)
+state_dim: 11         # Robot TCP pose (6) + flowbot PWM (3) + operation_mode (2)
 vision_feature_dim: 512
 state_feature_dim: 128
 num_diffusion_iters: 100  # Number of diffusion training steps (DDPM)
@@ -60,6 +60,7 @@ wandb_entity: null    # Your W&B username/team
 # - obs_horizon=2: Use last 2 camera frames for temporal information
 # - pred_horizon=16: Predict 16 future actions (~1.6s at 10Hz)
 # - action_horizon=8: Execute first 8 actions, then replan
-# - action_dim=9: 6D UR5e TCP pose + 3D flowbot PWM signals
-# - state_dim=9:  6D UR5e TCP pose + 3D flowbot PWM signals
+# - action_dim=11: 6D UR5e TCP pose + 3D flowbot PWM + 2D operation_mode
+# - state_dim=11:  6D UR5e TCP pose + 3D flowbot PWM + 2D operation_mode
+# - operation_mode: [ur5_active, flowbot_active] — [1,0]=UR5, [0,1]=flowbot, [1,1]=release
 # - PWM range: [pwm_min, pwm_max] as configured in flowbot (e.g. 1-26)
