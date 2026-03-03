@@ -479,9 +479,9 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
             if with_camera and camera:
                 try:
                     camera_frame, _ = camera.get_frames()
-                    ret, frame = cam_obs.read()
-                    cv2.imshow("Camera", frame)
-                    cv2.waitKey(1)
+                    # ret, frame = cam_obs.read()
+                    # cv2.imshow("Camera", frame)
+                    # cv2.waitKey(1)
                 except Exception as e:
                     print(f"\n⚠️  Camera error: {e}\n")
 
