@@ -197,8 +197,14 @@ def concat_datasets(source_paths, output_path, chunk_size=100, overwrite=False,
 
     # ── 7. Copy metadata (camera_info etc.) from first source if present ──────
     for group_name in ('camera_info',):
-        if group_name in sources[0]['root']:
-            zarr.copy(sources[0]['root'][group_name], out, name=group_name)
+        src_root = sources[0]['root']
+        if group_name in src_root:
+            src_grp = src_root[group_name]
+            dst_grp = out.require_group(group_name)
+            for key in src_grp.keys():
+                arr = np.array(src_grp[key])
+                ds = dst_grp.create_dataset(key, shape=arr.shape, dtype=arr.dtype)
+                ds[:] = arr
 
     print(f"\n✅ Done!  {total_eps} episodes | {total_frames} frames")
     print(f"   Saved to: {output_path}\n")
