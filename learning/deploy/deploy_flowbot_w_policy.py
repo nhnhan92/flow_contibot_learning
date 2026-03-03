@@ -152,7 +152,7 @@ class RobotDeployment:
         camera_width: int = 640,
     ):
         self.verbose = verbose
-        
+        self.current_pwm = np.array([0, 0, 0], dtype=int)
 
         # ── Load policy ───────────────────────────────────────────────────────
         print(f"\n[1/4] Loading policy from: {checkpoint_path}")
@@ -222,7 +222,11 @@ class RobotDeployment:
         camera_frame, _ = self.cam.get_frames()
         if camera_frame is None:
             raise RuntimeError("Camera read failed")
-
+        cv2.imshow("RealSense RGB", camera_frame)
+        key = cv2.waitKey(1)
+        if key == 27 or key == ord('q'):  # ESC or q
+            cv2.destroyAllWindows()
+            raise KeyboardInterrupt("User requested exit")
         # Centre-crop and resize (same as dataset.py)
         h, w = camera_frame.shape[:2]
         target_h, target_w = self.image_size
@@ -317,18 +321,21 @@ class RobotDeployment:
         Args:
             action : np.ndarray (9,) — [x,y,z,rx,ry,rz, pwm1,pwm2,pwm3]
         """
-        # UR5e: servo to target TCP pose (non-blocking)
-        tcp_target = action[:6].tolist()
-        self.ur5.servo_tcp_pose(target_pose=tcp_target,velocity=SERVO_SPEED,
-                                    acceleration=SERVO_ACCEL,dt=DT,lookahead_time=SERVO_LOOKAHEAD,gain=SERVO_GAIN)
-
         # Flowbot: clamp, round to int, send
-        
         pwm_raw   = action[6:]
         pwm_int   = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
+        tcp_target = action[:6].tolist()
         if any(pwm_int[i] >= 1 for i in range(3)):
-            self.fb.serial_sending(pwm_int)
-            time.sleep(0.5)  # Small delay to ensure command is sent before next step
+            if not np.array_equal(pwm_int[:2], self.current_pwm[:2]) \
+            and any(pwm_int[i] > self.current_pwm[i] for i in range(2)):
+                print(pwm_int[:2], self.current_pwm[:2])
+                self.current_pwm = pwm_int.copy()
+                self.fb.serial_sending(pwm_int)
+                time.sleep(0.5)  # Small delay to ensure command is sent before next step
+        else: # UR5e: servo to target TCP pose (non-blocking)
+            
+            self.ur5.servo_tcp_pose(target_pose=tcp_target,velocity=SERVO_SPEED,
+                                    acceleration=SERVO_ACCEL,dt=DT,lookahead_time=SERVO_LOOKAHEAD,gain=SERVO_GAIN)
 
         if self.verbose:
             tcp = np.array(tcp_target, dtype=np.float32)
