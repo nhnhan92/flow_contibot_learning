@@ -132,12 +132,15 @@ def debug_live(policy, robot_ip, flowbot_port=None,
     else:
         print("\n[3/3] Flowbot skipped — using zero PWM for state")
 
+    # Track op_mode of last predicted action for the next observation (mirrors deploy)
+    current_op_mode = np.zeros(2, dtype=np.float32)
+
     # ── Observation helpers (matching RobotDeployment._get_raw_observation) ───
     def get_raw_obs():
         tcp_pose  = ur5.get_tcp_pose()                                       # (6,)
         pwm       = np.array(fb.last_pwm if has_flowbot else [0, 0, 0],
                              dtype=np.float32)                               # (3,)
-        state_raw = np.concatenate([tcp_pose, pwm])                         # (9,)
+        state_raw = np.concatenate([tcp_pose, pwm, current_op_mode])        # (11,)
 
         camera_frame, _ = cam.get_frames()
         if camera_frame is None:
@@ -179,8 +182,8 @@ def debug_live(policy, robot_ip, flowbot_port=None,
             t_step = time.time()
 
             obs_state = torch.from_numpy(
-                np.stack(list(state_buf))        # (obs_horizon, 9)
-            ).unsqueeze(0)                       # (1, obs_horizon, 9)
+                np.stack(list(state_buf))        # (obs_horizon, 11)
+            ).unsqueeze(0)                       # (1, obs_horizon, 11)
             obs_image = torch.from_numpy(
                 np.stack(list(image_buf))        # (obs_horizon, 3, H, W)
             ).unsqueeze(0)                       # (1, obs_horizon, 3, H, W)
@@ -188,14 +191,19 @@ def debug_live(policy, robot_ip, flowbot_port=None,
             t_infer = time.time()
             actions_norm = policy.predict(
                 obs_state.squeeze(0), obs_image.squeeze(0)
-            ).numpy()                            # (pred_horizon, 9)
+            ).numpy()                            # (pred_horizon, 11)
             infer_ms = (time.time() - t_infer) * 1000
 
             actions = _denormalize_actions(actions_norm, action_min, action_range)
 
+            # Update tracked op_mode from first predicted action for next observation
+            op_mode_pred = np.clip(np.round(actions[0][9:11]), 0, 1).astype(int)
+            current_op_mode[:] = op_mode_pred.astype(np.float32)
+
             # ── Print ─────────────────────────────────────────────────────────
             tcp_now = state_raw[:6]
-            pwm_now = state_raw[6:].astype(int)
+            pwm_now = state_raw[6:9].astype(int)
+            mode_names = {(0, 0): 'idle', (1, 0): 'UR5', (0, 1): 'FB', (1, 1): 'release'}
 
             print(f"\n{'='*62}")
             print(f"Step {step+1:3d}/{num_steps}  [inference: {infer_ms:.0f} ms]")
@@ -205,7 +213,9 @@ def debug_live(policy, robot_ip, flowbot_port=None,
             for i in range(action_horizon):
                 a = actions[i]
                 delta_x = a[0] - tcp_now[0]
-                print(f"    [{i:2d}] TCP: [{a[0]:.3f}, {a[1]:.3f}, {a[2]:.3f}]  "
+                a_op = np.clip(np.round(a[9:11]), 0, 1).astype(int)
+                mode_str = mode_names.get(tuple(a_op), '?')
+                print(f"    [{i:2d}] [{mode_str:7s}] TCP: [{a[0]:.3f}, {a[1]:.3f}, {a[2]:.3f}]  "
                       f"ΔX={delta_x:+.3f}  "
                       f"PWM: [{a[6]:.1f}, {a[7]:.1f}, {a[8]:.1f}]")
 
@@ -289,9 +299,10 @@ def debug_offline(policy, dataset_path, episode_idx=0):
 
         # Build obs window
         obs_start = abs_idx - (obs_horizon - 1)
-        robot_obs = root['data/robot_eef_pose'][obs_start:abs_idx + 1].astype(np.float32)
-        pwm_obs   = root['data/pwm_signals'][obs_start:abs_idx + 1].astype(np.float32)
-        state_raw_seq = np.concatenate([robot_obs, pwm_obs], axis=-1)  # (T, 9)
+        robot_obs  = root['data/robot_eef_pose'][obs_start:abs_idx + 1].astype(np.float32)
+        pwm_obs    = root['data/pwm_signals'][obs_start:abs_idx + 1].astype(np.float32)
+        op_mode_obs = root['data/operation_mode'][obs_start:abs_idx + 1].astype(np.float32)
+        state_raw_seq = np.concatenate([robot_obs, pwm_obs, op_mode_obs], axis=-1)  # (T, 11)
 
         import cv2
         images = root['data/camera_0'][obs_start:abs_idx + 1]           # (T, H, W, 3)
@@ -301,7 +312,7 @@ def debug_offline(policy, dataset_path, episode_idx=0):
 
         obs_state = torch.from_numpy(
             np.stack([_preprocess_state(s, state_min, state_range) for s in state_raw_seq])
-        ).unsqueeze(0)   # (1, T, 9)
+        ).unsqueeze(0)   # (1, T, 11)
         obs_image = torch.from_numpy(
             np.stack(proc_images)
         ).unsqueeze(0)   # (1, T, 3, H, W)
@@ -319,7 +330,7 @@ def debug_offline(policy, dataset_path, episode_idx=0):
 
         all_pred_xyz.append(actions[:, :3])
         all_true_xyz.append(gt_robot[:, :3])
-        all_pred_pwm.append(actions[:, 6:])
+        all_pred_pwm.append(actions[:, 6:9])   # PWM only (not op_mode)
         all_true_pwm.append(gt_pwm)
 
     pred_xyz = np.concatenate(all_pred_xyz)
