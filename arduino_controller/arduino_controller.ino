@@ -105,10 +105,12 @@ void parsePwmCommand(const String &line) {
     pwm2_target = b + pww_init2;
     pwm3_target = c + pww_init3;
 
-    Serial.print("# Target PWM updated: ");
-    Serial.print(pwm1_target); Serial.print(" ");
-    Serial.print(pwm2_target); Serial.print(" ");
-    Serial.println(pwm3_target);
+    // ACK echoes the original requested values (a, b, c) so Python can verify receipt.
+    // Format matches what _serial_reader_thread expects: "ACK p1 p2 p3\n"
+    Serial.print("ACK ");
+    Serial.print(a); Serial.print(" ");
+    Serial.print(b); Serial.print(" ");
+    Serial.println(c);
   } else {
     Serial.print("# Invalid command: ");
     Serial.println(line);

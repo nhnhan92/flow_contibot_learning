@@ -154,6 +154,7 @@ class RobotDeployment:
     ):
         self.verbose = verbose
         self.current_pwm = np.array([0, 0, 0], dtype=int)
+        self.prev_pwm    = np.zeros(3, dtype=np.float32)   # command from previous step
 
         # ── Load policy ───────────────────────────────────────────────────────
         print(f"\n[1/4] Loading policy from: {checkpoint_path}")
@@ -198,10 +199,6 @@ class RobotDeployment:
         # ── Observation buffers ───────────────────────────────────────────────
         self.state_buffer = deque(maxlen=self.obs_horizon)
         self.image_buffer = deque(maxlen=self.obs_horizon)
-
-        # Track the op_mode of the last executed action so it can be included
-        # in the next observation (consistent with how op_mode is collected in demo_collect).
-        # [ur5_active, flowbot_active]: starts at [0, 0] (idle before first action)
         self.current_op_mode = np.zeros(2, dtype=np.float32)
 
         print("\n✅ All systems ready!\n")
@@ -219,8 +216,8 @@ class RobotDeployment:
         # Robot TCP pose (6D)
         tcp_pose = self.ur5.get_tcp_pose()
 
-        # Flowbot last sent PWM (3D)
-        pwm = np.array(self.fb.last_pwm, dtype=np.float32)                     # (3,)
+        # PWM from previous step — matches the physical state visible in the current image
+        pwm = self.prev_pwm.copy()                                              # (3,)
 
         # Operation mode from last executed action (2D)
         state_raw = np.concatenate([tcp_pose, pwm, self.current_op_mode])      # (11,)
@@ -347,7 +344,7 @@ class RobotDeployment:
 
         # Gate flowbot PWM: only send when flowbot_active
         if op_mode_pred[1] == 1 and np.any(pwm_int >= PWM_MIN):
-            self.fb.serial_sending(pwm_int)
+            self.fb.serial_sending(pwm_int, wait_ack=True, ack_timeout=DT_FLOWBOT)
             self.current_pwm = pwm_int.copy()
 
         # Update tracked op_mode for next observation
@@ -428,6 +425,10 @@ class RobotDeployment:
                         break
 
                     t_step_start = time.time()
+
+                    # Snapshot PWM before this step's command — image after sleep
+                    # will reflect this value, not the command about to be issued.
+                    self.prev_pwm = self.current_pwm.astype(np.float32)
 
                     action = actions[step_i]            # (11,)
                     pwm_int, op_mode_pred = self._execute_action(action)

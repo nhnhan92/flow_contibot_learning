@@ -323,6 +323,9 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
 
         while True:
             loop_start = time.time()
+            # Snapshot PWM BEFORE any new command this iteration.
+            # The image (read after sleep at step 4) reflects this value, not the new command.
+            prev_pwm = fb.last_pwm.copy()
 
             # ── 1. Keyboard ───────────────────────────────────────────────────
             if select.select([sys.stdin], [], [], 0)[0]:
@@ -500,7 +503,7 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
                     robot_state=current_tcp,
                     joint_state=current_joints,
                     action=target_pose,
-                    pwm_signals=fb.last_pwm,
+                    pwm_signals=prev_pwm,   # command from previous step (matches current image/tcp)
                     operation_mode=op_mode,
                     camera_frame=camera_frame
                 )
