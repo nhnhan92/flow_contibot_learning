@@ -25,8 +25,10 @@ class PickPlaceDataset(Dataset):
         - camera_0:       (T, H, W, 3) - RGB images
         - timestamp:      (T,) - timestamps
 
-    State  (11D): robot_eef_pose (6D) + pwm_signals (3D) + operation_mode (2D)
-    Action (11D): target TCP pose from data/action (6D) + pwm_signals (3D) + operation_mode (2D)
+    State  (8D):  robot_eef_pose xyz (3D) + pwm_signals (3D) + operation_mode (2D)
+    Action (8D):  target TCP xyz from data/action (3D) + pwm_signals (3D) + operation_mode (2D)
+    Note: rotation (rx, ry, rz) is stored in zarr but excluded from state/action.
+          Re-enable by changing [:3] slices below to [:6] and updating state_dim/action_dim.
 
     operation_mode encoding per frame:
         [0, 0] = idle / holding
@@ -136,14 +138,14 @@ class PickPlaceDataset(Dataset):
 
         eps = 1e-6
 
-        # State: actual robot_eef_pose (6D) + pwm (3D) = 9D base
-        self.state_min = np.concatenate([robot_states.min(0), pwm_states.min(0)])
-        self.state_max = np.concatenate([robot_states.max(0), pwm_states.max(0)])
+        # State: robot_eef_pose xyz (3D) + pwm (3D) = 6D base  [rotation excluded]
+        self.state_min = np.concatenate([robot_states[:, :3].min(0), pwm_states.min(0)])
+        self.state_max = np.concatenate([robot_states[:, :3].max(0), pwm_states.max(0)])
         self.state_range = self.state_max - self.state_min + eps
 
-        # Action: commanded target_pose (6D) + pwm (3D) = 9D base  — stats from data/action
-        self.action_min = np.concatenate([robot_actions.min(0), pwm_states.min(0)])
-        self.action_max = np.concatenate([robot_actions.max(0), pwm_states.max(0)])
+        # Action: commanded target xyz (3D) + pwm (3D) = 6D base  [rotation excluded]
+        self.action_min = np.concatenate([robot_actions[:, :3].min(0), pwm_states.min(0)])
+        self.action_max = np.concatenate([robot_actions[:, :3].max(0), pwm_states.max(0)])
         self.action_range = self.action_max - self.action_min + eps
 
         # Append hardcoded stats for operation_mode (2D): always in {0, 1}
@@ -167,9 +169,9 @@ class PickPlaceDataset(Dataset):
               f"Y=[{self.action_min[1]:.4f}, {self.action_max[1]:.4f}], "
               f"Z=[{self.action_min[2]:.4f}, {self.action_max[2]:.4f}]")
         print(f"  PWM range: "
-              f"[{self.state_min[6]:.1f}, {self.state_max[6]:.1f}], "
-              f"[{self.state_min[7]:.1f}, {self.state_max[7]:.1f}], "
-              f"[{self.state_min[8]:.1f}, {self.state_max[8]:.1f}]")
+              f"[{self.state_min[3]:.1f}, {self.state_max[3]:.1f}], "
+              f"[{self.state_min[4]:.1f}, {self.state_max[4]:.1f}], "
+              f"[{self.state_min[5]:.1f}, {self.state_max[5]:.1f}]")
         print(f"  op_mode: hardcoded [0,0]→[-1,-1], [1,1]→[+1,+1]")
 
     def _normalize_state(self, state):
@@ -216,8 +218,8 @@ class PickPlaceDataset(Dataset):
         # Operation mode (obs_horizon, 2): [ur5_active, flowbot_active]
         op_mode_states = self.zarr_root['data/operation_mode'][obs_start:obs_end].astype(np.float32)
 
-        # Combined state (obs_horizon, 11): robot_pose + pwm + op_mode
-        states = np.concatenate([robot_states, pwm_states, op_mode_states], axis=-1)
+        # Combined state (obs_horizon, 8): xyz + pwm + op_mode  [rotation excluded]
+        states = np.concatenate([robot_states[:, :3], pwm_states, op_mode_states], axis=-1)
         states = self._normalize_state(states)
 
         # Images
@@ -245,7 +247,7 @@ class PickPlaceDataset(Dataset):
         else:
             images = np.zeros((self.obs_horizon, 3, *self.image_size), dtype=np.float32)
 
-        # Future actions: target_pose (6D) + pwm (3D) + op_mode (2D) = 11D
+        # Future actions: target xyz (3D) + pwm (3D) + op_mode (2D) = 8D  [rotation excluded]
         # Using data/action (commanded target_pose) instead of data/robot_eef_pose so that
         # action[0] != obs[-1]: the spacemouse target is always ahead of the actual TCP.
         action_start = sample_idx
@@ -254,13 +256,13 @@ class PickPlaceDataset(Dataset):
         pwm_actions    = self.zarr_root['data/pwm_signals'][action_start:action_end].astype(np.float32)
         op_mode_actions = self.zarr_root['data/operation_mode'][action_start:action_end].astype(np.float32)
 
-        actions = np.concatenate([robot_actions, pwm_actions, op_mode_actions], axis=-1)  # (pred_horizon, 11)
+        actions = np.concatenate([robot_actions[:, :3], pwm_actions, op_mode_actions], axis=-1)  # (pred_horizon, 8)
         actions = self._normalize_action(actions)
 
         return {
-            'obs_state': torch.from_numpy(states).float(),    # (obs_horizon, 11)
+            'obs_state': torch.from_numpy(states).float(),    # (obs_horizon, 8)
             'obs_image': torch.from_numpy(images).float(),    # (obs_horizon, 3, H, W)
-            'actions':   torch.from_numpy(actions).float(),   # (pred_horizon, 11)
+            'actions':   torch.from_numpy(actions).float(),   # (pred_horizon, 8)
         }
 
     def get_normalizer(self):
@@ -286,13 +288,13 @@ def test_dataset():
 
     sample = dataset[0]
     print(f"\nSample 0:")
-    print(f"  obs_state shape: {sample['obs_state'].shape}")   # (2, 11)
+    print(f"  obs_state shape: {sample['obs_state'].shape}")   # (2, 8)
     print(f"  obs_image shape: {sample['obs_image'].shape}")   # (2, 3, H, W)
-    print(f"  actions shape:   {sample['actions'].shape}")     # (16, 11)
+    print(f"  actions shape:   {sample['actions'].shape}")     # (16, 8)
 
-    print(f"\n  State (t):   pose={sample['obs_state'][-1, :6]}, pwm={sample['obs_state'][-1, 6:9]}, op_mode={sample['obs_state'][-1, 9:]}")
-    print(f"  Action [0]:  pose={sample['actions'][0, :6]},    pwm={sample['actions'][0, 6:9]},    op_mode={sample['actions'][0, 9:]}")
-    print(f"\n  Δpose (action[0] - obs[-1]): {sample['actions'][0, :6] - sample['obs_state'][-1, :6]}")
+    print(f"\n  State (t):   xyz={sample['obs_state'][-1, :3]}, pwm={sample['obs_state'][-1, 3:6]}, op_mode={sample['obs_state'][-1, 6:]}")
+    print(f"  Action [0]:  xyz={sample['actions'][0, :3]},    pwm={sample['actions'][0, 3:6]},    op_mode={sample['actions'][0, 6:]}")
+    print(f"\n  Δxyz (action[0] - obs[-1]): {sample['actions'][0, :3] - sample['obs_state'][-1, :3]}")
     print(f"  (should be non-zero — action[0] is target_pose, not current position)")
 
 
