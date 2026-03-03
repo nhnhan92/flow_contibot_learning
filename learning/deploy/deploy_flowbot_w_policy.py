@@ -51,8 +51,8 @@ DT = 1.0 / CONTROL_FREQ
 FLOWBOT_FREQ = 10.0  # Flowbot command frequency — must match CONTROL_FREQ
 
 # servo_l speed/acceleration (lower = smoother)
-SERVO_SPEED = 0.1      # m/s
-SERVO_ACCEL = 0.1     # m/s^2
+SERVO_SPEED = 0.02     # m/s
+SERVO_ACCEL = 0.05     # m/s^2
 SERVO_LOOKAHEAD = 0.1   # s
 SERVO_GAIN = 300
 
@@ -323,9 +323,12 @@ class RobotDeployment:
                                     acceleration=SERVO_ACCEL,dt=DT,lookahead_time=SERVO_LOOKAHEAD,gain=SERVO_GAIN)
 
         # Flowbot: clamp, round to int, send
+        
         pwm_raw   = action[6:]
         pwm_int   = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
-        self.fb.serial_sending(pwm_int)
+        if any(pwm_int[i] >= 1 for i in range(3)):
+            self.fb.serial_sending(pwm_int)
+            time.sleep(0.5)  # Small delay to ensure command is sent before next step
 
         if self.verbose:
             tcp = np.array(tcp_target, dtype=np.float32)
@@ -405,13 +408,6 @@ class RobotDeployment:
                     action = actions[step_i]            # (9,)
                     pwm_int = self._execute_action(action)
 
-                    # Pace to CONTROL_FREQ first — let the robot move toward the target.
-                    # IMPORTANT: the sleep must come BEFORE reading the observation so that
-                    # obs[-1] captures where the robot IS after executing this action, not
-                    # where it was before (which is what the data collection script stores
-                    # at index t for step t: position = result of step t-1's command).
-                    # Reading before sleep would give obs[-1] ≈ action[step_i - 1], causing
-                    # the model to predict action[0] one step backward at every plan boundary.
                     elapsed = time.time() - t_step_start
                     sleep_time = DT - elapsed
                     if sleep_time > 0:
@@ -472,7 +468,7 @@ def main():
                         help='Arduino serial port for Flowbot')
     parser.add_argument('--flowbot_baud',  type=int,   default=115200,
                         help='Flowbot serial baud rate')
-    parser.add_argument('--max_steps',     type=int,   default=320,
+    parser.add_argument('--max_steps',     type=int,   default=400,
                         help='Max steps per episode')
     parser.add_argument('--num_episodes',  type=int,   default=1,
                         help='Number of episodes to run')

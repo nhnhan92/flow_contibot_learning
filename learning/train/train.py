@@ -87,6 +87,7 @@ def validate(model, dataloader, device):
 def main():
     import argparse
     parser = argparse.ArgumentParser()
+    parser.add_argument('--dataset', type=str, default=None, help='Dataset path')
     parser.add_argument('--config', type=str, default='/config/config_train_flowbot.yaml', help='Config file')
     parser.add_argument('--resume', type=str, default=None, help='Checkpoint to resume from')
     parser.add_argument('--device', type=str, default='cuda', help='Device (cuda/cpu)')
@@ -120,7 +121,7 @@ def main():
         print(f"Excluding episodes: {exclude_episodes}")
 
     dataset = PickPlaceDataset(
-        dataset_path=config['dataset_path'],
+        dataset_path=args.dataset if args.dataset is not None else config['dataset_path'],
         obs_horizon=config['obs_horizon'],
         pred_horizon=config['pred_horizon'],
         action_horizon=config['action_horizon'],

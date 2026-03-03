@@ -268,7 +268,7 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
         serial_port = "COM9"
     ### Flowbot
     fb = flowbot(serial_port = serial_port,
-                 pwm_min= 1,
+                 pwm_min= 0,
                  pwm_max= 26,
                  enable_plot = True,
                 frequency = flowbot_freqency,
