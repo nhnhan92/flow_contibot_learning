@@ -12,12 +12,6 @@ Usage:
     # Remove the last N episodes
     python manage_dataset.py --dataset data/demo_data/dataset.zarr --remove_last 3
 
-    # Remove specific episodes by index (space-separated)
-    python manage_dataset.py --dataset data/demo_data/dataset.zarr --remove_episodes 2 5 7
-
-    # Remove a contiguous range  (e.g. episodes 3, 4, 5)
-    python manage_dataset.py --dataset data/demo_data/dataset.zarr --remove_episodes 3-5
-
     # Mix of singles and ranges
     python manage_dataset.py --dataset data/demo_data/dataset.zarr --remove_episodes 0 3-5 9
 

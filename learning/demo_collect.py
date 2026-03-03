@@ -376,6 +376,9 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
             if button_status[1] and not button_status[0]:          # right btn: flowbot
                 xyz_fb = sm.get_latest_xyz()
                 xyz_fb[2] = -xyz_fb[2]
+                copied_xyz = xyz_fb.copy()
+                xyz_fb[1] = -copied_xyz[0]  # for better visualization during teleop
+                xyz_fb[0] = -copied_xyz[1]
                 xyz_fb = np.where(np.abs(xyz_fb) < deadzone, 0.0, xyz_fb)
                 fb.step(xyz_fb)
                 fb.update_plot()
