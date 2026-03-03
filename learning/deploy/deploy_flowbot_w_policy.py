@@ -222,11 +222,7 @@ class RobotDeployment:
         camera_frame, _ = self.cam.get_frames()
         if camera_frame is None:
             raise RuntimeError("Camera read failed")
-        cv2.imshow("RealSense RGB", camera_frame)
-        key = cv2.waitKey(1)
-        if key == 27 or key == ord('q'):  # ESC or q
-            cv2.destroyAllWindows()
-            raise KeyboardInterrupt("User requested exit")
+        
         # Centre-crop and resize (same as dataset.py)
         h, w = camera_frame.shape[:2]
         target_h, target_w = self.image_size
@@ -236,7 +232,7 @@ class RobotDeployment:
         sw = (w - crop_w) // 2
         image_raw = camera_frame[sh:sh + crop_h, sw:sw + crop_w]
         image_raw = cv2.resize(image_raw, (target_w, target_h))
-
+        
         return state_raw, image_raw
 
     # ── Preprocessing (matching dataset.py) ──────────────────────────────────
@@ -422,7 +418,10 @@ class RobotDeployment:
 
                     # Update obs buffer AFTER robot has moved toward target
                     state_raw = self._update_obs_buffer()
-
+                    if self.verbose:
+                        _, image_raw = self._get_raw_observation()   # second read just for display
+                        cv2.imshow("Live", cv2.cvtColor(image_raw, cv2.COLOR_RGB2BGR))
+                        cv2.waitKey(1)
                     if logger is not None:
                         logger.log_step(state_raw, action, pwm_int)
 
