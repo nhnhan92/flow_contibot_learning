@@ -48,11 +48,11 @@ DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
 # Control frequency (Hz)
 CONTROL_FREQ = 10.0
 DT = 1.0 / CONTROL_FREQ
-DT_FLOWBOT = 0.3     # Step time (s) when flowbot is actively actuating
+DT_FLOWBOT = 1.0     # Step time (s) when flowbot is actively actuating
 FLOWBOT_FREQ = 10.0  # Flowbot command frequency — must match CONTROL_FREQ
 
 # servo_l speed/acceleration (lower = smoother)
-SERVO_SPEED = 0.02     # m/s
+SERVO_SPEED = 0.05     # m/s
 SERVO_ACCEL = 0.05     # m/s^2
 SERVO_LOOKAHEAD = 0.1   # s
 SERVO_GAIN = 300
