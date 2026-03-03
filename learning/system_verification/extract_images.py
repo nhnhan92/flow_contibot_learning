@@ -72,7 +72,7 @@ def extract_images(
     step=1,
     as_video=False,
     fps=10,
-    preprocessed=False,
+    preprocessed=True,
     image_size=(216, 288),
 ):
     import zarr
@@ -162,7 +162,7 @@ def main():
                         help='Save as MP4 video instead of individual images')
     parser.add_argument('--fps', type=int, default=10,
                         help='FPS for video output (default: 10)')
-    parser.add_argument('--preprocessed', action='store_true',
+    parser.add_argument('--preprocessed', default=True, action='store_true',
                         help='Apply training preprocessing: center-crop then resize to image_size')
     parser.add_argument('--image_size', type=int, nargs=2, default=[216, 288],
                         metavar=('H', 'W'),

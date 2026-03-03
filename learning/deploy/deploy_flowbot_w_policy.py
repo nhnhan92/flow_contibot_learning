@@ -46,9 +46,9 @@ PWM_MAX = 26
 DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
 
 # Control frequency (Hz)
-CONTROL_FREQ = 10.0
+CONTROL_FREQ =8.0
 DT = 1.0 / CONTROL_FREQ
-DT_FLOWBOT = 0.7     # Step time (s) when flowbot is actively actuating
+DT_FLOWBOT = 0.5     # Step time (s) when flowbot is actively actuating
 FLOWBOT_FREQ = 10.0  # Flowbot command frequency — must match CONTROL_FREQ
 
 # servo_l speed/acceleration (lower = smoother)
@@ -344,6 +344,7 @@ class RobotDeployment:
 
         # Gate flowbot PWM: only send when flowbot_active
         if op_mode_pred[1] == 1 and np.any(pwm_int >= PWM_MIN):
+            pwm_int[0] = 0  # this is just a trick
             self.fb.serial_sending(pwm_int, wait_ack=True, ack_timeout=DT_FLOWBOT)
             self.current_pwm = pwm_int.copy()
 

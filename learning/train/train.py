@@ -238,11 +238,16 @@ def main():
         print(f"\nResuming from {args.resume}")
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        scheduler.load_state_dict(checkpoint['scheduler'])
         ema.load_state_dict(checkpoint['ema'])
-        start_epoch = checkpoint['epoch'] + 1
-        print(f"Resuming from epoch {start_epoch}")
+        if 'optimizer' in checkpoint and 'scheduler' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            scheduler.load_state_dict(checkpoint['scheduler'])
+            start_epoch = checkpoint['epoch'] + 1
+            print(f"Full resume: epoch={start_epoch}, optimizer & scheduler restored")
+        else:
+            print(f"⚠️  Checkpoint has no optimizer/scheduler — weights loaded, "
+                  f"optimizer starts fresh (epoch 0)")
+            start_epoch = 0
 
     # W&B
     use_wandb = config.get('use_wandb', False)
@@ -330,6 +335,8 @@ def main():
             torch.save({
                 'epoch': epoch,
                 'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'scheduler': scheduler.state_dict(),
                 'ema': ema.state_dict(),
                 'config': config,
                 'val_loss_ema': val_loss_ema,
