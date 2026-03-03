@@ -332,8 +332,8 @@ class RobotDeployment:
         pwm_raw    = action[6:9]
         pwm_int    = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
 
-        # Drop protection: if any channel drops ≥ 2 units vs last sent PWM, hold previous value
-        if np.any(self.current_pwm - pwm_int >= 2):
+        # Drop protection: if any channel decreases vs last sent PWM, hold previous value
+        if np.any(pwm_int < self.current_pwm):
             pwm_int = self.current_pwm.copy()
 
         # Decode predicted operation mode (denorm ~[0,1] → binary)
@@ -355,7 +355,7 @@ class RobotDeployment:
 
         if self.verbose:
             tcp = np.array(tcp_target, dtype=np.float32)
-            mode_str = ['idle', 'UR5', 'FB', 'release'][op_mode_pred[0] * 2 + op_mode_pred[1]]
+            mode_str = ['idle', 'FB', 'UR5', 'release'][op_mode_pred[0] * 2 + op_mode_pred[1]]
             print(
                 f"  [{mode_str}] TCP: [{tcp[0]:.3f}, {tcp[1]:.3f}, {tcp[2]:.3f}]  "
                 f"PWM: {pwm_int.tolist()}"
