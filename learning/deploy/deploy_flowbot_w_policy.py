@@ -52,7 +52,7 @@ TCP_FIXED_ROTATION = DEFAULT_START_POSE[3:]   # [rx, ry, rz]
 # Control frequency (Hz)
 CONTROL_FREQ =8.0
 DT = 1.0 / CONTROL_FREQ
-DT_FLOWBOT = 0.5     # Step time (s) when flowbot is actively actuating
+DT_FLOWBOT = 0.3     # Step time (s) when flowbot is actively actuating
 FLOWBOT_FREQ = 10.0  # Flowbot command frequency — must match CONTROL_FREQ
 
 # servo_l speed/acceleration (lower = smoother)
@@ -520,7 +520,7 @@ def main():
                         help='Arduino serial port for Flowbot')
     parser.add_argument('--flowbot_baud',  type=int,   default=115200,
                         help='Flowbot serial baud rate')
-    parser.add_argument('--max_steps',     type=int,   default=400,
+    parser.add_argument('--max_steps',     type=int,   default=450,
                         help='Max steps per episode')
     parser.add_argument('--num_episodes',  type=int,   default=1,
                         help='Number of episodes to run')

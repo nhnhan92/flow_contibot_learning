@@ -42,7 +42,7 @@ float voltToLinear(float v, float minVal, float maxVal) {
 int pwm1_cur = 0, pwm2_cur = 0, pwm3_cur = 0;
 int pwm1_target = 0, pwm2_target = 0, pwm3_target = 0;
 int pwm_init_extra = 0;
-int base1 = 148;
+int base1 = 146;
 int base2 = 151;
 int base3 = 148;
 int pww_init1 = base1 + pwm_init_extra;
