@@ -362,7 +362,7 @@ class RobotDeployment:
 
         # Gate flowbot PWM: only send when flowbot_active
         if op_mode_pred[1] == 1 and np.any(pwm_int >= PWM_MIN):
-            pwm_int[0] = 0  # this is just a trick
+            # pwm_int[0] = 0  # this is just a trick
             self.fb.serial_sending(pwm_int, wait_ack=True, ack_timeout=DT_FLOWBOT)
             self.current_pwm = pwm_int.copy()
 
@@ -454,9 +454,8 @@ class RobotDeployment:
 
                     # Release phase detected: hold 1 s then end episode immediately
                     if op_mode_pred[0] == 1 and op_mode_pred[1] == 1:
-                        print("\n🔓 Release phase detected — holding 1 s then stopping episode")
+                        print("\n🔓 Release phase")
                         self.fb.release()   # sends 'r' to Arduino (triggers suction release)
-                        time.sleep(1.0)
                         total_steps += 1
                         raise _ReleaseDetected
 

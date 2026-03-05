@@ -88,6 +88,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default=None, help='Dataset path')
+    parser.add_argument('--output_dir', '-o', type=str, default=None, help='Output directory for checkpoints and logs')
     parser.add_argument('--config', type=str, default='/config/config_train_flowbot.yaml', help='Config file')
     parser.add_argument('--resume', type=str, default=None, help='Checkpoint to resume from')
     parser.add_argument('--device', type=str, default='cuda', help='Device (cuda/cpu)')
@@ -106,8 +107,11 @@ def main():
     print(f"Device: {args.device}")
 
     # Create output directory
-    output_dir = Path(LEARNING_DIR) / config['output_dir']
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if args.output_dir is not None:
+        output_dir = Path(args.output_dir)
+    else:
+        output_dir = Path(LEARNING_DIR) / config['output_dir']
+        output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output: {output_dir}")
 
     # Device

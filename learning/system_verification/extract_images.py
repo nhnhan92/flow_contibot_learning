@@ -154,7 +154,7 @@ def main():
                         help='Task folder name under data/demo_data/ (e.g. Task0, Task3)')
     parser.add_argument('--output', type=str, default='data/extracted_images',
                         help='Output root directory')
-    parser.add_argument('--episode', '-ep', type=int, default=None,
+    parser.add_argument('--episode', '-ep', type=int, default=0,
                         help='Extract only this episode index (default: all)')
     parser.add_argument('--step', type=int, default=1,
                         help='Save every N-th frame (1 = all frames)')

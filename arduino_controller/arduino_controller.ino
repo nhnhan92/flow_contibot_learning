@@ -151,7 +151,7 @@ void loop() {
     if (line.equalsIgnoreCase("r")|| line.equalsIgnoreCase("release")){
       Serial.println("SUCTION: OFF");
       digitalWrite(SUCTION_RELEASE, HIGH);
-      delay(2000);
+      delay(100);
     }
     if (line.equalsIgnoreCase("q")|| line.equalsIgnoreCase("quit")){
       Serial.println("RESETTING");

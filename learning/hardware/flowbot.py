@@ -323,6 +323,6 @@ class flowbot:
             self.ser.write(cmd.encode("ascii"))
         except Exception as e:
             print("Serial write failed:", e)
-        time.sleep(2)
+        time.sleep(0.1)
 
 
