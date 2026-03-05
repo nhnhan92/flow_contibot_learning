@@ -25,10 +25,13 @@ class PickPlaceDataset(Dataset):
         - camera_0:       (T, H, W, 3) - RGB images
         - timestamp:      (T,) - timestamps
 
-    State  (8D):  robot_eef_pose xyz (3D) + pwm_signals (3D) + operation_mode (2D)
-    Action (8D):  target TCP xyz from data/action (3D) + pwm_signals (3D) + operation_mode (2D)
-    Note: rotation (rx, ry, rz) is stored in zarr but excluded from state/action.
-          Re-enable by changing [:3] slices below to [:6] and updating state_dim/action_dim.
+    State  (tcp_dims+5 D):  robot_eef_pose[:tcp_dims] + pwm_signals (3D) + operation_mode (2D)
+    Action (tcp_dims+5 D):  target TCP[:tcp_dims] from data/action + pwm_signals (3D) + op_mode (2D)
+
+    tcp_dims controls how many TCP components are used:
+        tcp_dims=3  →  xyz only          (state_dim = action_dim = 8)
+        tcp_dims=6  →  xyz + rx,ry,rz   (state_dim = action_dim = 11)
+    Set via config key 'tcp_dims' (default: 3).
 
     operation_mode encoding per frame:
         [0, 0] = idle / holding
@@ -51,6 +54,7 @@ class PickPlaceDataset(Dataset):
         use_images=True,
         normalize=True,
         exclude_episodes=None,  # List of episode indices to exclude
+        tcp_dims=3,         # TCP components used: 3=xyz only, 6=xyz+rotation
     ):
         self.dataset_path = Path(dataset_path)
         self.obs_horizon = obs_horizon
@@ -60,6 +64,7 @@ class PickPlaceDataset(Dataset):
         self.use_images = use_images
         self.normalize = normalize
         self.exclude_episodes = exclude_episodes if exclude_episodes is not None else []
+        self.tcp_dims = tcp_dims
 
         # Load zarr dataset
         self.zarr_root = zarr.open(str(self.dataset_path), mode='r')
@@ -137,15 +142,16 @@ class PickPlaceDataset(Dataset):
         robot_actions = np.array(robot_actions)  # (N, 6)
 
         eps = 1e-6
+        d = self.tcp_dims  # 3 or 6
 
-        # State: robot_eef_pose xyz (3D) + pwm (3D) = 6D base  [rotation excluded]
-        self.state_min = np.concatenate([robot_states[:, :3].min(0), pwm_states.min(0)])
-        self.state_max = np.concatenate([robot_states[:, :3].max(0), pwm_states.max(0)])
+        # State: robot_eef_pose[:tcp_dims] + pwm (3D)
+        self.state_min = np.concatenate([robot_states[:, :d].min(0), pwm_states.min(0)])
+        self.state_max = np.concatenate([robot_states[:, :d].max(0), pwm_states.max(0)])
         self.state_range = self.state_max - self.state_min + eps
 
-        # Action: commanded target xyz (3D) + pwm (3D) = 6D base  [rotation excluded]
-        self.action_min = np.concatenate([robot_actions[:, :3].min(0), pwm_states.min(0)])
-        self.action_max = np.concatenate([robot_actions[:, :3].max(0), pwm_states.max(0)])
+        # Action: commanded target_pose[:tcp_dims] + pwm (3D)
+        self.action_min = np.concatenate([robot_actions[:, :d].min(0), pwm_states.min(0)])
+        self.action_max = np.concatenate([robot_actions[:, :d].max(0), pwm_states.max(0)])
         self.action_range = self.action_max - self.action_min + eps
 
         # Append hardcoded stats for operation_mode (2D): always in {0, 1}
@@ -160,18 +166,18 @@ class PickPlaceDataset(Dataset):
         self.action_max   = np.concatenate([self.action_max,   op_max])
         self.action_range = np.concatenate([self.action_range, op_range])
 
-        print(f"  State  range (XYZ): "
-              f"X=[{self.state_min[0]:.4f}, {self.state_max[0]:.4f}], "
-              f"Y=[{self.state_min[1]:.4f}, {self.state_max[1]:.4f}], "
-              f"Z=[{self.state_min[2]:.4f}, {self.state_max[2]:.4f}]")
-        print(f"  Action range (XYZ): "
-              f"X=[{self.action_min[0]:.4f}, {self.action_max[0]:.4f}], "
-              f"Y=[{self.action_min[1]:.4f}, {self.action_max[1]:.4f}], "
-              f"Z=[{self.action_min[2]:.4f}, {self.action_max[2]:.4f}]")
+        d = self.tcp_dims
+        tcp_labels = ['X', 'Y', 'Z', 'Rx', 'Ry', 'Rz'][:d]
+        tcp_str = ', '.join(f"{l}=[{self.state_min[i]:.4f}, {self.state_max[i]:.4f}]"
+                            for i, l in enumerate(tcp_labels))
+        print(f"  State  range (TCP {d}D): {tcp_str}")
+        tcp_str_a = ', '.join(f"{l}=[{self.action_min[i]:.4f}, {self.action_max[i]:.4f}]"
+                              for i, l in enumerate(tcp_labels))
+        print(f"  Action range (TCP {d}D): {tcp_str_a}")
         print(f"  PWM range: "
-              f"[{self.state_min[3]:.1f}, {self.state_max[3]:.1f}], "
-              f"[{self.state_min[4]:.1f}, {self.state_max[4]:.1f}], "
-              f"[{self.state_min[5]:.1f}, {self.state_max[5]:.1f}]")
+              f"[{self.state_min[d]:.1f}, {self.state_max[d]:.1f}], "
+              f"[{self.state_min[d+1]:.1f}, {self.state_max[d+1]:.1f}], "
+              f"[{self.state_min[d+2]:.1f}, {self.state_max[d+2]:.1f}]")
         print(f"  op_mode: hardcoded [0,0]→[-1,-1], [1,1]→[+1,+1]")
 
     def _normalize_state(self, state):
@@ -218,8 +224,8 @@ class PickPlaceDataset(Dataset):
         # Operation mode (obs_horizon, 2): [ur5_active, flowbot_active]
         op_mode_states = self.zarr_root['data/operation_mode'][obs_start:obs_end].astype(np.float32)
 
-        # Combined state (obs_horizon, 8): xyz + pwm + op_mode  [rotation excluded]
-        states = np.concatenate([robot_states[:, :3], pwm_states, op_mode_states], axis=-1)
+        # Combined state (obs_horizon, tcp_dims+5): tcp[:tcp_dims] + pwm + op_mode
+        states = np.concatenate([robot_states[:, :self.tcp_dims], pwm_states, op_mode_states], axis=-1)
         states = self._normalize_state(states)
 
         # Images
@@ -247,7 +253,7 @@ class PickPlaceDataset(Dataset):
         else:
             images = np.zeros((self.obs_horizon, 3, *self.image_size), dtype=np.float32)
 
-        # Future actions: target xyz (3D) + pwm (3D) + op_mode (2D) = 8D  [rotation excluded]
+        # Future actions: target TCP[:tcp_dims] + pwm (3D) + op_mode (2D)
         # Using data/action (commanded target_pose) instead of data/robot_eef_pose so that
         # action[0] != obs[-1]: the spacemouse target is always ahead of the actual TCP.
         action_start = sample_idx
@@ -256,13 +262,14 @@ class PickPlaceDataset(Dataset):
         pwm_actions    = self.zarr_root['data/pwm_signals'][action_start:action_end].astype(np.float32)
         op_mode_actions = self.zarr_root['data/operation_mode'][action_start:action_end].astype(np.float32)
 
-        actions = np.concatenate([robot_actions[:, :3], pwm_actions, op_mode_actions], axis=-1)  # (pred_horizon, 8)
+        actions = np.concatenate([robot_actions[:, :self.tcp_dims], pwm_actions, op_mode_actions], axis=-1)
         actions = self._normalize_action(actions)
 
+        d = self.tcp_dims
         return {
-            'obs_state': torch.from_numpy(states).float(),    # (obs_horizon, 8)
+            'obs_state': torch.from_numpy(states).float(),    # (obs_horizon, d+5)
             'obs_image': torch.from_numpy(images).float(),    # (obs_horizon, 3, H, W)
-            'actions':   torch.from_numpy(actions).float(),   # (pred_horizon, 8)
+            'actions':   torch.from_numpy(actions).float(),   # (pred_horizon, d+5)
         }
 
     def get_normalizer(self):
@@ -292,9 +299,10 @@ def test_dataset():
     print(f"  obs_image shape: {sample['obs_image'].shape}")   # (2, 3, H, W)
     print(f"  actions shape:   {sample['actions'].shape}")     # (16, 8)
 
-    print(f"\n  State (t):   xyz={sample['obs_state'][-1, :3]}, pwm={sample['obs_state'][-1, 3:6]}, op_mode={sample['obs_state'][-1, 6:]}")
-    print(f"  Action [0]:  xyz={sample['actions'][0, :3]},    pwm={sample['actions'][0, 3:6]},    op_mode={sample['actions'][0, 6:]}")
-    print(f"\n  Δxyz (action[0] - obs[-1]): {sample['actions'][0, :3] - sample['obs_state'][-1, :3]}")
+    d = dataset.tcp_dims
+    print(f"\n  State (t):   tcp={sample['obs_state'][-1, :d]}, pwm={sample['obs_state'][-1, d:d+3]}, op_mode={sample['obs_state'][-1, d+3:]}")
+    print(f"  Action [0]:  tcp={sample['actions'][0, :d]},    pwm={sample['actions'][0, d:d+3]},    op_mode={sample['actions'][0, d+3:]}")
+    print(f"\n  Δtcp (action[0] - obs[-1]): {sample['actions'][0, :d] - sample['obs_state'][-1, :d]}")
     print(f"  (should be non-zero — action[0] is target_pose, not current position)")
 
 

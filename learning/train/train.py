@@ -127,6 +127,7 @@ def main():
         action_horizon=config['action_horizon'],
         image_size=tuple(config['image_size']),
         exclude_episodes=exclude_episodes,
+        tcp_dims=config.get('tcp_dims', 3),
     )
     print(f"Total samples: {len(dataset)}")
     print(f"State  XYZ range - min: {dataset.state_min[:3]}, max: {dataset.state_max[:3]}")

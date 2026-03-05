@@ -100,6 +100,7 @@ def debug_live(policy, robot_ip, flowbot_port=None,
     config         = policy.config
     obs_horizon    = config['obs_horizon']
     action_horizon = config['action_horizon']
+    tcp_dims       = config.get('tcp_dims', 3)
     image_size_tup = tuple(image_size)
     state_min      = policy.checkpoint['state_min']
     state_range    = policy.checkpoint['state_range']
@@ -137,10 +138,10 @@ def debug_live(policy, robot_ip, flowbot_port=None,
 
     # ── Observation helpers (matching RobotDeployment._get_raw_observation) ───
     def get_raw_obs():
-        tcp_pose  = ur5.get_tcp_pose()                                       # (6,) — use [:3] only
+        tcp_pose  = ur5.get_tcp_pose()                                             # (6,)
         pwm       = np.array(fb.last_pwm if has_flowbot else [0, 0, 0],
-                             dtype=np.float32)                               # (3,)
-        state_raw = np.concatenate([tcp_pose[:3], pwm, current_op_mode])    # (8,)
+                             dtype=np.float32)                                     # (3,)
+        state_raw = np.concatenate([tcp_pose[:tcp_dims], pwm, current_op_mode])   # (tcp_dims+5,)
 
         camera_frame, _ = cam.get_frames()
         if camera_frame is None:
@@ -196,28 +197,28 @@ def debug_live(policy, robot_ip, flowbot_port=None,
 
             actions = _denormalize_actions(actions_norm, action_min, action_range)
 
+            d = tcp_dims
             # Update tracked op_mode from first predicted action for next observation
-            op_mode_pred = np.clip(np.round(actions[0][6:8]), 0, 1).astype(int)
+            op_mode_pred = np.clip(np.round(actions[0][d+3:d+5]), 0, 1).astype(int)
             current_op_mode[:] = op_mode_pred.astype(np.float32)
 
             # ── Print ─────────────────────────────────────────────────────────
-            tcp_now = state_raw[:3]
-            pwm_now = state_raw[3:6].astype(int)
+            tcp_now = state_raw[:d]
+            pwm_now = state_raw[d:d+3].astype(int)
             mode_names = {(0, 0): 'idle', (1, 0): 'UR5', (0, 1): 'FB', (1, 1): 'release'}
 
             print(f"\n{'='*62}")
             print(f"Step {step+1:3d}/{num_steps}  [inference: {infer_ms:.0f} ms]")
-            print(f"  Current  TCP: [{tcp_now[0]:.3f}, {tcp_now[1]:.3f}, {tcp_now[2]:.3f}]  "
-                  f"PWM: {pwm_now.tolist()}")
+            print(f"  Current  TCP: {tcp_now.tolist()}  PWM: {pwm_now.tolist()}")
             print(f"  Predicted {action_horizon} actions (action_horizon):")
             for i in range(action_horizon):
                 a = actions[i]
                 delta_x = a[0] - tcp_now[0]
-                a_op = np.clip(np.round(a[6:8]), 0, 1).astype(int)
+                a_op = np.clip(np.round(a[d+3:d+5]), 0, 1).astype(int)
                 mode_str = mode_names.get(tuple(a_op), '?')
-                print(f"    [{i:2d}] [{mode_str:7s}] TCP: [{a[0]:.3f}, {a[1]:.3f}, {a[2]:.3f}]  "
-                      f"ΔX={delta_x:+.3f}  "
-                      f"PWM: [{a[3]:.1f}, {a[4]:.1f}, {a[5]:.1f}]")
+                pwm_str = f"[{a[d]:.1f}, {a[d+1]:.1f}, {a[d+2]:.1f}]"
+                print(f"    [{i:2d}] [{mode_str:7s}] TCP: {a[:d].tolist()}  "
+                      f"ΔX={delta_x:+.3f}  PWM: {pwm_str}")
 
             # ── Pace to CONTROL_FREQ, then update obs buffer ───────────────────
             # Sleep BEFORE reading obs (same pattern as deploy_flowbot_w_policy.py)
@@ -265,6 +266,7 @@ def debug_offline(policy, dataset_path, episode_idx=0):
     obs_horizon  = config['obs_horizon']
     pred_horizon = config['pred_horizon']
     action_horizon = config['action_horizon']
+    tcp_dims     = config.get('tcp_dims', 3)
     image_size   = tuple(config['image_size'])
     state_min    = policy.checkpoint['state_min']
     state_range  = policy.checkpoint['state_range']
@@ -302,8 +304,8 @@ def debug_offline(policy, dataset_path, episode_idx=0):
         robot_obs  = root['data/robot_eef_pose'][obs_start:abs_idx + 1].astype(np.float32)
         pwm_obs    = root['data/pwm_signals'][obs_start:abs_idx + 1].astype(np.float32)
         op_mode_obs = root['data/operation_mode'][obs_start:abs_idx + 1].astype(np.float32)
-        # Use xyz only — rotation excluded ([:3] mirrors dataset.py; change to [:] to re-enable)
-        state_raw_seq = np.concatenate([robot_obs[:, :3], pwm_obs, op_mode_obs], axis=-1)  # (T, 8)
+        # Use tcp_dims components from robot_eef_pose (mirrors dataset.py slicing)
+        state_raw_seq = np.concatenate([robot_obs[:, :tcp_dims], pwm_obs, op_mode_obs], axis=-1)  # (T, tcp_dims+5)
 
         import cv2
         images = root['data/camera_0'][obs_start:abs_idx + 1]           # (T, H, W, 3)
@@ -329,9 +331,10 @@ def debug_offline(policy, dataset_path, episode_idx=0):
         gt_robot = root['data/robot_eef_pose'][gt_start:gt_end].astype(np.float32)
         gt_pwm   = root['data/pwm_signals'][gt_start:gt_end].astype(np.float32)
 
-        all_pred_xyz.append(actions[:, :3])
+        d = tcp_dims
+        all_pred_xyz.append(actions[:, :3])          # always plot xyz (first 3)
         all_true_xyz.append(gt_robot[:, :3])
-        all_pred_pwm.append(actions[:, 3:6])   # PWM only (not op_mode)
+        all_pred_pwm.append(actions[:, d:d+3])       # PWM (after tcp_dims components)
         all_true_pwm.append(gt_pwm)
 
     pred_xyz = np.concatenate(all_pred_xyz)

@@ -86,10 +86,11 @@ class DeploymentLogger:
         pred = data['predicted_horizons'] # (N_plans, pred_horizon, 9)
     """
 
-    def __init__(self, log_dir: str, checkpoint_path: str):
+    def __init__(self, log_dir: str, checkpoint_path: str, tcp_dims: int = 3):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint_path = str(checkpoint_path)
+        self.tcp_dims = tcp_dims
         self._reset()
 
     def _reset(self):
@@ -110,9 +111,10 @@ class DeploymentLogger:
 
     def log_step(self, state_raw: np.ndarray, action: np.ndarray, pwm_commanded: np.ndarray):
         """Call once per executed step (after _update_obs_buffer)."""
+        d = self.tcp_dims
         self._timestamps.append(time.time())
-        self._tcp_poses.append(state_raw[:3].copy())    # xyz only (rotation excluded)
-        self._pwm_actual.append(state_raw[3:6].copy())
+        self._tcp_poses.append(state_raw[:d].copy())      # tcp_dims components
+        self._pwm_actual.append(state_raw[d:d+3].copy())
         self._executed_actions.append(action.copy())
         self._pwm_commanded.append(pwm_commanded.copy())
 
@@ -171,7 +173,9 @@ class RobotDeployment:
         self.config = self.policy.config
         self.obs_horizon = self.config['obs_horizon']
         self.action_horizon = self.config['action_horizon']
+        self.tcp_dims = self.config.get('tcp_dims', 3)   # 3=xyz only, 6=xyz+rotation
         print(f"      obs_horizon={self.obs_horizon}, action_horizon={self.action_horizon}")
+        print(f"      tcp_dims={self.tcp_dims}  ({'xyz only' if self.tcp_dims == 3 else 'xyz+rotation'})")
         print(f"      device={device_obj}")
         if image_size is None:
             self.image_size = tuple(self.policy.config['image_size'])
@@ -218,17 +222,17 @@ class RobotDeployment:
         Read current robot state and camera image.
 
         Returns:
-            state_raw  : np.ndarray (8,)  — [x,y,z, pwm1,pwm2,pwm3, ur5_active, flowbot_active]
+            state_raw  : np.ndarray (tcp_dims+5,) — [tcp[:tcp_dims], pwm1,pwm2,pwm3, ur5_active, flowbot_active]
             image_raw  : np.ndarray (H,W,3) uint8 — cropped camera frame
         """
-        # Robot TCP pose — use xyz only; rotation excluded from state (action_dim=8)
+        # Robot TCP pose — slice to tcp_dims (3=xyz only, 6=xyz+rotation)
         tcp_pose = self.ur5.get_tcp_pose()
 
         # PWM from previous step — matches the physical state visible in the current image
-        pwm = self.prev_pwm.copy()                                              # (3,)
+        pwm = self.prev_pwm.copy()                                                          # (3,)
 
         # Operation mode from last executed action (2D)
-        state_raw = np.concatenate([tcp_pose[:3], pwm, self.current_op_mode])  # (8,)
+        state_raw = np.concatenate([tcp_pose[:self.tcp_dims], pwm, self.current_op_mode])  # (tcp_dims+5,)
 
         # Camera image
         camera_frame, _ = self.cam.get_frames()
@@ -327,16 +331,20 @@ class RobotDeployment:
         Send one action step to the robot and flowbot, gated by predicted operation mode.
 
         Args:
-            action : np.ndarray (8,) — [x,y,z, pwm1,pwm2,pwm3, ur5_active, flowbot_active]
-                     Rotation (rx,ry,rz) is not predicted; TCP_FIXED_ROTATION is appended.
+            action : np.ndarray (tcp_dims+5,) — [tcp[:tcp_dims], pwm1,pwm2,pwm3, ur5_active, flowbot_active]
+                     When tcp_dims=3 the fixed rotation TCP_FIXED_ROTATION is appended to form 6D target.
 
         Returns:
             pwm_int      : np.ndarray (3,) int — clamped PWM actually sent
             op_mode_pred : np.ndarray (2,) int — [ur5_active, flowbot_active]
         """
-        # Reconstruct 6D TCP target: predicted xyz + fixed rotation
-        tcp_target = action[:3].tolist() + TCP_FIXED_ROTATION
-        pwm_raw    = action[3:6]
+        d = self.tcp_dims
+        # Build 6D TCP target for servo_tcp_pose
+        if d == 6:
+            tcp_target = action[:6].tolist()
+        else:  # d == 3: append fixed rotation so the robot holds its orientation
+            tcp_target = action[:3].tolist() + TCP_FIXED_ROTATION
+        pwm_raw    = action[d:d+3]
         pwm_int    = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
 
         # Drop protection: if any channel decreases vs last sent PWM, hold previous value
@@ -344,7 +352,7 @@ class RobotDeployment:
             pwm_int = self.current_pwm.copy()
 
         # Decode predicted operation mode (denorm ~[0,1] → binary)
-        op_mode_pred = np.clip(np.round(action[6:8]), 0, 1).astype(int)
+        op_mode_pred = np.clip(np.round(action[d+3:d+5]), 0, 1).astype(int)
 
         # Gate UR5 servo: only move when ur5_active
         if op_mode_pred[0] == 1:
@@ -554,7 +562,7 @@ def main():
             log_dir = Path(args.log_dir)
             if not log_dir.is_absolute():
                 log_dir = Path(DEPLOY_DIR) / log_dir
-            logger = DeploymentLogger(str(log_dir), args.checkpoint)
+            logger = DeploymentLogger(str(log_dir), args.checkpoint, tcp_dims=robot.tcp_dims)
             print(f"Logging enabled → {log_dir}")
         else:
             logger = None
