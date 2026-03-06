@@ -538,9 +538,7 @@ def main():
     parser.add_argument('--quiet',         action='store_true',
                         help='Reduce per-step output')
     parser.add_argument('--log_dir',       type=str,   default=None,
-                        help='Directory to save deployment logs (.npz per episode). '
-                             'If not set, logging is disabled. '
-                             'Relative paths are resolved from the deploy/ directory.')
+                        help='Directory to save deployment logs (.npz per episode). ')
     args = parser.parse_args()
 
     if not os.path.exists(args.checkpoint):
@@ -560,7 +558,7 @@ def main():
         if args.log_dir:
             log_dir = Path(args.log_dir)
             if not log_dir.is_absolute():
-                log_dir = Path(DEPLOY_DIR) / log_dir
+                log_dir = Path(DEPLOY_DIR) / 'deploy_logs' / log_dir
             logger = DeploymentLogger(str(log_dir), args.checkpoint, tcp_dims=robot.tcp_dims)
             print(f"Logging enabled → {log_dir}")
         else:

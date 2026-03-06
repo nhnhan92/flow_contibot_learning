@@ -111,7 +111,7 @@ def main():
         output_dir = Path(args.output_dir)
     else:
         output_dir = Path(LEARNING_DIR) / config['output_dir']
-        output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output: {output_dir}")
 
     # Device
