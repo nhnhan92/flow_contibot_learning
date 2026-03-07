@@ -571,12 +571,15 @@ def main():
 
             robot.run_episode(
                 max_steps=args.max_steps,
-                move_to_start=not args.no_start_pose,
+                move_to_start=(ep == 0) and not args.no_start_pose,
                 logger=logger,
                 episode_idx=ep,
             )
 
             if ep < args.num_episodes - 1:
+                # Return to start so the scene is reset before the user confirms
+                if not args.no_start_pose:
+                    robot.move_to_start()
                 input("\nPress Enter to start next episode (Ctrl+C to abort) ...")
 
         print("\n✅ All episodes complete!")
