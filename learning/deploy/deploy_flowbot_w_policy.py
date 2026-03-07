@@ -414,6 +414,12 @@ class RobotDeployment:
         if move_to_start:
             self.move_to_start()
 
+        # Reset internal state so the new episode starts clean (op_mode=[0,0], PWM=0).
+        # This prevents carryover from the previous episode biasing the first observation.
+        self.current_op_mode = np.zeros(2, dtype=np.float32)
+        self.current_pwm     = np.array([0, 0, 0], dtype=int)
+        self.prev_pwm        = np.zeros(3, dtype=np.float32)
+
         print("\n" + "="*30)
         print("Starting episode ...")
         print("="*30)
@@ -486,8 +492,9 @@ class RobotDeployment:
         elapsed_total = time.time() - episode_start
         print(f"\n✅ Episode finished: {total_steps} steps in {elapsed_total:.1f}s")
 
-        # Stop UR5e servoing
+        # Stop UR5e servoing and allow RTDE to settle before any subsequent moveL
         self.ur5.stop()
+        time.sleep(0.5)
 
         # Reset Flowbot
         print("Resetting Flowbot ...")
