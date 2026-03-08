@@ -58,6 +58,12 @@ FLOWBOT_FREQ = 10.0  # Flowbot command frequency — must match CONTROL_FREQ
 # servo_l speed/acceleration (lower = smoother)
 SERVO_SPEED = 0.05     # m/s
 SERVO_ACCEL = 0.05     # m/s^2
+
+# Safety: maximum XYZ displacement per servo step (metres).
+# Prevents high-speed jumps when the policy predicts a target far from current TCP.
+# At 8 Hz this gives a hard ceiling of  MAX_TCP_DELTA / DT  m/s cartesian speed.
+# Example: 0.02 m / 0.125 s = 0.16 m/s  (well above SERVO_SPEED so normal moves pass through)
+MAX_TCP_DELTA = 0.02   # m per step
 SERVO_LOOKAHEAD = 0.1   # s
 SERVO_GAIN = 300
 
@@ -356,6 +362,16 @@ class RobotDeployment:
 
         # Gate UR5 servo: only move when ur5_active
         if op_mode_pred[0] == 1:
+            # Safety clamp: limit XYZ displacement per step to MAX_TCP_DELTA
+            current_tcp = self.ur5.get_tcp_pose()
+            tcp_arr = np.array(tcp_target, dtype=np.float64)
+            delta_xyz = tcp_arr[:3] - current_tcp[:3]
+            dist = np.linalg.norm(delta_xyz)
+            if dist > MAX_TCP_DELTA:
+                tcp_arr[:3] = current_tcp[:3] + delta_xyz * (MAX_TCP_DELTA / dist)
+                tcp_target = tcp_arr.tolist()
+                if self.verbose:
+                    print(f"  ⚠️  TCP delta {dist*1000:.1f}mm clamped to {MAX_TCP_DELTA*1000:.0f}mm")
             self.ur5.servo_tcp_pose(target_pose=tcp_target, velocity=SERVO_SPEED,
                                     acceleration=SERVO_ACCEL, dt=DT,
                                     lookahead_time=SERVO_LOOKAHEAD, gain=SERVO_GAIN)
