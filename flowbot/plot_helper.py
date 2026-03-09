@@ -18,7 +18,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.spatial import ConvexHull
 
-HULL_DOWNSAMPLE = 30  # keep your constant
+HULL_DOWNSAMPLE = 20  # keep your constant
 
 class plot_helper:
     def setup_plot(self, points: np.ndarray):

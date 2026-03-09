@@ -3,7 +3,7 @@
 Test if model uses visual information or just robot state
 
 Usage:
-    python train/test_visual_importance.py --checkpoint train/checkpoints/best_model.pt
+    python system_verification/test_visual_importance.py --checkpoint train/checkpoints/best_model.pt
 """
 
 import sys
@@ -22,7 +22,7 @@ from train.eval import DiffusionPolicyInference
 from train.dataset import PickPlaceDataset
 from torch.utils.data import DataLoader
 
-def test_visual_importance(checkpoint_path):
+def test_visual_importance(checkpoint_path, dataset_path=None):
     """Test if model predictions change with different images"""
 
     print("="*60)
@@ -31,10 +31,10 @@ def test_visual_importance(checkpoint_path):
 
     # Load model
     policy = DiffusionPolicyInference(checkpoint_path)
-
+    dataset_path = dataset_path or policy.config['dataset_path']
     # Load dataset
     dataset = PickPlaceDataset(
-        dataset_path=policy.config['dataset_path'],
+        dataset_path=dataset_path,
         obs_horizon=policy.config['obs_horizon'],
         pred_horizon=policy.config['pred_horizon'],
         action_horizon=policy.config['action_horizon'],
@@ -42,7 +42,7 @@ def test_visual_importance(checkpoint_path):
     )
 
     # Get a sample
-    sample = dataset[100]
+    sample = dataset[5000]
 
     print(f"\nSample keys: {sample.keys()}")
 
@@ -93,7 +93,6 @@ def test_visual_importance(checkpoint_path):
         print("✅ Model IS using visual information")
         print(f"   Predictions change significantly with different images")
         print(f"   Visual dependency: {max(diff_noise, diff_black):.6f}")
-
     return diff_noise, diff_black
 
 
@@ -101,6 +100,9 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint', type=str, required=True)
+    parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--dataset_path', type=str, default=None, help="Override dataset path from config")
     args = parser.parse_args()
 
-    test_visual_importance(args.checkpoint)
+    test_visual_importance(checkpoint_path=args.checkpoint,
+                           dataset_path=args.dataset_path)

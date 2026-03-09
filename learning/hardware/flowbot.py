@@ -29,6 +29,10 @@ def drain_serial(ser: serial.Serial, stop_flag: dict):
             ser.readline()
         except Exception:
             pass
+
+# Expected ACK format from Arduino: "ACK p1 p2 p3\n"
+# e.g. after receiving "0 5 5\n", Arduino replies "ACK 0 5 5\n"
+ACK_PREFIX = "ACK"
 def clamp_pwm(pwm: np.ndarray) -> np.ndarray:
     pwm = np.asarray(pwm, dtype=int).reshape(3,)
     return pwm.astype(np.int32)
@@ -56,7 +60,14 @@ class flowbot:
         time.sleep(1.0)
         print("Opened serial:", self.serial_port, self.baud)
         self.stop_flag = {"stop": False}
-        t_reader = threading.Thread(target=drain_serial, args=(self.ser, self.stop_flag), daemon=True)
+
+        # ACK protocol: Arduino replies "ACK p1 p2 p3\n" after applying each command.
+        self._ack_event = threading.Event()   # set when a new ACK arrives
+        self._ack_pwm   = None                # last ACK'd PWM (np.ndarray (3,) int)
+        self._ack_lock  = threading.Lock()
+
+        # ACK-aware reader replaces the old drain_serial thread.
+        t_reader = threading.Thread(target=self._serial_reader_thread, daemon=True)
         t_reader.start()
         self.pwm_min = pwm_min
         self.pwm_max = pwm_max
@@ -72,10 +83,11 @@ class flowbot:
         self.ws, self.tri, self.bbox = self.load_workspace(self.flowbot)
         
         if initial_pwm is None:
-            # Start pc at workspace "origin": pwm = [5,5,5]
-            pwm = np.array([self.pwm_min, self.pwm_min, self.pwm_min], dtype=int)  # [5,5,5] if pwm_min=5
+            # Start pc at workspace "origin": pwm = [1,1,1] if pwm_min=0, which is just above the minimum to avoid numerical issues in the model
+            pwm = np.array([self.pwm_min, self.pwm_min , self.pwm_min], dtype=int)  # [1,1,1] if pwm_min=0
             pb0 = self.flowbot.pwm_to_pressure(pwm)
             fk0 = self.flowbot.forward_kinematics_from_pressures(pb0)
+            self.pc_init = np.asarray(fk0["pc"], dtype=float).reshape(3,)
             self.pc =  np.asarray(fk0["pc"], dtype=float).reshape(3,)
             print("Init pwm:", pwm, "Init pc:", self.pc)
             self.serial_sending(pwm)
@@ -121,13 +133,63 @@ class flowbot:
         )
         return robot
     
-    def serial_sending(self,pwm):
+    def _serial_reader_thread(self) -> None:
+        """
+        Background serial reader.
+
+        Captures ACK lines from Arduino (format: "ACK p1 p2 p3\\n").
+        All other lines are silently drained so the input buffer never fills up.
+        """
+        while not self.stop_flag["stop"]:
+            try:
+                raw = self.ser.readline()
+                if not raw:
+                    continue
+                line = raw.decode("ascii", errors="ignore").strip()
+                if line.startswith(ACK_PREFIX):
+                    parts = line.split()          # ["ACK", "p1", "p2", "p3"]
+                    if len(parts) == 4:
+                        ack_pwm = np.array([int(parts[1]), int(parts[2]), int(parts[3])],
+                                           dtype=int)
+                        with self._ack_lock:
+                            self._ack_pwm = ack_pwm
+                        self._ack_event.set()
+                # non-ACK lines are discarded (drain behaviour)
+            except Exception:
+                pass
+
+    def serial_sending(self, pwm, wait_ack: bool = False, ack_timeout: float = 0.5) -> bool:
+        """
+        Send a PWM command over serial.
+
+        Args:
+            pwm         : array-like (3,) — PWM values to send.
+            wait_ack    : If True, block until Arduino sends back "ACK p1 p2 p3"
+                          or until ack_timeout expires.
+                          Requires Arduino firmware to echo "ACK p1 p2 p3\\n".
+                          Default False → fire-and-forget (original behaviour).
+            ack_timeout : Maximum seconds to wait for ACK (default 0.5 s).
+
+        Returns:
+            True  — command sent (and ACK received if wait_ack=True).
+            False — serial write failed, or ACK timed out.
+        """
         cmd0 = f"{int(pwm[0])} {int(pwm[1])} {int(pwm[2])}\n"
+        # Clear event BEFORE writing so a fast ACK is never missed.
+        if wait_ack:
+            self._ack_event.clear()
         try:
             self.ser.write(cmd0.encode("ascii"))
             print("[PYTHON] Sent:", cmd0.strip())
         except Exception as e:
-            print("Serial write failed (init):", e)
+            print("Serial write failed:", e)
+            return False
+        if wait_ack:
+            got_ack = self._ack_event.wait(timeout=ack_timeout)
+            if not got_ack:
+                print(f"[WARN] No ACK for PWM {pwm} within {ack_timeout:.2f}s")
+            return got_ack
+        return True
     # -------------------------
     # Workspace 
     # -------------------------
@@ -205,6 +267,13 @@ class flowbot:
             self.ser.close()
         except Exception:
             pass
+
+    def reset(self):
+        pwm = np.array([0, 0, 0], dtype=np.int32)
+        self.last_pwm = pwm
+        self.pc = self.pc_init.copy()
+        self.serial_sending(pwm)
+
     def step(self,dpc) -> np.ndarray:
         if not self._running:
             raise RuntimeError("Call start() before step().")
@@ -224,18 +293,11 @@ class flowbot:
             print("IK failed:", e)
             pwm = np.array([0, 0, 0], dtype=np.int32)
 
-        if self.last_pwm is None or not np.array_equal(pwm, self.last_pwm):
-            cmd = f"{int(pwm[0])} {int(pwm[1])} {int(pwm[2])}\n"
-            try:
-                self.ser.write(cmd.encode("ascii"))
-                # print("[PYTHON] Sent:", cmd.strip(), "pc:", self.pc)
-            except Exception as e:
-                print("Serial write failed:", e)
-            self.last_pwm = pwm
+        self.last_pwm = pwm
+        self.serial_sending(pwm)
 
         elapsed = time.time() - t0
         if elapsed < self.dt:
-            print(self.dt - elapsed)
             time.sleep(self.dt - elapsed)
 
         return pwm
@@ -255,11 +317,12 @@ class flowbot:
             self.pl.update_point_handle(self.pc_handles,p)
 
     def release(self):
+
         cmd = "r\n"
         try:
             self.ser.write(cmd.encode("ascii"))
         except Exception as e:
             print("Serial write failed:", e)
-        time.sleep(2)
+        time.sleep(0.1)
 
 

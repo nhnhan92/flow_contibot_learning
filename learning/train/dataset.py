@@ -1,6 +1,8 @@
 """
-Dataset loader for Pick-Place demonstrations
+Dataset loader for Flowbot demonstrations
 Loads data from zarr format collected by collect_demos_with_camera.py
+
+Robot: UR5e + Flowbot soft manipulator (3 pneumatic valves via PWM)
 """
 
 import numpy as np
@@ -13,18 +15,33 @@ import cv2
 
 class PickPlaceDataset(Dataset):
     """
-    Dataset for pick-place demonstrations
+    Dataset for robot demonstrations with Flowbot soft manipulator.
 
-    Data format from zarr:
-        - robot_eef_pose: (T, 6) - end-effector pose [x, y, z, rx, ry, rz] (USED AS ACTIONS)
-        - robot_joint: (T, 6) - joint angles
-        - gripper_position: (T,) - gripper state [0, 1]
-        - action: (T, 6) - commanded poses during collection (NOT USED - relative commands)
-        - camera_0: (T, H, W, 3) - RGB images
-        - timestamp: (T,) - timestamps
+    Data format from zarr (collected by collect_demos_with_camera.py):
+        - robot_eef_pose: (T, 6) - UR5e end-effector TCP pose [x, y, z, rx, ry, rz]
+        - robot_joint:    (T, 6) - UR5e joint angles (not used for training)
+        - pwm_signals:    (T, 3) - Flowbot PWM signals [pwm1, pwm2, pwm3]
+        - action:         (T, 6) - commanded UR5e target TCP pose (spacemouse target)
+        - camera_0:       (T, H, W, 3) - RGB images
+        - timestamp:      (T,) - timestamps
 
-    NOTE: For Diffusion Policy, actions are ABSOLUTE TARGET POSES, not relative commands.
-          We use future robot_eef_pose as action labels.
+    State  (tcp_dims+5 D):  robot_eef_pose[:tcp_dims] + pwm_signals (3D) + operation_mode (2D)
+    Action (tcp_dims+5 D):  target TCP[:tcp_dims] from data/action + pwm_signals (3D) + op_mode (2D)
+
+    tcp_dims controls how many TCP components are used:
+        tcp_dims=3  →  xyz only          (state_dim = action_dim = 8)
+        tcp_dims=6  →  xyz + rx,ry,rz   (state_dim = action_dim = 11)
+    Set via config key 'tcp_dims' (default: 3).
+
+    operation_mode encoding per frame:
+        [0, 0] = idle / holding
+        [1, 0] = UR5 being controlled
+        [0, 1] = flowbot being controlled
+        [1, 1] = release phase
+
+    Using data/action (commanded target_pose) rather than data/robot_eef_pose for action
+    labels ensures action[0] != obs[-1]: the first predicted action is the command that
+    moves the robot forward, not a copy of the current position.
     """
 
     def __init__(
@@ -37,6 +54,7 @@ class PickPlaceDataset(Dataset):
         use_images=True,
         normalize=True,
         exclude_episodes=None,  # List of episode indices to exclude
+        tcp_dims=3,         # TCP components used: 3=xyz only, 6=xyz+rotation
     ):
         self.dataset_path = Path(dataset_path)
         self.obs_horizon = obs_horizon
@@ -46,6 +64,7 @@ class PickPlaceDataset(Dataset):
         self.use_images = use_images
         self.normalize = normalize
         self.exclude_episodes = exclude_episodes if exclude_episodes is not None else []
+        self.tcp_dims = tcp_dims
 
         # Load zarr dataset
         self.zarr_root = zarr.open(str(self.dataset_path), mode='r')
@@ -69,14 +88,10 @@ class PickPlaceDataset(Dataset):
 
             # Each sample needs obs_horizon past frames + pred_horizon future actions
             for i in range(episode_length):
-                # Can we get obs_horizon frames? (including current)
                 if i < obs_horizon - 1:
                     continue
-
-                # Can we get pred_horizon future actions?
                 if i + pred_horizon > episode_length:
                     continue
-
                 self.samples.append({
                     'episode_idx': ep_idx,
                     'start_idx': start_idx,
@@ -94,55 +109,76 @@ class PickPlaceDataset(Dataset):
             self._compute_stats()
 
     def _compute_stats(self):
-        """Compute min/max for normalization (following original diffusion_policy)
+        """Compute min/max for normalization (Min-Max to [-1, 1]).
 
-        Uses Min-Max normalization to [-1, 1] range:
-            x_norm = 2.0 * (x - min) / (max - min) - 1.0
+        x_norm = 2.0 * (x - min) / (max - min) - 1.0
 
-        This is the standard approach in diffusion models, as it provides:
-        - Bounded inputs/outputs in [-1, 1]
-        - Better stability during training
-        - Consistent with image normalization
+        Uses ALL frames to guarantee correct min/max (no sampling bias).
+        For large datasets (>10k frames) a seeded random sample is used
+        to keep loading time reasonable while being fully reproducible.
         """
         print("Computing normalization statistics (Min-Max to [-1, 1])...")
 
-        # Sample 1000 random timesteps
         total_len = int(self.episode_ends[-1])
-        num_samples = min(1000, total_len)
-        sample_indices = np.random.choice(total_len, num_samples, replace=False)
-        sample_indices = sorted(sample_indices)  # Sort for better performance
+        FULL_SCAN_THRESHOLD = 10_000  # use all frames below this size
 
-        # Get robot states (zarr doesn't support fancy indexing, load individually)
-        robot_states = []
-        gripper_states = []
-        actions = []
-        for idx in sample_indices:
-            robot_states.append(self.zarr_root['data/robot_eef_pose'][idx])
-            gripper_states.append(self.zarr_root['data/gripper_position'][idx])
-            actions.append(self.zarr_root['data/action'][idx])
+        if total_len <= FULL_SCAN_THRESHOLD:
+            # Load everything — guaranteed correct min/max
+            robot_states  = self.zarr_root['data/robot_eef_pose'][:]  # (T, 6)
+            pwm_states    = self.zarr_root['data/pwm_signals'][:]     # (T, 3)
+            robot_actions = self.zarr_root['data/action'][:]          # (T, 6) target_pose
+            print(f"  Using all {total_len} frames for stats")
+        else:
+            # Seeded random sample — reproducible across runs
+            rng = np.random.RandomState(42)
+            sample_indices = sorted(rng.choice(total_len, 5000, replace=False))
+            robot_states  = self.zarr_root['data/robot_eef_pose'].oindex[sample_indices]
+            pwm_states    = self.zarr_root['data/pwm_signals'].oindex[sample_indices]
+            robot_actions = self.zarr_root['data/action'].oindex[sample_indices]
+            print(f"  Using 5000/{total_len} seeded-random frames for stats")
 
-        robot_states = np.array(robot_states)
-        gripper_states = np.array(gripper_states)
-        actions = np.array(actions)
+        robot_states  = np.array(robot_states)   # (N, 6)
+        pwm_states    = np.array(pwm_states)     # (N, 3)
+        robot_actions = np.array(robot_actions)  # (N, 6)
 
-        # Compute min/max for Min-Max normalization
-        eps = 1e-6  # Small epsilon to avoid division by zero
+        eps = 1e-6
+        d = self.tcp_dims  # 3 or 6
 
-        self.state_min = np.concatenate([robot_states.min(0), [gripper_states.min()]])
-        self.state_max = np.concatenate([robot_states.max(0), [gripper_states.max()]])
+        # State: robot_eef_pose[:tcp_dims] + pwm (3D)
+        self.state_min = np.concatenate([robot_states[:, :d].min(0), pwm_states.min(0)])
+        self.state_max = np.concatenate([robot_states[:, :d].max(0), pwm_states.max(0)])
         self.state_range = self.state_max - self.state_min + eps
 
-        # Action includes robot pose (6D) + gripper (1D) = 7D
-        self.action_min = np.concatenate([actions.min(0), [gripper_states.min()]])
-        self.action_max = np.concatenate([actions.max(0), [gripper_states.max()]])
+        # Action: commanded target_pose[:tcp_dims] + pwm (3D)
+        self.action_min = np.concatenate([robot_actions[:, :d].min(0), pwm_states.min(0)])
+        self.action_max = np.concatenate([robot_actions[:, :d].max(0), pwm_states.max(0)])
         self.action_range = self.action_max - self.action_min + eps
 
-        print(f"  State range: [{self.state_min[0]:.4f}, {self.state_max[0]:.4f}] (X)")
-        print(f"               [{self.state_min[1]:.4f}, {self.state_max[1]:.4f}] (Y)")
-        print(f"               [{self.state_min[2]:.4f}, {self.state_max[2]:.4f}] (Z)")
-        print(f"  Action range: [{self.action_min[0]:.4f}, {self.action_max[0]:.4f}] (X)")
-        print(f"                [{self.action_min[1]:.4f}, {self.action_max[1]:.4f}] (Y)")
-        print(f"                [{self.action_min[2]:.4f}, {self.action_max[2]:.4f}] (Z)")
+        # Append hardcoded stats for operation_mode (2D): always in {0, 1}
+        # Hardcoded to avoid wrong range when dataset only has one mode
+        op_min   = np.array([0.0, 0.0])
+        op_max   = np.array([1.0, 1.0])
+        op_range = np.array([1.0 + eps, 1.0 + eps])
+        self.state_min   = np.concatenate([self.state_min,   op_min])
+        self.state_max   = np.concatenate([self.state_max,   op_max])
+        self.state_range = np.concatenate([self.state_range, op_range])
+        self.action_min   = np.concatenate([self.action_min,   op_min])
+        self.action_max   = np.concatenate([self.action_max,   op_max])
+        self.action_range = np.concatenate([self.action_range, op_range])
+
+        d = self.tcp_dims
+        tcp_labels = ['X', 'Y', 'Z', 'Rx', 'Ry', 'Rz'][:d]
+        tcp_str = ', '.join(f"{l}=[{self.state_min[i]:.4f}, {self.state_max[i]:.4f}]"
+                            for i, l in enumerate(tcp_labels))
+        print(f"  State  range (TCP {d}D): {tcp_str}")
+        tcp_str_a = ', '.join(f"{l}=[{self.action_min[i]:.4f}, {self.action_max[i]:.4f}]"
+                              for i, l in enumerate(tcp_labels))
+        print(f"  Action range (TCP {d}D): {tcp_str_a}")
+        print(f"  PWM range: "
+              f"[{self.state_min[d]:.1f}, {self.state_max[d]:.1f}], "
+              f"[{self.state_min[d+1]:.1f}, {self.state_max[d+1]:.1f}], "
+              f"[{self.state_min[d+2]:.1f}, {self.state_max[d+2]:.1f}]")
+        print(f"  op_mode: hardcoded [0,0]→[-1,-1], [1,1]→[+1,+1]")
 
     def _normalize_state(self, state):
         """Normalize state using Min-Max to [-1, 1]"""
@@ -175,115 +211,99 @@ class PickPlaceDataset(Dataset):
         sample_info = self.samples[idx]
         sample_idx = sample_info['sample_idx']
 
-        # Get observation window
+        # Observation window indices
         obs_start = sample_idx - (self.obs_horizon - 1)
         obs_end = sample_idx + 1
 
-        # Robot states (obs_horizon, 6)
+        # Robot TCP states (obs_horizon, 6)
         robot_states = self.zarr_root['data/robot_eef_pose'][obs_start:obs_end]
 
-        # Gripper states (obs_horizon,)
-        gripper_states = self.zarr_root['data/gripper_position'][obs_start:obs_end]
+        # Flowbot PWM states (obs_horizon, 3)
+        pwm_states = self.zarr_root['data/pwm_signals'][obs_start:obs_end].astype(np.float32)
 
-        # Combine into state (obs_horizon, 7)
-        states = np.concatenate([
-            robot_states,
-            gripper_states[:, None]
-        ], axis=-1)
+        # Operation mode (obs_horizon, 2): [ur5_active, flowbot_active]
+        op_mode_states = self.zarr_root['data/operation_mode'][obs_start:obs_end].astype(np.float32)
 
-        # Normalize
+        # Combined state (obs_horizon, tcp_dims+5): tcp[:tcp_dims] + pwm + op_mode
+        states = np.concatenate([robot_states[:, :self.tcp_dims], pwm_states, op_mode_states], axis=-1)
         states = self._normalize_state(states)
 
-        # Get images if using
+        # Images
         if self.use_images:
-            # Load images (obs_horizon, H, W, 3)
             images = self.zarr_root['data/camera_0'][obs_start:obs_end]
 
-            # Process images: center crop then resize
             processed_images = []
             for img in images:
-                # Center crop (matches original diffusion_policy approach)
-                # Original camera: 480x640 (H x W)
-                # Target size: self.image_size (H, W)
                 h, w = img.shape[:2]
                 target_h, target_w = self.image_size
 
-                # Calculate crop boundaries for center crop
-                crop_h = min(h, int(target_h * 1.5))  # Allow some margin for cropping
+                crop_h = min(h, int(target_h * 1.5))
                 crop_w = min(w, int(target_w * 1.5))
 
-                # Center crop
                 start_h = (h - crop_h) // 2
                 start_w = (w - crop_w) // 2
                 img_cropped = img[start_h:start_h + crop_h, start_w:start_w + crop_w]
 
-                # Resize to target size (cv2.resize takes (width, height))
                 img_resized = cv2.resize(img_cropped, (target_w, target_h))
-
-                # Normalize to [-1, 1]
                 img_normalized = (img_resized.astype(np.float32) / 127.5) - 1.0
                 processed_images.append(img_normalized)
 
             images = np.array(processed_images)
-            # Transpose to (obs_horizon, C, H, W) for PyTorch
-            images = images.transpose(0, 3, 1, 2)
+            images = images.transpose(0, 3, 1, 2)  # (obs_horizon, C, H, W)
         else:
             images = np.zeros((self.obs_horizon, 3, *self.image_size), dtype=np.float32)
 
-        # Get future actions (pred_horizon, 6) and gripper (pred_horizon,)
-        # IMPORTANT: Actions should be target poses (absolute), not relative commands!
+        # Future actions: target TCP[:tcp_dims] + pwm (3D) + op_mode (2D)
+        # Using data/action (commanded target_pose) instead of data/robot_eef_pose so that
+        # action[0] != obs[-1]: the spacemouse target is always ahead of the actual TCP.
         action_start = sample_idx
         action_end = sample_idx + self.pred_horizon
-        robot_actions = self.zarr_root['data/robot_eef_pose'][action_start:action_end]  # Use future poses as actions
-        gripper_actions = self.zarr_root['data/gripper_position'][action_start:action_end]
+        robot_actions  = self.zarr_root['data/action'][action_start:action_end]
+        pwm_actions    = self.zarr_root['data/pwm_signals'][action_start:action_end].astype(np.float32)
+        op_mode_actions = self.zarr_root['data/operation_mode'][action_start:action_end].astype(np.float32)
 
-        # Combine into actions (pred_horizon, 7): robot pose + gripper
-        actions = np.concatenate([
-            robot_actions,
-            gripper_actions[:, None]
-        ], axis=-1)
-
-        # Normalize
+        actions = np.concatenate([robot_actions[:, :self.tcp_dims], pwm_actions, op_mode_actions], axis=-1)
         actions = self._normalize_action(actions)
 
+        d = self.tcp_dims
         return {
-            'obs_state': torch.from_numpy(states).float(),        # (obs_horizon, 7)
-            'obs_image': torch.from_numpy(images).float(),        # (obs_horizon, 3, H, W)
-            'actions': torch.from_numpy(actions).float(),         # (pred_horizon, 7)
+            'obs_state': torch.from_numpy(states).float(),    # (obs_horizon, d+5)
+            'obs_image': torch.from_numpy(images).float(),    # (obs_horizon, 3, H, W)
+            'actions':   torch.from_numpy(actions).float(),   # (pred_horizon, d+5)
         }
 
     def get_normalizer(self):
-        """Get action normalizer for inference"""
+        """Get action/state normalizer for inference"""
         return {
-            'action_min': self.action_min,
-            'action_max': self.action_max,
+            'action_min':   self.action_min,
+            'action_max':   self.action_max,
             'action_range': self.action_range,
-            'state_min': self.state_min,
-            'state_max': self.state_max,
-            'state_range': self.state_range,
+            'state_min':    self.state_min,
+            'state_max':    self.state_max,
+            'state_range':  self.state_range,
         }
 
 
 def test_dataset():
     """Test dataset loading"""
     dataset = PickPlaceDataset(
-        dataset_path='/home/protac/Desktop/my_pickplace/data/camera_demos/dataset.zarr',
+        dataset_path='/home/nhnhan/Desktop/flow_contibot_learning/data/demo_data/dataset.zarr',
         use_images=True
     )
 
     print(f"\nDataset size: {len(dataset)}")
 
-    # Get a sample
     sample = dataset[0]
     print(f"\nSample 0:")
-    print(f"  obs_state shape: {sample['obs_state'].shape}")
-    print(f"  obs_image shape: {sample['obs_image'].shape}")
-    print(f"  action shape: {sample['action'].shape}")
+    print(f"  obs_state shape: {sample['obs_state'].shape}")   # (2, 8)
+    print(f"  obs_image shape: {sample['obs_image'].shape}")   # (2, 3, H, W)
+    print(f"  actions shape:   {sample['actions'].shape}")     # (16, 8)
 
-    # Print some values
-    print(f"\n  State (first timestep): {sample['obs_state'][0]}")
-    print(f"  Image (first pixel): {sample['obs_image'][0, :, 0, 0]}")
-    print(f"  Action (first step): {sample['action'][0]}")
+    d = dataset.tcp_dims
+    print(f"\n  State (t):   tcp={sample['obs_state'][-1, :d]}, pwm={sample['obs_state'][-1, d:d+3]}, op_mode={sample['obs_state'][-1, d+3:]}")
+    print(f"  Action [0]:  tcp={sample['actions'][0, :d]},    pwm={sample['actions'][0, d:d+3]},    op_mode={sample['actions'][0, d+3:]}")
+    print(f"\n  Δtcp (action[0] - obs[-1]): {sample['actions'][0, :d] - sample['obs_state'][-1, :d]}")
+    print(f"  (should be non-zero — action[0] is target_pose, not current position)")
 
 
 if __name__ == '__main__':

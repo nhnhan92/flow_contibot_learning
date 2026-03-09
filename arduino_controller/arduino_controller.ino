@@ -42,13 +42,13 @@ float voltToLinear(float v, float minVal, float maxVal) {
 int pwm1_cur = 0, pwm2_cur = 0, pwm3_cur = 0;
 int pwm1_target = 0, pwm2_target = 0, pwm3_target = 0;
 int pwm_init_extra = 0;
-int base1 = 148;
+int base1 = 146;
 int base2 = 151;
 int base3 = 148;
 int pww_init1 = base1 + pwm_init_extra;
 int pww_init2 = base2 + pwm_init_extra;
 int pww_init3 = base3 + pwm_init_extra;
-int init_min = 135;
+int init_min = 140;
 
 void applyPwm() {
   analogWrite(VALVE1_PIN, pwm1_cur);
@@ -105,10 +105,12 @@ void parsePwmCommand(const String &line) {
     pwm2_target = b + pww_init2;
     pwm3_target = c + pww_init3;
 
-    Serial.print("# Target PWM updated: ");
-    Serial.print(pwm1_target); Serial.print(" ");
-    Serial.print(pwm2_target); Serial.print(" ");
-    Serial.println(pwm3_target);
+    // ACK echoes the original requested values (a, b, c) so Python can verify receipt.
+    // Format matches what _serial_reader_thread expects: "ACK p1 p2 p3\n"
+    Serial.print("ACK ");
+    Serial.print(a); Serial.print(" ");
+    Serial.print(b); Serial.print(" ");
+    Serial.println(c);
   } else {
     Serial.print("# Invalid command: ");
     Serial.println(line);
@@ -149,7 +151,7 @@ void loop() {
     if (line.equalsIgnoreCase("r")|| line.equalsIgnoreCase("release")){
       Serial.println("SUCTION: OFF");
       digitalWrite(SUCTION_RELEASE, HIGH);
-      delay(2000);
+      delay(100);
     }
     if (line.equalsIgnoreCase("q")|| line.equalsIgnoreCase("quit")){
       Serial.println("RESETTING");

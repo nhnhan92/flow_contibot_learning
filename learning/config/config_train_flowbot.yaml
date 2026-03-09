@@ -1,0 +1,70 @@
+# Diffusion Policy Training Configuration for Flowbot Task
+# Robot: UR5e + Flowbot soft manipulator (3 pneumatic valves via PWM)
+
+# Dataset
+dataset_path: "data/demo_data/Task3/dataset.zarr"  # Path to training dataset (Zarr format) please change Task 1, 2, or 3 as needed
+obs_horizon: 2        # Number of observation frames
+pred_horizon: 16      # Number of action steps to predict
+action_horizon: 8     # Number of action steps to execute
+image_size: [216, 288]  # Center crop from 480x640
+exclude_episodes: []  # Episodes to exclude from training (e.g. incomplete)
+
+# TCP dimensions: 3 = xyz only, 6 = xyz + rotation (rx,ry,rz)
+# action_dim and state_dim must equal tcp_dims + 5  (pwm=3, op_mode=2)
+tcp_dims: 3           # 3 → xyz only (8D); 6 → xyz+rotation (11D)
+
+# Model architecture
+action_dim: 8         # tcp_dims(3) + flowbot PWM (3) + operation_mode (2)
+state_dim: 8          # tcp_dims(3) + flowbot PWM (3) + operation_mode (2)
+vision_feature_dim: 512
+state_feature_dim: 128
+num_diffusion_iters: 100  # Number of diffusion training steps (DDPM)
+num_inference_steps: 16   # Number of inference steps (DDIM - 6x faster)
+use_resnet: true          # Use ResNet18 encoder (true) or custom CNN (false)
+random_crop_pad: 20       # Random crop padding pixels (0 = disabled); pads by 20px then crops back to original size
+
+# UNet variant (FiLM = Stanford-style, recommended)
+use_film_unet: true       # true = ConditionalUNet1D (FiLM), false = DiffusionUNet1D (simple)
+film_step_embed_dim: 256  # Timestep embedding dim for FiLM UNet (Stanford: 256)
+film_kernel_size: 5       # Conv kernel size for FiLM UNet (Stanford: 5)
+
+# Vision pooling (auto: SpatialSoftmax when use_film_unet=true)
+use_spatial_softmax: true # null = auto (true if use_film_unet else false); or override explicitly
+num_keypoints: 32         # SpatialSoftmax keypoints → 64-D per frame (Stanford default)
+
+# Training
+num_epochs: 3000
+batch_size: 64
+learning_rate: 5.0e-5  # Peak LR reached after warmup
+weight_decay: 1.0e-5   # AdamW weight decay
+ema_max_value: 0.9999  # EMA adaptive decay upper bound (UNet-only, Stanford default)
+seed: 42
+
+# LR schedule: linear warmup → cosine decay
+warmup_epochs: 50     # Linear warmup from 0 → peak_lr over first 500 epochs (~16%)
+lr_min_factor: 0.01    # Cosine decays to peak_lr * 0.01 at the end
+
+# Data
+val_ratio: 0.1        # Validation split ratio
+num_workers: 4        # DataLoader workers
+
+# Early stopping
+early_stopping_patience: 200  # Stop if no improvement for N post-warmup epochs (0 = disabled)
+
+# Checkpointing
+output_dir: "/media/protac/Desk SSD/Nhan/trained_models"
+save_every: 200        # Save checkpoint every N epochs
+
+# Logging
+use_wandb: false      # Set to true to enable W&B logging
+wandb_project: "flowbot-diffusion"
+wandb_entity: null    # Your W&B username/team
+
+# Notes:
+# - obs_horizon=2: Use last 2 camera frames for temporal information
+# - pred_horizon=16: Predict 16 future actions (~1.6s at 10Hz)
+# - action_horizon=8: Execute first 8 actions, then replan
+# - tcp_dims=3:  xyz only → state_dim=action_dim=8
+# - tcp_dims=6:  xyz+rotation → state_dim=action_dim=11  (remember to update action_dim/state_dim!)
+# - operation_mode: [ur5_active, flowbot_active] — [1,0]=UR5, [0,1]=flowbot, [1,1]=release
+# - PWM range: [pwm_min, pwm_max] as configured in flowbot (e.g. 1-26)

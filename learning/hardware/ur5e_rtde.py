@@ -106,12 +106,11 @@ class UR5eRobot:
             self.rtde_c.moveJ(target_joints, velocity, acceleration)
 
     def stop(self):
-        """Emergency stop - stop all movement immediately"""
+        """Stop servo mode. Does NOT stop the RTDE script so moveL() can be called immediately after."""
         try:
-            self.rtde_c.servoStop()  # Stop servo mode first
+            self.rtde_c.servoStop()
         except:
             pass
-        self.rtde_c.stopScript()
 
     def get_robot_mode(self):
         """
