@@ -302,6 +302,14 @@ def main():
     t_reader.start()
 
     # --- Robot model (same params as your existing scripts) ---
+    from pathlib import Path
+    _pkl_dir = Path(__file__).parent
+    from flowbot.pwm2flow import Pwm2FlowModel
+    from flowbot.pressure_flow_model import Flow2PressModel, Press2FlowModel
+    pwm2flow   = Pwm2FlowModel.load(  _pkl_dir / "pwm2flow.pkl")
+    flow2press = Flow2PressModel.load( _pkl_dir / "flow2press.pkl")
+    press2flow = Press2FlowModel.load( _pkl_dir / "press2flow.pkl")
+
     robot = Flow_driven_bellow(
         D_in=5,
         D_out=16.5,
@@ -312,8 +320,9 @@ def main():
         k_model=lambda deltal: 0.18417922367667078 + 0.1511268093994831 * (1.0 - np.exp(-0.18801952663756039 * deltal)),
         a_delta=0,
         b_delta=0,
-        a_pwm2press=0.004227,
-        b_pwm2press=0.012059,
+        pwm2flow_model   = pwm2flow,
+        flow2press_model = flow2press,
+        press2flow_model = press2flow,
     )
 
     ws, tri, bbox = load_workspace(robot, pwm_min=args.pwm_min, pwm_max=args.pwm_max)

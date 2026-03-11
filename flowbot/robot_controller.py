@@ -9,7 +9,14 @@ import time
 from datetime import datetime
 import matplotlib.pyplot as plt
 import os
+import sys
 import threading
+from pathlib import Path
+
+FILE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(FILE_DIR))
+from flowbot.pwm2flow import Pwm2FlowModel
+from flowbot.pressure_flow_model import Flow2PressModel, Press2FlowModel
 
 SERIAL_PORT = "COM9"
 BAUD_RATE   = 115200
@@ -43,6 +50,10 @@ def main():
     t = threading.Thread(target=drain_serial, args=(ser, stop_flag), daemon=True)
     t.start()
 
+    pwm2flow   = Pwm2FlowModel.load(  Path(FILE_DIR) / "pwm2flow.pkl")
+    flow2press = Flow2PressModel.load( Path(FILE_DIR) / "flow2press.pkl")
+    press2flow = Press2FlowModel.load( Path(FILE_DIR) / "press2flow.pkl")
+
     robot = Flow_driven_bellow(
             D_in = 5,
             D_out = 16.5,
@@ -53,8 +64,9 @@ def main():
             k_model= lambda deltal: 0.18417922367667078 + 0.1511268093994831 * (1.0 - np.exp(-0.18801952663756039 * deltal)),
             a_delta = 0,
             b_delta= 0,
-            a_pwm2press= 0.004227,
-            b_pwm2press= 0.012059,
+            pwm2flow_model   = pwm2flow,
+            flow2press_model = flow2press,
+            press2flow_model = press2flow,
         )
     workspace = workspace_using_fwdmodel(robot=robot,pwm_min=1, pwm_max=20)
     hull = workspace.build_workspace_hull_checker(workspace.P)
