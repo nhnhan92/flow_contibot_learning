@@ -1,5 +1,3 @@
-# Diffusion Policy Training Configuration for Flowbot Task
-# Robot: UR5e + Flowbot soft manipulator (3 pneumatic valves via PWM)
 
 # Dataset
 dataset_path: "data/demo_data/Task3/dataset.zarr"  # Path to training dataset (Zarr format) please change Task 1, 2, or 3 as needed
@@ -55,16 +53,3 @@ early_stopping_patience: 200  # Stop if no improvement for N post-warmup epochs 
 output_dir: "/media/protac/Desk SSD/Nhan/trained_models"
 save_every: 200        # Save checkpoint every N epochs
 
-# Logging
-use_wandb: false      # Set to true to enable W&B logging
-wandb_project: "flowbot-diffusion"
-wandb_entity: null    # Your W&B username/team
-
-# Notes:
-# - obs_horizon=2: Use last 2 camera frames for temporal information
-# - pred_horizon=16: Predict 16 future actions (~1.6s at 10Hz)
-# - action_horizon=8: Execute first 8 actions, then replan
-# - tcp_dims=3:  xyz only → state_dim=action_dim=8
-# - tcp_dims=6:  xyz+rotation → state_dim=action_dim=11  (remember to update action_dim/state_dim!)
-# - operation_mode: [ur5_active, flowbot_active] — [1,0]=UR5, [0,1]=flowbot, [1,1]=release
-# - PWM range: [pwm_min, pwm_max] as configured in flowbot (e.g. 1-26)

@@ -25,7 +25,7 @@ TRAIN_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(TRAIN_DIR)
 sys.path.insert(0, PROJECT_DIR)
 
-from train.dataset import PickPlaceDataset
+from train.dataset import DiffusionDataset
 from train.model import DiffusionPolicy
 
 
@@ -229,7 +229,7 @@ def main():
     dataset_path = args.dataset or policy.config['dataset_path']
     print(f"\nLoading dataset: {dataset_path}")
 
-    dataset = PickPlaceDataset(
+    dataset = DiffusionDataset(
         dataset_path=dataset_path,
         obs_horizon=policy.config['obs_horizon'],
         pred_horizon=policy.config['pred_horizon'],

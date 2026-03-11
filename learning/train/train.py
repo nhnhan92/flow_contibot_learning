@@ -24,7 +24,7 @@ TRAIN_DIR = os.path.dirname(os.path.abspath(__file__))
 LEARNING_DIR = os.path.dirname(TRAIN_DIR)
 sys.path.insert(0, LEARNING_DIR)
 
-from train.dataset import PickPlaceDataset
+from train.dataset import DiffusionDataset
 from train.model import DiffusionPolicy
 
 def train_epoch(model, dataloader, optimizer, device, ema=None):
@@ -124,7 +124,7 @@ def main():
     if exclude_episodes:
         print(f"Excluding episodes: {exclude_episodes}")
 
-    dataset = PickPlaceDataset(
+    dataset = DiffusionDataset(
         dataset_path=args.dataset if args.dataset is not None else config['dataset_path'],
         obs_horizon=config['obs_horizon'],
         pred_horizon=config['pred_horizon'],
