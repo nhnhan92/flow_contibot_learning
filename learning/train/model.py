@@ -1,17 +1,3 @@
-"""
-Diffusion Policy Model for UR5e + Flowbot soft manipulator
-Based on Diffusion Policy paper: https://diffusion-policy.cs.columbia.edu/
-
-Action/State space (9D):
-    - UR5e TCP pose: x, y, z, rx, ry, rz  (6D)
-    - Flowbot PWM signals: pwm1, pwm2, pwm3 (3D)
-
-Two UNet variants are available:
-    - DiffusionUNet1D      : Simple additive conditioning (v1, legacy)
-    - ConditionalUNet1D    : Stanford-style FiLM conditioning (v2, recommended)
-
-Select with DiffusionPolicy(use_film_unet=True/False).
-"""
 
 import torch
 import torch.nn as nn
@@ -19,7 +5,6 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Optional
 import torchvision
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared primitives
@@ -86,9 +71,6 @@ class SpatialSoftmax(nn.Module):
                          higher → more peaked (more localized).  Default 1.0.
         learnable_temp : Make temperature a learned parameter.
 
-    Reference:
-        Finn et al. "Deep Spatial Autoencoders for Visuomotor Learning" (2016)
-        Chi et al.  "Diffusion Policy" (RSS 2023) — default pooling strategy.
     """
 
     def __init__(self, num_keypoints=32, temperature=1.0, learnable_temp=False):
@@ -130,120 +112,6 @@ class SpatialSoftmax(nn.Module):
         # Interleave into (B, K*2)
         keypoints = torch.stack([exp_x, exp_y], dim=-1)  # (B, K, 2)
         return keypoints.reshape(B, K * 2)               # (B, K*2)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# v1 — Simple additive UNet (original, kept for reference)
-# ─────────────────────────────────────────────────────────────────────────────
-
-class DiffusionUNet1D(nn.Module):
-    """
-    1D U-Net for action sequence diffusion — simple additive conditioning.
-
-    Conditioning is injected by:
-      1. Adding the obs-cond projection at the input only (once).
-      2. Concatenating the timestep embedding at every down/mid/up block.
-
-    This is the v1 architecture. Prefer ConditionalUNet1D for new experiments.
-    """
-
-    def __init__(
-        self,
-        action_dim=9,
-        pred_horizon=16,
-        cond_dim=256,
-        diffusion_step_embed_dim=128,
-        down_dims=[256, 512, 1024],
-    ):
-        super().__init__()
-
-        self.action_dim = action_dim
-        self.pred_horizon = pred_horizon
-
-        # Timestep embedding
-        self.diffusion_step_encoder = nn.Sequential(
-            SinusoidalPosEmb(diffusion_step_embed_dim),
-            nn.Linear(diffusion_step_embed_dim, diffusion_step_embed_dim * 4),
-            nn.Mish(),
-            nn.Linear(diffusion_step_embed_dim * 4, diffusion_step_embed_dim),
-        )
-
-        # Input projection
-        self.input_proj = Conv1dBlock(action_dim, down_dims[0])
-
-        # Condition projection (added once at the input)
-        self.cond_proj = nn.Linear(cond_dim, down_dims[0])
-
-        # Downsample blocks
-        self.down_modules = nn.ModuleList([])
-        in_dim = down_dims[0]
-        for out_dim in down_dims[1:]:
-            self.down_modules.append(nn.ModuleList([
-                Conv1dBlock(in_dim + diffusion_step_embed_dim, out_dim),
-                Conv1dBlock(out_dim, out_dim),
-                nn.MaxPool1d(2),
-            ]))
-            in_dim = out_dim
-
-        # Middle
-        self.mid_modules = nn.ModuleList([
-            Conv1dBlock(in_dim + diffusion_step_embed_dim, in_dim),
-            Conv1dBlock(in_dim + diffusion_step_embed_dim, in_dim),
-        ])
-
-        # Upsample blocks
-        self.up_modules = nn.ModuleList([])
-        for i, out_dim in enumerate(reversed(down_dims[:-1])):
-            skip_dim = list(reversed(down_dims))[i]
-            self.up_modules.append(nn.ModuleList([
-                nn.Upsample(scale_factor=2, mode='linear', align_corners=False),
-                Conv1dBlock(in_dim + skip_dim + diffusion_step_embed_dim, out_dim),
-                Conv1dBlock(out_dim, out_dim),
-            ]))
-            in_dim = out_dim
-
-        # Output
-        self.final_conv = nn.Conv1d(in_dim, action_dim, 1)
-
-    def forward(self, x, timestep, cond):
-        """
-        Args:
-            x        : Noisy actions (B, action_dim, pred_horizon)
-            timestep : Diffusion timestep (B,)
-            cond     : Obs conditioning (B, cond_dim)
-        Returns:
-            Predicted noise (B, action_dim, pred_horizon)
-        """
-        timestep_embed = self.diffusion_step_encoder(timestep)
-
-        x = self.input_proj(x)
-        cond_embed = self.cond_proj(cond)[:, :, None]
-        x = x + cond_embed
-
-        h = []
-        for down_conv1, down_conv2, pool in self.down_modules:
-            t = timestep_embed[:, :, None].expand(-1, -1, x.shape[-1])
-            x = torch.cat([x, t], dim=1)
-            x = down_conv1(x)
-            x = down_conv2(x)
-            h.append(x)
-            x = pool(x)
-
-        for mid_conv in self.mid_modules:
-            t = timestep_embed[:, :, None].expand(-1, -1, x.shape[-1])
-            x = torch.cat([x, t], dim=1)
-            x = mid_conv(x)
-
-        for (upsample, up_conv1, up_conv2), skip in zip(self.up_modules, reversed(h)):
-            x = upsample(x)
-            x = torch.cat([x, skip], dim=1)
-            t = timestep_embed[:, :, None].expand(-1, -1, x.shape[-1])
-            x = torch.cat([x, t], dim=1)
-            x = up_conv1(x)
-            x = up_conv2(x)
-
-        return self.final_conv(x)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # v2 — Stanford-style FiLM UNet (ConditionalResidualBlock1D + ConditionalUNet1D)
@@ -544,28 +412,6 @@ class ResNet18VisionEncoder(nn.Module):
     """
     ResNet18-based vision encoder with switchable spatial pooling.
 
-    Two pooling modes (selected via use_spatial_softmax):
-
-        GlobalAvgPool  (use_spatial_softmax=False, legacy):
-            backbone → AdaptiveAvgPool2d(1,1) → 512-D per frame
-            combine : Linear(512 * obs_horizon, output_dim)
-
-        SpatialSoftmax (use_spatial_softmax=True, Stanford-style):
-            backbone → SpatialSoftmax(num_keypoints) → (num_keypoints*2)-D per frame
-            combine : Linear(num_keypoints*2 * obs_horizon, output_dim)
-            Learns explicit (x, y) keypoint coordinates instead of pooling
-            features globally — better spatial precision for manipulation.
-
-    Both modes project temporal features to the same output_dim via a two-layer
-    MLP, so the rest of the model is unchanged.
-
-    Random crop augmentation (crop_pad > 0, training only):
-        Each image is padded by crop_pad pixels on all four sides via reflect
-        padding, then a random H×W crop is taken back to the original size.
-        This applies an independent ±crop_pad pixel translation to every frame,
-        making the policy robust to small camera misalignments at zero extra cost.
-        Disabled automatically during evaluation (self.training == False).
-
     Args:
         obs_horizon          : Number of observation frames (default 2)
         output_dim           : Output feature dimension (default 256)
@@ -615,14 +461,6 @@ class ResNet18VisionEncoder(nn.Module):
     def _apply_random_crop(self, x):
         """
         Per-image independent random crop augmentation (training only).
-
-        Pads each image by self.crop_pad on all four sides using reflect
-        padding, then takes a random H×W crop back to the original size.
-        Each frame gets its own independent random offset, so temporal
-        frames in the same observation window are perturbed differently —
-        matching the behaviour of online data collection where subtle camera
-        shake occurs between frames.
-
         Args:
             x : (N, C, H, W)  — N = B * obs_horizon flattened images
         Returns:
@@ -741,22 +579,16 @@ class DiffusionPolicy(nn.Module):
         # ── Diffusion U-Net ───────────────────────────────────────────────────
         cond_dim = vision_feature_dim + state_feature_dim
 
-        if use_film_unet:
-            _down_dims = film_down_dims or [256, 512, 1024]
-            self.diffusion_model = ConditionalUNet1D(
-                input_dim=action_dim,
-                global_cond_dim=cond_dim,
-                diffusion_step_embed_dim=film_step_embed_dim,
-                down_dims=_down_dims,
-                kernel_size=film_kernel_size,
-                n_groups=8,
-            )
-        else:
-            self.diffusion_model = DiffusionUNet1D(
-                action_dim=action_dim,
-                pred_horizon=pred_horizon,
-                cond_dim=cond_dim,
-            )
+        _down_dims = film_down_dims or [256, 512, 1024]
+        self.diffusion_model = ConditionalUNet1D(
+            input_dim=action_dim,
+            global_cond_dim=cond_dim,
+            diffusion_step_embed_dim=film_step_embed_dim,
+            down_dims=_down_dims,
+            kernel_size=film_kernel_size,
+            n_groups=8,
+        )
+
 
         # ── Noise schedulers ──────────────────────────────────────────────────
         self.noise_scheduler_train = DDPMScheduler(
@@ -916,9 +748,6 @@ class DDPMScheduler:
 class DDIMScheduler:
     """
     DDIM scheduler for fast deterministic inference.
-
-    Song et al. "Denoising Diffusion Implicit Models" (ICLR 2021).
-    eta=0 → fully deterministic (recommended for deployment).
     """
 
     def __init__(self, num_train_timesteps=100, beta_schedule='squaredcos_cap_v2',

@@ -13,7 +13,7 @@ from pathlib import Path
 import cv2
 
 
-class PickPlaceDataset(Dataset):
+class DiffusionDataset(Dataset):
     """
     Dataset for robot demonstrations with Flowbot soft manipulator.
 

@@ -50,7 +50,7 @@ DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
 TCP_FIXED_ROTATION = DEFAULT_START_POSE[3:]   # [rx, ry, rz]
 
 # Control frequency (Hz)
-CONTROL_FREQ =8.0
+CONTROL_FREQ =10.0
 DT = 1.0 / CONTROL_FREQ
 DT_FLOWBOT = 0.3     # Step time (s) when flowbot is actively actuating
 FLOWBOT_FREQ = 10.0  # Flowbot command frequency — must match CONTROL_FREQ
@@ -59,14 +59,10 @@ FLOWBOT_FREQ = 10.0  # Flowbot command frequency — must match CONTROL_FREQ
 SERVO_SPEED = 0.05     # m/s
 SERVO_ACCEL = 0.05     # m/s^2
 
-# Safety: maximum XYZ displacement per servo step (metres).
-# Prevents high-speed jumps when the policy predicts a target far from current TCP.
-# At 8 Hz this gives a hard ceiling of  MAX_TCP_DELTA / DT  m/s cartesian speed.
-# Example: 0.02 m / 0.125 s = 0.16 m/s  (well above SERVO_SPEED so normal moves pass through)
 MAX_TCP_DELTA = 0.02   # m per step
 SERVO_LOOKAHEAD = 0.1   # s
 SERVO_GAIN = 300
-
+    
 
 class _ReleaseDetected(Exception):
     """Internal sentinel: raised when op_mode [1,1] is predicted to exit episode loop."""
