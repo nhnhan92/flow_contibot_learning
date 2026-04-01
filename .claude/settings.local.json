@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(py plot_flow_3d.py \"../../program/data/pwm_vs_pressure_calibration/average/test_run.csv\" --include-derived --no-show)",
+      "Bash(py plot_flow_3d.py \"../../program/data/pwm_vs_pressure_calibration/average\" --no-show)",
+      "Bash(py -c \":*)",
+      "Bash(python -c \"import pyspacemouse; help\\(pyspacemouse.open\\)\")",
+      "Bash(python -c \"import pyspacemouse; help\\(pyspacemouse.SpaceMouseDevice.read\\)\")",
+      "Bash(python -c \"import sklearn; print\\(sklearn.__version__\\)\")",
+      "Bash(python -c \"import sys; print\\(sys.executable\\)\")",
+      "Bash(where python)",
+      "Bash(conda env list)",
+      "Bash(python benchmark_ik.py)",
+      "Bash(python -c \"import imageio; print\\(''imageio version:'', imageio.__version__\\); import imageio.plugins.ffmpeg\")",
+      "Bash(python -c \"import cv2; print\\(''cv2:'', cv2.__version__\\)\")",
+      "Bash(python -c \"from PIL import Image; print\\(''PIL ok''\\)\")",
+      "Bash(python -c \":*)",
+      "Bash(python -c \"import imageio_ffmpeg; print\\(imageio_ffmpeg.get_ffmpeg_exe\\(\\)\\)\")",
+      "Bash(pip install:*)",
+      "Bash(python -c \"import imageio_ffmpeg; print\\(''ffmpeg:'', imageio_ffmpeg.get_ffmpeg_exe\\(\\)\\)\")",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(python -m learning.error_model.dataset data/task_logs)",
+      "Bash(python flowbot/residual_model/baseline_mlp.py)",
+      "Bash(python residual_model/compensator.py)"
+    ]
+  }
+}
