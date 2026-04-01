@@ -34,6 +34,7 @@ from pathlib import Path
 import cv2
 from zarr.codecs.numcodecs import Blosc
 from hardware.ur5e_rtde import UR5eRobot
+from hardware.franka_robot import FrankaRobot
 from hardware.spacemouse import _build_spacemouse
 from hardware.flowbot import flowbot
 from hardware.realsense_camera import RealSenseCamera
@@ -169,37 +170,35 @@ def save_episode(zarr_root, episode_data):
 
     return n_eps
 
-def move_2_init_pos(ur5, start_pose, goal_pose, dt, duration=5.0,
-                      velocity=0.1, acceleration=0.1, gain=200, lookahead_time=0.15):
+def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
+                    velocity=0.1, acceleration=0.1, gain=200, lookahead_time=0.15):
+    """Interpolate arm from start_pose to goal_pose over `duration` seconds.
+    Works with both UR5eRobot and FrankaRobot (same servo_tcp_pose interface)."""
     start_pose = np.asarray(start_pose, dtype=float).copy()
-    goal_pose  = np.asarray(goal_pose, dtype=float).copy()
+    goal_pose  = np.asarray(goal_pose,  dtype=float).copy()
 
-    # interpolate rotation with slerp for stability
-    r0 = st.Rotation.from_rotvec(start_pose[3:])
-    r1 = st.Rotation.from_rotvec(goal_pose[3:])
+    r0    = st.Rotation.from_rotvec(start_pose[3:])
+    r1    = st.Rotation.from_rotvec(goal_pose[3:])
     slerp = st.Slerp([0, 1], st.Rotation.concatenate([r0, r1]))
 
     n = max(2, int(duration / dt))
     for i in range(n):
-        a = (i + 1) / n
-
+        a    = (i + 1) / n
         pose = start_pose.copy()
         pose[:3] = (1 - a) * start_pose[:3] + a * goal_pose[:3]
         pose[3:] = slerp([a])[0].as_rotvec()
-
-        ur5.servo_tcp_pose(
-            target_pose=pose,
-            velocity=velocity,
-            acceleration=acceleration,
-            dt=dt,
-            lookahead_time=lookahead_time,
-            gain=gain
+        arm.servo_tcp_pose(
+            target_pose=pose, velocity=velocity, acceleration=acceleration,
+            dt=dt, lookahead_time=lookahead_time, gain=gain,
         )
         time.sleep(dt)
 
 @click.command()
-@click.option('--output', '-o', required=True, default = None, help='output folder name')
-@click.option('--robot_ip', '-ri', required=True, default = '150.65.146.87', help='UR5e IP')
+@click.option('--output', '-o', required=True, default=None, help='Output folder name')
+@click.option('--arm', default='ur5', type=click.Choice(['ur5', 'franka'], case_sensitive=False),
+              help='Which robotic arm to use: "ur5" (default) or "franka".')
+@click.option('--robot_ip', '-ri', default=None,
+              help='Arm IP. Default: 150.65.146.87 (UR5) or 172.16.0.2 (Franka).')
 @click.option('--arduino_port', default="/dev/ttyACM0")
 @click.option('--camera_serial', help='RealSense serial (auto-detect if None)')
 @click.option('--no_camera', is_flag=True, help='Run without camera')
@@ -214,7 +213,7 @@ def move_2_init_pos(ur5, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--release_frames', default=10, type=int,
               help='Frames to record after release (both-button press). '
                    'At 10 Hz the default of 10 gives 1 s of released state.')
-def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height,
+def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_height,
          camera_fps, arduino_port, flowbot_freqency, frequency, max_pos_speed,
          max_rot_speed, deadzone, release_frames):
 
@@ -262,9 +261,16 @@ def main(output, robot_ip, camera_serial, no_camera, camera_width, camera_height
         image_shape=image_shape if with_camera else None
     )
 
-    # Connect to robot
-    print(f"\nConnecting to robot at {robot_ip}...")
-    ur5 = UR5eRobot(robot_ip=robot_ip,frequency=frequency)
+    # Connect to arm
+    _default_ip = {"ur5": "150.65.146.87", "franka": "172.16.0.2"}
+    ip = robot_ip or _default_ip[arm.lower()]
+    print(f"\nConnecting to {arm.upper()} at {ip} ...")
+    if arm.lower() == "franka":
+        robot = FrankaRobot(robot_ip=ip, frequency=frequency)
+    else:
+        robot = UR5eRobot(robot_ip=ip, frequency=frequency)
+    # keep `ur5` as alias so the rest of the code works unchanged
+    ur5 = robot
 
     # Initialize Flowbot
     print(f"\nInitializing Flotbot ...")

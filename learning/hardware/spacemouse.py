@@ -156,9 +156,10 @@ def _build_spacemouse(device_index: int = 1,os_name: str = 'linux',deadzone : fl
                 self._reader = _SpaceMouseReaderWin(device_index=device_index)
                 self._reader.start()
 
-            def _read_xyz_once(self) -> np.ndarray:
+            def _read_xyz_once(self):
                 xyz = np.asarray(self._reader.get_latest_xyz(), dtype=float)
-                return np.array([xyz[0], xyz[1], -xyz[2]], dtype=float)
+                button_status = self._reader.get_button_status()
+                return np.array([xyz[0], xyz[1], xyz[2]], dtype=float), button_status
 
             def stop(self):
                 super().stop()

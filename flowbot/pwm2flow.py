@@ -56,6 +56,14 @@ except ModuleNotFoundError:
 _PWM1_COL = "pwm_incr_module1"
 _FLOW_COL  = "flow_Lmin_mean"
 
+# Remap classes that were pickled while running this file directly as __main__
+class _Unpickler(pickle.Unpickler):
+    _NAMES = {"Pwm2FlowModel", "Flow2PwmModel"}
+    def find_class(self, module, name):
+        if module == "__main__" and name in self._NAMES:
+            module = "flowbot.pwm2flow"
+        return super().find_class(module, name)
+
 
 class Pwm2FlowModel:
     """Polynomial model: pwm_incr_module1 → flow_Lmin.
@@ -162,7 +170,7 @@ class Pwm2FlowModel:
     @classmethod
     def load(cls, path: str | Path) -> "Pwm2FlowModel":
         with open(path, "rb") as f:
-            obj = pickle.load(f)
+            obj = _Unpickler(f).load()
         if not isinstance(obj, cls):
             raise TypeError(f"Loaded object is not a Pwm2FlowModel: {type(obj)}")
         return obj
@@ -286,7 +294,7 @@ class Flow2PwmModel:
     @classmethod
     def load(cls, path: str | Path) -> "Flow2PwmModel":
         with open(path, "rb") as f:
-            obj = pickle.load(f)
+            obj = _Unpickler(f).load()
         if not isinstance(obj, cls):
             raise TypeError(f"Loaded object is not a Flow2PwmModel: {type(obj)}")
         return obj

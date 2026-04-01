@@ -104,6 +104,7 @@ class MotiveNatNetReader:
         # Request model definitions (optional but useful for debugging IDs/names)
         self._client.request_modeldef()
         self._client.run_async()
+        print(f"Started NatNet client. Server: {self.server_ip}, Local: {self.local_ip}, Multicast: {self.use_multicast}, RigidBody ID: {self.rigid_body_id}")
 
     def stop(self) -> None:
         try:

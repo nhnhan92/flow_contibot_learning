@@ -53,6 +53,14 @@ except ModuleNotFoundError:
 _FLOW_COL  = "flow_Lmin_mean"
 _PRESS_COL = "press_MPa_mean"
 
+# Remap classes that were pickled while running this file directly as __main__
+class _Unpickler(pickle.Unpickler):
+    _NAMES = {"Flow2PressModel", "Press2FlowModel"}
+    def find_class(self, module, name):
+        if module == "__main__" and name in self._NAMES:
+            module = "flowbot.pressure_flow_model"
+        return super().find_class(module, name)
+
 
 def _filter_single_module(df: object, pwm2_max: int, pwm3_max: int) -> object:
     """Keep only rows where modules 2 and 3 are at or below their idle PWM.
@@ -200,7 +208,7 @@ class Flow2PressModel:
     @classmethod
     def load(cls, path: str | Path) -> "Flow2PressModel":
         with open(path, "rb") as f:
-            obj = pickle.load(f)
+            obj = _Unpickler(f).load()
         if not isinstance(obj, cls):
             raise TypeError(f"Loaded object is not a Flow2PressModel: {type(obj)}")
         return obj
@@ -294,7 +302,7 @@ class Press2FlowModel:
     @classmethod
     def load(cls, path: str | Path) -> "Press2FlowModel":
         with open(path, "rb") as f:
-            obj = pickle.load(f)
+            obj = _Unpickler(f).load()
         if not isinstance(obj, cls):
             raise TypeError(f"Loaded object is not a Press2FlowModel: {type(obj)}")
         return obj

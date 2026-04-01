@@ -1,12 +1,31 @@
 import serial
+import serial.tools.list_ports
 import csv
+import sys
 import time
 from datetime import datetime
 import threading
 import matplotlib.pyplot as plt
 import os
-SERIAL_PORT = "/dev/ttyACM0"
-BAUD_RATE   = 115200
+
+BAUD_RATE = 115200
+
+
+def _default_port():
+    """Auto-detect the first available Arduino-like serial port."""
+    ports = list(serial.tools.list_ports.comports())
+    # Prefer ports with Arduino/CH340/CP210x in the description
+    for p in ports:
+        desc = (p.description or "").lower()
+        if any(k in desc for k in ("arduino", "ch340", "cp210", "usb serial")):
+            return p.device
+    # Fall back: first available port, or OS-specific guess
+    if ports:
+        return ports[0].device
+    return "COM9" if sys.platform == "win32" else "/dev/ttyACM0"
+
+
+SERIAL_PORT = _default_port()
 OUTPUT_CSV  = f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
 MAX_POINTS = 1000
@@ -28,12 +47,20 @@ def reader_logger(ser, writer, t_vals, flow_vals, press_vals, stop_flag,save_fig
 
     plt.ion()
     fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(8, 6))
+    fig.canvas.manager.set_window_title("Press Q to stop")
     line_flow,  = ax1.plot([], [], label="Flow [L/min]")
     line_press, = ax2.plot([], [], label="Pressure [MPa]")
     ax1.set_ylabel("Flow [L/min]")
     ax2.set_ylabel("Pressure [MPa]")
     ax2.set_xlabel("Time [s]")
     ax1.legend(); ax2.legend()
+
+    def _on_key(event):
+        if event.key == "q":
+            print("\n[plot] Q pressed — stopping.")
+            stop_flag["stop"] = True
+
+    fig.canvas.mpl_connect("key_press_event", _on_key)
 
     while not stop_flag["stop"]:
         line = ser.readline().decode("utf-8", errors="ignore").strip()
@@ -93,6 +120,8 @@ def main():
     import random
     import argparse
     parser = argparse.ArgumentParser()
+    parser.add_argument('--port', '-p', type=str, default=SERIAL_PORT,
+                        help='Serial port (e.g. COM3 on Windows, /dev/ttyACM0 on Linux)')
     parser.add_argument('--mode', '-m', type=str, help='Choose object type',required=False)
     parser.add_argument('--module_no', '-n', type=int, help='Choose object type',default=1,required=False)
 
@@ -100,9 +129,10 @@ def main():
     mode = args.mode
     module_no = args.module_no
 
-    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    print(f"[serial] Auto-detected port: {SERIAL_PORT}  (override with --port)")
+    ser = serial.Serial(args.port, BAUD_RATE, timeout=1)
     time.sleep(1)
-    print("Opened", SERIAL_PORT)
+    print(f"[serial] Opened {args.port}")
 
     folder_path = f"data/{mode}"
     os.makedirs(folder_path, exist_ok=True)
@@ -165,10 +195,10 @@ def main():
                     print("[PYTHON] Sent:", cmd.strip())
                     time.sleep(4) 
                 break
-            if text.lower() in ("double", "d") :  ## drive one module with different pwm 
+            if text.lower() in ("double", "d") :  ## drive one module with different pwm
                 ## to measure the flowrate and pressure
                 file_name = f"log_module{module_no}vs3_{mode}"
-                TIME_STAMP = f"data/{mode}/{file_name}_timestamp_{ite}.csv"
+                TIME_STAMP = f"data/{mode}/{file_name}_timestamp_0.csv"
                 f_timestamp = open(TIME_STAMP, "w", newline="")
                 writer_timestamp = csv.writer(f_timestamp)
                 header_timestamp = ["current_time","pwm_incr_module1","pwm_incr_module2"]
@@ -201,7 +231,7 @@ def main():
                 for module_1 in range(1, 26):
                     for module_2 in range(1,26):
                         for module_3 in range(module_2,26):
-                            pairs.append(module_1,module_2,module_3)
+                            pairs.append((module_1, module_2, module_3))
                 count = 20
                 ite = int(len(pairs)/count)
                 for i in range(0,ite):
@@ -218,6 +248,7 @@ def main():
                     cmd = "0 0 0\n"    
                     ser.write(cmd.encode("ascii"))
                     print("[PYTHON] Sent:", cmd.strip())
+
                     time.sleep(4)
                     
                 for i in range(len(pairs[:count*ite]),len(pairs[0:25])):

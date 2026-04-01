@@ -39,6 +39,7 @@ def clamp_pwm(pwm: np.ndarray) -> np.ndarray:
 
 class flowbot:
     from flowbot.kinematic_modeling import Flow_driven_bellow
+    from flowbot.kinematic_modeling_linear import Flow_driven_bellow_linear
     from flowbot.workspace import workspace_using_fwdmodel
     from flowbot.online_optitrack import MotiveNatNetReader
     from flowbot.plot_helper import plot_helper
@@ -49,7 +50,9 @@ class flowbot:
                  enable_plot: bool = False,
                 frequency: float = 30.0,
                 max_pos_speed: float = 150.0,
-                initial_pwm: Optional[Sequence[float]] = None,):
+                initial_pwm: Optional[Sequence[float]] = None,
+                pressure_model: str = "learned",   # "learned" or "linear"
+                ):
         # # --- Serial ---
         self.serial_port = serial_port
         self.baud = baud
@@ -76,6 +79,7 @@ class flowbot:
         self.max_pos_speed = float(max_pos_speed)
         self._running = False
         self._lock = threading.Lock()
+        self.pressure_model = pressure_model   # "learned" or "linear"
         # Init robot
         self.flowbot = self.flowbot_init()
         
@@ -117,31 +121,33 @@ class flowbot:
             self.opti_trail = None
 
     def flowbot_init(self):
-        from pathlib import Path
-        from flowbot.pwm2flow import Pwm2FlowModel
-        from flowbot.pressure_flow_model import Flow2PressModel, Press2FlowModel
+        _k_model = lambda deltal: 0.18417922367667078 + 0.1511268093994831 * (1.0 - np.exp(-0.18801952663756039 * deltal))
+        _common = dict(D_in=5, D_out=16.5, l0=82, d=28.17, lb=0.0, lu=13.5,
+                       k_model=_k_model, a_delta=0, b_delta=0)
 
-        # pkl files live alongside the kinematic_modeling module in program/flowbot/
-        _pkl_dir = Path(__file__).parent.parent.parent / "flowbot"
-        pwm2flow   = Pwm2FlowModel.load(  _pkl_dir / "pwm2flow.pkl")
-        flow2press = Flow2PressModel.load( _pkl_dir / "flow2press.pkl")
-        press2flow = Press2FlowModel.load( _pkl_dir / "press2flow.pkl")
+        if self.pressure_model == "linear":
+            print("[flowbot] Using LINEAR pressure model (a=0.004227, b=0.012059)")
+            robot = self.Flow_driven_bellow_linear(
+                **_common,
+                a_pwm2press=0.004227,
+                b_pwm2press=0.012059,
+            )
+        else:
+            from pathlib import Path
+            from flowbot.pwm2flow import Pwm2FlowModel
+            from flowbot.pressure_flow_model import Flow2PressModel, Press2FlowModel
 
-        # --- Robot model ---
-        robot = self.Flow_driven_bellow(
-            D_in=5,
-            D_out=16.5,
-            l0=82,
-            d=28.17,
-            lb=0.0,
-            lu=13.5,
-            k_model=lambda deltal: 0.18417922367667078 + 0.1511268093994831 * (1.0 - np.exp(-0.18801952663756039 * deltal)),
-            a_delta=0,
-            b_delta=0,
-            pwm2flow_model   = pwm2flow,
-            flow2press_model = flow2press,
-            press2flow_model = press2flow,
-        )
+            _pkl_dir = Path(__file__).parent.parent.parent / "flowbot"
+            pwm2flow   = Pwm2FlowModel.load(  _pkl_dir / "pwm2flow.pkl")
+            flow2press = Flow2PressModel.load( _pkl_dir / "flow2press.pkl")
+            press2flow = Press2FlowModel.load( _pkl_dir / "press2flow.pkl")
+            print("[flowbot] Using LEARNED pressure model (pwm2flow + flow2press + press2flow)")
+            robot = self.Flow_driven_bellow(
+                **_common,
+                pwm2flow_model   = pwm2flow,
+                flow2press_model = flow2press,
+                press2flow_model = press2flow,
+            )
         return robot
     
     def _serial_reader_thread(self) -> None:
@@ -285,7 +291,24 @@ class flowbot:
         self.pc = self.pc_init.copy()
         self.serial_sending(pwm)
 
-    def step(self,dpc) -> np.ndarray:
+    def set_compensator(self, compensator) -> None:
+        """
+        Attach an ErrorCompensator to be applied inside every step() call.
+
+        method="simple" : recomputes IK at (pc - correction) so the robot aims
+                          at a pre-corrected position every tick.
+        method="mpc"    : adds deltaU to the nominal PWM every tick.
+
+        Pass None to disable.
+        """
+        self._compensator = compensator
+        if compensator is not None:
+            compensator.reset()
+            print(f"[flowbot] Compensator attached  method={compensator.method}")
+        else:
+            print("[flowbot] Compensator detached.")
+
+    def step(self, dpc) -> np.ndarray:
         if not self._running:
             raise RuntimeError("Call start() before step().")
 
@@ -293,16 +316,41 @@ class flowbot:
         dpc = dpc[:3] * self.max_pos_speed * self.dt
 
         with self._lock:
-            self.pc  = self.apply_workspace_constraint(self.pc,self.pc + dpc,"backtrack")
-            # print(self.pc)
+            self.pc = self.apply_workspace_constraint(self.pc, self.pc + dpc, "backtrack")
 
+        # ── Nominal IK ────────────────────────────────────────────
         try:
-            ik = self.flowbot.inverse_pressures_from_position(self.pc)
+            ik  = self.flowbot.inverse_pressures_from_position(self.pc)
             pwm = np.asarray(ik["pwm"], dtype=int).reshape(3,)
         except Exception as e:
-            # If IK fails (numerical), do not send junk
             print("IK failed:", e)
             pwm = np.array([0, 0, 0], dtype=np.int32)
+
+        # ── Compensation ──────────────────────────────────────────
+        comp = getattr(self, "_compensator", None)
+        if comp is not None:
+            features = [*self.pc, *pwm]
+
+            if comp.method == "mpc":
+                # Optimise deltaU in PWM space, add to nominal
+                delta_u = comp.step(features)
+                if delta_u is not None:
+                    pwm = np.clip(pwm + delta_u, 0, 180).astype(int)
+                    print(f"[comp/mpc] deltaU={np.round(delta_u,2)}  pwm→{pwm}")
+
+            elif comp.method == "simple":
+                # Predict position error, recompute IK at corrected target
+                correction = comp.step(features)
+                if correction is not None:
+                    pc_corr = self.apply_workspace_constraint(
+                        self.pc, self.pc - correction, "backtrack"
+                    )
+                    try:
+                        ik2 = self.flowbot.inverse_pressures_from_position(pc_corr)
+                        pwm = np.asarray(ik2["pwm"], dtype=int).reshape(3,)
+                        print(f"[comp/simple] corr={np.round(correction,2)}  pwm→{pwm}")
+                    except Exception:
+                        pass   # fallback to nominal pwm
 
         self.last_pwm = pwm
         self.serial_sending(pwm)
@@ -318,7 +366,7 @@ class flowbot:
             self.pl.update_point_handle(self.pc_handles,self.pc)
             self.fig.canvas.draw_idle()
             self.fig.canvas.flush_events()
-            plt.pause(0.001)
+            # plt.pause(0.001)
             
     def set_position(self, pc: Sequence[float]) -> None:
         p = self.apply_workspace_constraint(self.pc,np.asarray(pc, dtype=float))
@@ -326,6 +374,35 @@ class flowbot:
             self.pc = p
         if self.pl is not None:
             self.pl.update_point_handle(self.pc_handles,p)
+
+    @property
+    def pwm_cur(self) -> np.ndarray:
+        """Current PWM command (alias for last_pwm)."""
+        return self.last_pwm
+
+    def apply_delta_pwm(self, delta_u: np.ndarray) -> np.ndarray:
+        """
+        Add a PWM correction delta_u to the current command and send it.
+
+        Used by the MPC compensator to apply deltaU without recomputing IK.
+
+        Parameters
+        ----------
+        delta_u : (3,) array — PWM correction in raw counts (can be float).
+
+        Returns
+        -------
+        pwm_new : (3,) int array — the clamped, applied PWM.
+        """
+        delta_u  = np.asarray(delta_u, dtype=float).reshape(3,)
+        pwm_new  = np.clip(
+            self.last_pwm + delta_u,
+            0, 180,  # 180 is a safe upper bound; actual max is usually lower (e.g. 25) depending on the robot and pressure model
+        ).astype(int)
+        print(f"Applying delta PWM: {delta_u} → New PWM: {pwm_new}")
+        self.last_pwm = pwm_new
+        self.serial_sending(pwm_new)
+        return pwm_new
 
     def release(self):
 

@@ -4,15 +4,16 @@
 #define VALVE3_PIN 3  // Arduino digital pin 9 (PWM)
 #define SUCTION_RELEASE 12  
 void serialEvent();
-const int FLOW_PIN   = A0;  // PF2M711-C8 analog output (1–5 V)
+const int FLOW_PIN_INLET   = A0;  // PF2M711-C8 analog output (1–5 V)
+const int FLOW_PIN_OUTLET   = A1;  // PF2M711-C8 analog output (1–5 V)
 const int PRESS_PIN  = A3;  // ISE20A analog output   (1–5 V)
 
 // ADC reference (default 5.0 V). If you measure 4.98 V, you can put that here.
-const float VREF = 5.02f;
+const float VREF = 5.00f;
 
 // ---- Flow sensor PF2M711-C8 parameters ----
 const float FLOW_MIN_LPM = 0.0f;    // L/min at 1.0 V  (change to 0.0f if you want 0 at 1 V)
-const float FLOW_MAX_LPM = 100.0f;  // L/min at 5.0 V
+const float FLOW_MAX_LPM = 10.0f;  // L/min at 5.0 V
 
 // ---- Pressure sensor ISE20A parameters ----
 const float P_MIN_MPA = 0.0f;   // MPa at 1.0 V
@@ -42,7 +43,7 @@ float voltToLinear(float v, float minVal, float maxVal) {
 int pwm1_cur = 0, pwm2_cur = 0, pwm3_cur = 0;
 int pwm1_target = 0, pwm2_target = 0, pwm3_target = 0;
 int pwm_init_extra = 0;
-int base1 = 146;
+int base1 = 148;
 int base2 = 151;
 int base3 = 148;
 int pww_init1 = base1 + pwm_init_extra;
@@ -205,7 +206,7 @@ void loop() {
       lastSampleMs += SAMPLE_PERIOD_MS;
 
       // Read sensors
-      int rawFlow  = analogRead(FLOW_PIN);
+      int rawFlow  = analogRead(FLOW_PIN_INLET);
       int rawPress = analogRead(PRESS_PIN);
 
       float vFlow  = adcToVoltage(rawFlow);

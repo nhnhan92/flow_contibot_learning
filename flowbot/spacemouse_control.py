@@ -65,6 +65,7 @@ class SpaceMouseReader:
         self.device_index = device_index
         self._lock = threading.Lock()
         self._latest_xyz = np.zeros(3, dtype=float)
+        self._latest_buttons = [False, False]
         self._running = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -90,20 +91,41 @@ class SpaceMouseReader:
         with self._lock:
             return self._latest_xyz.copy()
 
-    def _run(self):
+    def get_button_status(self) -> list:
+        with self._lock:
+            return list(self._latest_buttons)
+
+    def _open_device(self):
         try:
-            ctx = pyspacemouse.open(device_index=self.device_index)
+            return pyspacemouse.open(device_index=self.device_index)
         except TypeError:
-            # older pyspacemouse
-            ctx = pyspacemouse.open()
+            return pyspacemouse.open()
 
-        with ctx as dev:
-            while self._running.is_set():
-                st = dev.read()
-                xyz = self._extract_xyz(st)
+    def _run(self):
+        import time as _time
+        while self._running.is_set():
+            try:
+                ctx = self._open_device()
+                with ctx as dev:
+                    while self._running.is_set():
+                        try:
+                            st = dev.read()
+                        except Exception as read_err:
+                            print(f"[spacemouse] Read error: {read_err}. Reconnecting...")
+                            break   # exit inner loop → reconnect
 
-                with self._lock:
-                    self._latest_xyz[:] = xyz
+                        xyz = self._extract_xyz(st)
+                        buttons = list(st.buttons) if hasattr(st, "buttons") else [False, False]
+
+                        with self._lock:
+                            self._latest_xyz[:] = xyz
+                            self._latest_buttons = buttons
+
+            except Exception as conn_err:
+                if not self._running.is_set():
+                    break
+                print(f"[spacemouse] Connection error: {conn_err}. Retrying in 1 s...")
+                _time.sleep(1.0)
 
 # =========================
 # Plot helpers
