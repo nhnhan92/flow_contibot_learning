@@ -21,7 +21,15 @@
       "WebFetch(domain:arxiv.org)",
       "Bash(python -m learning.error_model.dataset data/task_logs)",
       "Bash(python flowbot/residual_model/baseline_mlp.py)",
-      "Bash(python residual_model/compensator.py)"
+      "Bash(python residual_model/compensator.py)",
+      "WebFetch(domain:timschneider42.github.io)",
+      "Bash(curl -s \"https://raw.githubusercontent.com/TimSchneider42/franky/master/README.md\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/pantor/frankx/master/README.md\")",
+      "Bash(curl -s \"https://pypi.org/pypi/franky-control/json\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); info=d['info']; print\\('version:', info['version']\\); print\\('requires_python:', info['requires_python']\\); releases=d.get\\('releases',{}\\); versions=sorted\\(releases.keys\\(\\)\\)[-8:]; print\\('recent versions:', versions\\); import datetime; last_upload=[u['upload_time'] for u in list\\(releases.values\\(\\)\\)[-1]]; print\\('last_upload:', last_upload\\)\")",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:frankarobotics.github.io)"
     ]
   }
 }
