@@ -289,6 +289,7 @@ def move_to_waypoint(fb, target_pc, hold_s, logger, opti,
     def _stopped():
         return stop_event is not None and stop_event.is_set()
 
+
     # ── Phase 1: move toward target ──────────────────────────
     max_iters = 5000
     for _ in range(max_iters):

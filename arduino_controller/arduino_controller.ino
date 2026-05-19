@@ -4,16 +4,22 @@
 #define VALVE3_PIN 3  // Arduino digital pin 9 (PWM)
 #define SUCTION_RELEASE 12  
 void serialEvent();
-const int FLOW_PIN_INLET   = A0;  // PF2M711-C8 analog output (1–5 V)
-const int FLOW_PIN_OUTLET   = A1;  // PF2M711-C8 analog output (1–5 V)
+const int FLOW_SENSOR_MODULE1   = A0;  // PF2M711-C8 analog output (1–5 V)
+const int FLOW_SENSOR_MODULE2   = A1;  // PF2M711-C8 analog output (1–5 V)
+const int FLOW_SENSOR_MODULE3   = A2;  // PF2M711-C8 analog output (1–5 V)
 const int PRESS_PIN  = A3;  // ISE20A analog output   (1–5 V)
 
 // ADC reference (default 5.0 V). If you measure 4.98 V, you can put that here.
 const float VREF = 5.00f;
 
 // ---- Flow sensor PF2M711-C8 parameters ----
-const float FLOW_MIN_LPM = 0.0f;    // L/min at 1.0 V  (change to 0.0f if you want 0 at 1 V)
+const float FLOW_MIN_LPM = 0.0f;   // L/min at 1.0 V
 const float FLOW_MAX_LPM = 10.0f;  // L/min at 5.0 V
+// Per-module zero offset: run with valves closed, read the resting L/min value,
+// set each constant to that value so processed flow reads 0 at rest.
+const float FLOW_ZERO1_LPM = 1.0f;
+const float FLOW_ZERO2_LPM = 1.0f;
+const float FLOW_ZERO3_LPM = 1.0f;
 
 // ---- Pressure sensor ISE20A parameters ----
 const float P_MIN_MPA = 0.0f;   // MPa at 1.0 V
@@ -28,24 +34,43 @@ unsigned long lastRampMs   = 0;
 
 const float PWM_STEP = 1; 
 
+// ADC averaging: take N samples and return the mean raw count
+const int ADC_AVG_N = 16;
+int readADCAvg(int pin) {
+  long sum = 0;
+  for (int i = 0; i < ADC_AVG_N; i++) sum += analogRead(pin);
+  return (int)(sum / ADC_AVG_N);
+}
+
 float adcToVoltage(int raw) {
   return (raw * VREF) / 1023.0f;
 }
 
 // Map a 1–5 V signal to [minVal, maxVal]
 float voltToLinear(float v, float minVal, float maxVal) {
-  // protect against values outside 1–5 V (e.g., noise)
   if (v < 1.0f) v = 1.0f;
   if (v > 5.0f) v = 5.0f;
   return minVal + (v - 1.0f) * (maxVal - minVal) / 4.0f;
+}
+
+// IIR low-pass filter state (initialised on first sample)
+const float FLOW_ALPHA = 0.15f;  // 0 = max smoothing, 1 = no filter
+static float filt_flow1 = -1.0f;
+static float filt_flow2 = -1.0f;
+static float filt_flow3 = -1.0f;
+
+float iirFlow(float &state, float newVal) {
+  if (state < 0.0f) state = newVal;  // seed on first call
+  state = FLOW_ALPHA * newVal + (1.0f - FLOW_ALPHA) * state;
+  return state;
 }
 // Current and target PWM values (0..255)
 int pwm1_cur = 0, pwm2_cur = 0, pwm3_cur = 0;
 int pwm1_target = 0, pwm2_target = 0, pwm3_target = 0;
 int pwm_init_extra = 0;
-int base1 = 148;
+int base1 = 149;
 int base2 = 151;
-int base3 = 148;
+int base3 = 151;
 int pww_init1 = base1 + pwm_init_extra;
 int pww_init2 = base2 + pwm_init_extra;
 int pww_init3 = base3 + pwm_init_extra;
@@ -205,20 +230,34 @@ void loop() {
   if (now - lastSampleMs >= SAMPLE_PERIOD_MS) {
       lastSampleMs += SAMPLE_PERIOD_MS;
 
-      // Read sensors
-      int rawFlow  = analogRead(FLOW_PIN_INLET);
-      int rawPress = analogRead(PRESS_PIN);
+      // Read sensors — averaged then IIR-filtered
+      int rawFlow1 = readADCAvg(FLOW_SENSOR_MODULE1);
+      int rawFlow2 = readADCAvg(FLOW_SENSOR_MODULE2);
+      int rawFlow3 = readADCAvg(FLOW_SENSOR_MODULE3);
+      int rawPress = readADCAvg(PRESS_PIN);
 
-      float vFlow  = adcToVoltage(rawFlow);
+      float vFlow1 = adcToVoltage(rawFlow1);
+      float vFlow2 = adcToVoltage(rawFlow2);
+      float vFlow3 = adcToVoltage(rawFlow3);
       float vPress = adcToVoltage(rawPress);
 
-      float flowLpm  = voltToLinear(vFlow,  FLOW_MIN_LPM, FLOW_MAX_LPM);
-      float pressMPa = voltToLinear(vPress, P_MIN_MPA,   P_MAX_MPA);
+      float raw1_lpm = voltToLinear(vFlow1, FLOW_MIN_LPM, FLOW_MAX_LPM);
+      float raw2_lpm = voltToLinear(vFlow2, FLOW_MIN_LPM, FLOW_MAX_LPM);
+      float raw3_lpm = voltToLinear(vFlow3, FLOW_MIN_LPM, FLOW_MAX_LPM);
+
+      float processed_flow1 = max(0.0f, iirFlow(filt_flow1, raw1_lpm) - FLOW_ZERO1_LPM);
+      float processed_flow2 = max(0.0f, iirFlow(filt_flow2, raw2_lpm) - FLOW_ZERO2_LPM);
+      float processed_flow3 = max(0.0f, iirFlow(filt_flow3, raw3_lpm) - FLOW_ZERO3_LPM);
+      float pressMPa = voltToLinear(vPress, P_MIN_MPA, P_MAX_MPA);
 
       // Print CSV line (note: we log CURRENT PWM values)
       Serial.print(now);         Serial.print(",");
-      Serial.print(rawFlow);     Serial.print(",");
-      Serial.print(flowLpm, 3);  Serial.print(",");
+      Serial.print(rawFlow1);     Serial.print(",");
+      Serial.print(processed_flow1, 3);  Serial.print(",");
+      Serial.print(rawFlow2);     Serial.print(",");
+      Serial.print(processed_flow2, 3);  Serial.print(",");
+      Serial.print(rawFlow3);     Serial.print(",");
+      Serial.print(processed_flow3, 3);  Serial.print(",");
       Serial.print(rawPress);    Serial.print(",");
       Serial.print(pressMPa, 4); Serial.print(",");
       Serial.print(pwm1_cur);    Serial.print(",");
