@@ -76,8 +76,6 @@ class UR5eRobot:
         """
         Servo control to target pose (for high-frequency absolute pose control)
 
-        This is the correct method for Diffusion Policy deployment with absolute poses!
-
         Args:
             target_pose: (6,) [x, y, z, rx, ry, rz] target pose
             dt: time step for servo control (should match control frequency)

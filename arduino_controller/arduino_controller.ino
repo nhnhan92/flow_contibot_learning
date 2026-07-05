@@ -35,7 +35,7 @@ unsigned long lastRampMs   = 0;
 const float PWM_STEP = 1; 
 
 // ADC averaging: take N samples and return the mean raw count
-const int ADC_AVG_N = 16;
+const int ADC_AVG_N = 10;
 int readADCAvg(int pin) {
   long sum = 0;
   for (int i = 0; i < ADC_AVG_N; i++) sum += analogRead(pin);
@@ -235,6 +235,11 @@ void loop() {
       int rawFlow2 = readADCAvg(FLOW_SENSOR_MODULE2);
       int rawFlow3 = readADCAvg(FLOW_SENSOR_MODULE3);
       int rawPress = readADCAvg(PRESS_PIN);
+
+      // int rawFlow1 = analogRead(FLOW_SENSOR_MODULE1);
+      // int rawFlow2 = analogRead(FLOW_SENSOR_MODULE2);
+      // int rawFlow3 = analogRead(FLOW_SENSOR_MODULE3);
+      // int rawPress = analogRead(PRESS_PIN);
 
       float vFlow1 = adcToVoltage(rawFlow1);
       float vFlow2 = adcToVoltage(rawFlow2);

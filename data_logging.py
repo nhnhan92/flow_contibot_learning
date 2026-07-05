@@ -9,6 +9,14 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import os
 
+try:
+    from flowbot.video_recorder import VideoRecorder, CameraRecorder
+    _CV2_AVAILABLE = True
+except ImportError:
+    VideoRecorder    = None
+    CameraRecorder   = None
+    _CV2_AVAILABLE   = False
+
 BAUD_RATE = 115200
 
 
@@ -90,10 +98,15 @@ def reader_logger(ser, writer, buffers, stop_flag):
                 b[:] = b[-MAX_POINTS:]
 
 
-def run_live_plot(buffers, stop_flag, save_fig, name):
+def run_live_plot(buffers, stop_flag, save_fig, name,
+                  record_path=None, record_fps=15.0, record_fig="proc"):
     """
     Live plot — runs on the main thread using FuncAnimation.
     Updates two figures at ~10 Hz independently of the serial read rate.
+
+    record_path : if set, record the chosen figure to this path (.mp4 or .gif)
+    record_fps  : target recording frame rate
+    record_fig  : "raw" to record fig1, "proc" to record fig2 (default)
     """
     fig1, ax_raw = plt.subplots(figsize=(9, 4))
     fig1.canvas.manager.set_window_title("Raw Flow  (press Q to stop)")
@@ -115,10 +128,19 @@ def run_live_plot(buffers, stop_flag, save_fig, name):
     ax_proc.set_title("Processed Flow — Module 1 / 2 / 3")
     ax_proc.legend()
 
+    # ── Video recorder ────────────────────────────────────────────────────────
+    recorder = None
+    if record_path is not None and VideoRecorder is not None:
+        rec_fig = fig1 if record_fig == "raw" else fig2
+        recorder = VideoRecorder(record_path, fps=record_fps, fig=rec_fig)
+    elif record_path is not None:
+        print("[video] VideoRecorder not available — recording skipped.")
+
     def _on_key(event):
         if event.key == "q":
             print("\n[plot] Q pressed — stopping.")
             stop_flag["stop"] = True
+            plt.close("all")   # closes all windows → plt.show() returns immediately
 
     fig1.canvas.mpl_connect("key_press_event", _on_key)
     fig2.canvas.mpl_connect("key_press_event", _on_key)
@@ -139,21 +161,28 @@ def run_live_plot(buffers, stop_flag, save_fig, name):
 
         lp1.set_data(t, p1); lp2.set_data(t, p2); lp3.set_data(t, p3)
         ax_proc.set_xlim(t[0], max(t[-1], t[0] + 1))
-        ymin2 = min(0, min(p1), min(p2), min(p3))
+        ymin2 = min(2, min(p1), min(p2), min(p3))
         ymax2 = max(max(p1), max(p2), max(p3))
         ax_proc.set_ylim(ymin2 - 0.1, ymax2 + 0.5)
 
         fig2.canvas.draw_idle()
 
+        if recorder is not None:
+            recorder.capture()
+
         if stop_flag["stop"]:
-            ani.event_source.stop()
+            plt.close("all")   # terminal "q" path: close windows from the animation tick
+            return lr1, lr2, lr3, lp1, lp2, lp3
 
         return lr1, lr2, lr3, lp1, lp2, lp3
 
     # interval=100 ms → 10 Hz redraws, completely independent of serial read rate
-    ani = animation.FuncAnimation(fig1, _update, interval=100, blit=False, cache_frame_data=False)
+    _ani = animation.FuncAnimation(fig1, _update, interval=100, blit=False, cache_frame_data=False)  # noqa: F841 — must be held to prevent GC
 
     plt.show()   # blocks until all windows are closed
+
+    if recorder is not None:
+        recorder.close()
 
     if save_fig:
         fig1.savefig(f"{name}_raw_flow.png",  dpi=300, bbox_inches="tight")
@@ -169,11 +198,21 @@ def main():
                         help='Serial port (e.g. COM3 on Windows, /dev/ttyACM0 on Linux)')
     parser.add_argument('--mode', '-m', type=str, help='Choose object type',required=False)
     parser.add_argument('--module_no', '-n', type=int, help='Choose object type',default=1,required=False)
+    parser.add_argument('--record', action='store_true',
+                        help='Record the live plot to a video file alongside the CSV')
+    parser.add_argument('--record_fps', type=float, default=15.0,
+                        help='Recording frame rate for both figure and camera (default 15)')
+    parser.add_argument('--record_fig', choices=['raw', 'proc'], default='proc',
+                        help='Which figure to record: raw flow or processed flow (default proc)')
+    parser.add_argument('--camera', action='store_true',
+                        help='Record USB camera video alongside the CSV (requires opencv-python)')
+    parser.add_argument('--camera_id', type=int, default=1,
+                        help='USB camera device index (default 0)')
 
     args = parser.parse_args()
     mode = args.mode
     module_no = args.module_no
-
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     print(f"[serial] Auto-detected port: {SERIAL_PORT}  (override with --port)")
     ser = serial.Serial(args.port, BAUD_RATE, timeout=1)
     time.sleep(1)
@@ -181,7 +220,7 @@ def main():
 
     folder_path = f"data/{mode}"
     os.makedirs(folder_path, exist_ok=True)
-    file_name = f"log_module{module_no}_{mode}"
+    file_name = f"log_{mode}_{ts}"
     OUTPUT_CSV = f"data/{mode}/{file_name}.csv"
     f = open(OUTPUT_CSV, "w", newline="")
     writer = csv.writer(f)
@@ -211,9 +250,9 @@ def main():
                 ser.write(cmd.encode("ascii"))
                 print("[PYTHON] Sent:", text)
                 if text.lower() == "p":
-                    valve1_pwm = random.randint(5, 20)
-                    valve2_pwm = random.randint(5, 20)
-                    valve3_pwm = random.randint(5, 20)
+                    valve1_pwm = random.randint(5, 25)
+                    valve2_pwm = random.randint(5, 25)
+                    valve3_pwm = random.randint(5, 25)
                     cmd = f"{valve1_pwm} {valve2_pwm} {valve3_pwm}\n"
                     ser.write(cmd.encode("ascii"))
                     print("[PYTHON] Sent:", cmd.strip())
@@ -235,7 +274,7 @@ def main():
                     stop_flag["stop"] = True
                     break
                 elif text.lower() in ("double", "d"):
-                    fn2 = f"log_module{module_no}vs3_{mode}"
+                    fn2 = f"log_module{module_no}vs3_{mode}_{ts}"
                     TIME_STAMP = f"data/{mode}/{fn2}_timestamp_0.csv"
                     f_timestamp = open(TIME_STAMP, "w", newline="")
                     writer_timestamp = csv.writer(f_timestamp)
@@ -253,7 +292,7 @@ def main():
                     stop_flag["stop"] = True
                     break
                 elif text.lower() in ("triple", "t"):
-                    fn3 = f"log_module{mode}"
+                    fn3 = f"log_module{mode}_{ts}"
                     pairs = [(m1, m2, m3)
                              for m1 in range(1, 26)
                              for m2 in range(1, 26)
@@ -291,8 +330,28 @@ def main():
     input_thread = threading.Thread(target=_input_loop, daemon=True)
     input_thread.start()
 
+    # Start camera before plot so both streams begin at the same time
+    camera_rec = None
+    if args.camera:
+        if not _CV2_AVAILABLE:
+            print("[camera] opencv-python not installed — camera recording skipped.")
+        else:
+            cam_path = f"data/{mode}/ext_cam.mp4"
+            camera_rec = CameraRecorder(cam_path, camera_id=args.camera_id,
+                                        fps=args.record_fps, stop_flag=stop_flag)
+            camera_rec.start()
+
     # Main thread owns the plot (required by matplotlib)
-    run_live_plot(buffers, stop_flag, save_fig, file_name)
+    rec_path = None
+    plot_file_name = f"{args.record_fig}_{ts}"
+    if args.record:
+        rec_path = f"data/{mode}/{plot_file_name}.mp4"
+    run_live_plot(buffers, stop_flag, save_fig, plot_file_name,
+                  record_path=rec_path, record_fps=args.record_fps,
+                  record_fig=args.record_fig)
+
+    if camera_rec is not None:
+        camera_rec.stop()
 
     input_thread.join(timeout=2.0)
     reader_thread.join(timeout=2.0)

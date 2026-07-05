@@ -12,7 +12,6 @@ Axis Mapping (SpaceMouse Raw → Robot):
         SpaceMouse RZ → Robot RY (pitch)
         SpaceMouse RY → Robot RZ (yaw/twist)
 
-Note: RX và RY hiện tại đang bị disable, chỉ có RZ (yaw) hoạt động.
 """
 
 import ctypes
@@ -298,8 +297,8 @@ class SpaceMouse:
         #   Robot RY = SpaceMouse RZ
         #   Robot RZ = SpaceMouse RY
         rx = self._apply_deadzone(self._rx / self.max_value)
-        ry = self._apply_deadzone(self._ry / self.max_value)   # disabled for safety
-        rz = self._apply_deadzone(self._rz / self.max_value)  # SM RY → Robot RZ (yaw)
+        ry = self._apply_deadzone(self._ry / self.max_value)   
+        rz = self._apply_deadzone(self._rz / self.max_value)  
 
         return np.array([x, y, z, rx, ry, rz], dtype=np.float64)
 
