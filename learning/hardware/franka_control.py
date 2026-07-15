@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 
 import numpy as np
+import scipy.spatial.transform as st
 
 from pylibfranka import (
     Robot,
@@ -26,22 +27,49 @@ class MotionConfig:
     max_joint_vel: float = 0.20    # rad/s
     max_joint_acc: float = 0.50    # rad/s^2
     max_cart_distance: float = 0.80  # m, reject too-large Cartesian command
+    max_ang_vel: float = 0.5       # rad/s, angular speed cap used by the servo loops
 
 
 class FrankaController:
+    """
+    Franka Panda control via pylibfranka.
+
+    Public API mirrors UR5eRobot (learning/hardware/ur5e_rtde.py) and
+    FrankaRobot (learning/hardware/franka_robot.py, franky-based):
+        get_tcp_pose()       -> np.ndarray (6,)  [x,y,z,rx,ry,rz] m/rad (rotvec)
+        get_joint_angles()   -> np.ndarray (7,)  joint angles rad
+        move_tcp_pose()      -> blocking (or async) point-to-point Cartesian move
+        servo_tcp_pose()     -> real-time Cartesian servo (persistent control loop)
+        move_joints()        -> blocking (or async) point-to-point joint move
+        stop()                -> stop motion/servo, keep the connection alive
+        recover()             -> automatic error recovery
+        disconnect()          -> stop and release
+    """
+
     def __init__(
         self,
-        ip: str = "172.16.0.2",
+        robot_ip: str = "172.16.0.2",
+        frequency: float = 30.0,
         use_gripper: bool = True,
         do_gripper_homing: bool = False,
         realtime: bool = False,
         motion_cfg: Optional[MotionConfig] = None,
     ):
-        self.ip = ip
+        """
+        Parameters
+        ----------
+        robot_ip    : Franka FCI IP (default 172.16.0.2)
+        frequency   : Advisory only, for signature parity with UR5eRobot/FrankaRobot.
+                      libfranka supplies its own real per-cycle dt via readOnce(),
+                      so this is not enforced anywhere internally.
+        """
+        self.robot_ip = robot_ip
+        self.frequency = frequency
         self.motion_cfg = motion_cfg or MotionConfig()
 
         self.motion_lock = threading.Lock()
         self.state_lock = threading.Lock()
+        self.servo_lock = threading.Lock()
         self.stop_event = threading.Event()
 
         self.robot: Optional[Robot] = None
@@ -49,20 +77,25 @@ class FrankaController:
         self.active_control = None
         self.is_moving = False
 
+        self._servo_thread: Optional[threading.Thread] = None
+        self._servo_kind: Optional[str] = None   # "cartesian" or "joint"
+        self._async_thread: Optional[threading.Thread] = None
+        self.servo_target = None
+
         self.latest_state = None
         self.latest_O_T_EE = None
         self.latest_q = None
         self.latest_wall_time = None
 
         rt_config = RealtimeConfig.kEnforce if realtime else RealtimeConfig.kIgnore
-        self.robot = Robot(ip, rt_config)
+        self.robot = Robot(robot_ip, rt_config)
         self.set_default_collision_behavior()
 
-        print(f"[FrankaController] Robot connected: {ip}")
+        print(f"[FrankaController] Robot connected: {robot_ip}")
 
         if use_gripper:
             try:
-                self.gripper = Gripper(ip)
+                self.gripper = Gripper(robot_ip)
                 print("[FrankaController] Gripper connected")
 
                 if do_gripper_homing:
@@ -104,7 +137,8 @@ class FrankaController:
             raise RuntimeError("Robot is not connected")
         self.robot.set_load(mass, list(com_xyz), list(inertia_3x3_colmajor))
 
-    def recover_errors(self):
+    def recover(self):
+        """Recover from robot errors (e.g. after a collision)."""
         if self.robot is None:
             raise RuntimeError("Robot is not connected")
         self.robot.automatic_error_recovery()
@@ -146,7 +180,7 @@ class FrankaController:
         self._cache_state(state)
         return state
 
-    def get_ee(self) -> np.ndarray:
+    def _get_O_T_EE(self) -> np.ndarray:
         """
         Return current EE pose as 16 values in column-major order.
 
@@ -162,7 +196,7 @@ class FrankaController:
         state = self.update_idle_state()
         return np.array(state.O_T_EE, dtype=float).copy()
 
-    def get_joint(self) -> np.ndarray:
+    def _get_q(self) -> np.ndarray:
         if self.is_moving:
             with self.state_lock:
                 if self.latest_q is None:
@@ -199,10 +233,126 @@ class FrankaController:
         return self.gripper.grasp(width, speed, force, epsilon_inner, epsilon_outer)
 
     # -------------------------
-    # Cartesian motion
+    # Public API (matches UR5eRobot / FrankaRobot)
     # -------------------------
 
-    def move_ee(
+    def get_tcp_pose(self) -> np.ndarray:
+        """Return current TCP pose as (6,) [x, y, z, rx, ry, rz] m/rad (rotation vector)."""
+        return self._O_T_EE_to_pose6(self._get_O_T_EE())
+
+    def get_joint_angles(self) -> np.ndarray:
+        """Return current joint angles as (7,) rad. Franka has 7 joints (UR5e has 6)."""
+        return self._get_q().astype(np.float32)
+
+    def move_tcp_pose(
+        self,
+        target_pose,
+        velocity: float = 0.5,
+        acceleration: float = 1.0,
+        asynchronous: bool = False,
+    ):
+        """
+        Blocking (or async) point-to-point move to a target TCP pose.
+
+        Parameters
+        ----------
+        target_pose  : (6,) [x, y, z, rx, ry, rz] m/rad (rotation vector)
+        velocity     : Max Cartesian speed (m/s) for the trapezoidal profile.
+        acceleration : Max Cartesian acceleration (m/s^2).
+        asynchronous : If True, run the move in a background thread and return
+                       immediately (the thread object is returned for optional
+                       joining).
+        """
+        target16 = self._pose6_to_O_T_EE(target_pose)
+        if asynchronous:
+            thread = threading.Thread(
+                target=self._move_ee,
+                kwargs=dict(target_O_T_EE=target16, max_vel=velocity, max_acc=acceleration),
+                daemon=True,
+            )
+            self._async_thread = thread
+            thread.start()
+            return thread
+        return self._move_ee(target16, max_vel=velocity, max_acc=acceleration)
+
+    def servo_tcp_pose(
+        self,
+        target_pose,
+        velocity: float = 0.1,
+        acceleration: float = 0.1,
+        dt: Optional[float] = None,
+    ):
+        """
+        High-frequency Cartesian servo step (mirrors UR5e/FrankaRobot servo_tcp_pose).
+
+        Lazily starts a persistent Cartesian control session on the first call;
+        every call after that just updates the goal pose that the background
+        loop chases, rate-limited by velocity/acceleration. `dt` is accepted
+        for signature compatibility but unused: libfranka supplies its own
+        real per-cycle timestep internally.
+
+        Parameters
+        ----------
+        target_pose  : (6,) [x, y, z, rx, ry, rz] m/rad, absolute target.
+        velocity     : Max translation speed (m/s).
+        acceleration : Max rotation speed (rad/s), reused loosely as the
+                       angular-rate cap -- same convention as FrankaRobot's
+                       own servo_tcp_pose.
+        """
+        if self._servo_kind == "joint":
+            raise RuntimeError("Joint servo is active; call stop() first")
+        if self._servo_kind != "cartesian":
+            self._start_cartesian_servo(max_vel=velocity, max_ang_vel=acceleration)
+        self._set_cartesian_target(self._pose6_to_O_T_EE(target_pose))
+
+    def move_joints(
+        self,
+        target_joints,
+        velocity: float = 0.5,
+        acceleration: float = 1.0,
+        asynchronous: bool = False,
+    ):
+        """
+        Blocking (or async) point-to-point move to a target joint configuration.
+
+        Parameters
+        ----------
+        target_joints : (7,) target joint angles in rad.
+        """
+        target_joints = np.asarray(target_joints, dtype=float)
+        if asynchronous:
+            thread = threading.Thread(
+                target=self._move_joint,
+                kwargs=dict(target_q=target_joints, max_vel=velocity, max_acc=acceleration),
+                daemon=True,
+            )
+            self._async_thread = thread
+            thread.start()
+            return thread
+        return self._move_joint(target_joints, max_vel=velocity, max_acc=acceleration)
+
+    def stop(self):
+        """Stop any active motion or servo loop. Mirrors UR5e's stop(): halts motion, keeps the connection alive."""
+        if self._servo_kind == "cartesian":
+            self._stop_cartesian_servo()
+        elif self._servo_kind == "joint":
+            self._stop_joint_servo()
+        elif self.is_moving:
+            self.stop_event.set()
+
+    def disconnect(self):
+        """Stop any motion and release. Best-effort; mirrors FrankaRobot.disconnect()."""
+        try:
+            self.stop()
+        except Exception:
+            pass
+        print(f"[FrankaController] Disconnected: {self.robot_ip}")
+
+    # -------------------------
+    # Cartesian motion (internal, 16-value O_T_EE)
+    # -------------------------
+
+    def _move_ee(
         self,
         target_O_T_EE: Sequence[float],
         max_vel: Optional[float] = None,
@@ -216,6 +366,9 @@ class FrankaController:
             16 values, column-major homogeneous transform.
             Translation is index 12, 13, 14.
         """
+        if self.is_moving:
+            raise RuntimeError("Already moving; stop the current motion or servo loop first")
+
         target = self._validate_pose16(target_O_T_EE)
         max_vel = max_vel or self.motion_cfg.max_cart_vel
         max_acc = max_acc or self.motion_cfg.max_cart_acc
@@ -296,7 +449,7 @@ class FrankaController:
 
                     active.writeOnce(cmd)
                 return 1
-                
+
 
             except Exception:
                 self.force_stop()
@@ -312,10 +465,10 @@ class FrankaController:
                     pass
 
     # -------------------------
-    # Joint motion
+    # Joint motion (internal, 7-value q)
     # -------------------------
 
-    def move_joint(
+    def _move_joint(
         self,
         target_q: Sequence[float],
         max_vel: Optional[float] = None,
@@ -328,6 +481,9 @@ class FrankaController:
         target_q:
             7 joint values in rad.
         """
+        if self.is_moving:
+            raise RuntimeError("Already moving; stop the current motion or servo loop first")
+
         target_q = self._validate_joint7(target_q)
         max_vel = max_vel or self.motion_cfg.max_joint_vel
         max_acc = max_acc or self.motion_cfg.max_joint_acc
@@ -399,6 +555,256 @@ class FrankaController:
                     self.update_idle_state()
                 except Exception:
                     pass
+
+    # -------------------------
+    # Cartesian servo (persistent realtime loop, internal)
+    # -------------------------
+    #
+    # _move_ee() opens start_cartesian_pose_control(), blocks until the whole
+    # trapezoid trajectory is done, then closes the control session. That is
+    # fine for one-shot point-to-point moves but wrong for an outer loop that
+    # wants to push a new target every tick (e.g. a policy running at 20-30 Hz):
+    # reopening start_cartesian_pose_control() every tick means restarting
+    # libfranka's realtime session on every call, which the FCI does not
+    # support at that rate.
+    #
+    # _start_cartesian_servo() instead opens the control session once and keeps
+    # a background thread alive that runs libfranka's own read/write cycle
+    # continuously. servo_tcp_pose() (the public entry point) just calls
+    # _set_cartesian_target() whenever it has a new goal pose; the background
+    # thread chases the latest target, clipping per-cycle motion to max_vel /
+    # max_ang_vel so a stale or jumpy target from outside can't cause a step
+    # change on the robot.
+
+    def _start_cartesian_servo(
+        self,
+        max_vel: Optional[float] = None,
+        max_ang_vel: Optional[float] = None,
+        controller_mode=ControllerMode.JointImpedance,
+    ):
+        """
+        Start a persistent Cartesian control session for realtime servoing.
+
+        Call _set_cartesian_target() from an outer loop to update the goal
+        pose; call _stop_cartesian_servo() when done. Do not call _move_ee()
+        while a servo session is active.
+        """
+        with self.motion_lock:
+            if self.is_moving:
+                raise RuntimeError("Already moving; call _stop_cartesian_servo() first")
+
+            max_vel = max_vel or self.motion_cfg.max_cart_vel
+            max_ang_vel = max_ang_vel or self.motion_cfg.max_ang_vel
+
+            self.stop_event.clear()
+            self.is_moving = True
+            self._servo_kind = "cartesian"
+
+            active = self.robot.start_cartesian_pose_control(controller_mode)
+            self.active_control = active
+
+            state, _ = active.readOnce()
+            self._cache_state(state)
+            current_pose = np.array(state.O_T_EE, dtype=float).copy()
+            active.writeOnce(CartesianPose(current_pose))
+
+            with self.servo_lock:
+                self.servo_target = current_pose.copy()
+
+            self._servo_thread = threading.Thread(
+                target=self._cartesian_servo_loop,
+                args=(active, max_vel, max_ang_vel),
+                daemon=True,
+            )
+            self._servo_thread.start()
+
+    def _set_cartesian_target(self, target_O_T_EE: Sequence[float]):
+        """Update the goal pose chased by the running Cartesian servo loop."""
+        if self._servo_kind != "cartesian" or self._servo_thread is None:
+            raise RuntimeError("Cartesian servo is not running; call _start_cartesian_servo() first")
+        target = self._validate_pose16(target_O_T_EE)
+        with self.servo_lock:
+            self.servo_target = target
+
+    def _stop_cartesian_servo(self, timeout: float = 2.0):
+        """Stop the running Cartesian servo loop and release control."""
+        if self._servo_kind != "cartesian" or self._servo_thread is None:
+            return
+        self._stop_servo_thread(timeout)
+
+    def _cartesian_servo_loop(self, active, max_vel: float, max_ang_vel: float):
+        try:
+            while not self.stop_event.is_set():
+                state, duration = active.readOnce()
+                self._cache_state(state)
+                dt = duration.to_sec()
+
+                with self.servo_lock:
+                    target = self.servo_target.copy()
+
+                current_pose = np.array(state.O_T_EE, dtype=float)
+                next_pose = self._step_toward_pose(current_pose, target, dt, max_vel, max_ang_vel)
+
+                cmd = CartesianPose(next_pose)
+                if self.stop_event.is_set():
+                    cmd.motion_finished = True
+                active.writeOnce(cmd)
+
+        except Exception as e:
+            print(f"[FrankaController] Cartesian servo loop error: {e}")
+            self.force_stop()
+
+        finally:
+            self.active_control = None
+            self.is_moving = False
+            self._servo_kind = None
+            self.servo_target = None
+            try:
+                self.update_idle_state()
+            except Exception:
+                pass
+
+    # -------------------------
+    # Joint servo (persistent realtime loop, internal)
+    # -------------------------
+
+    def _start_joint_servo(
+        self,
+        max_vel: Optional[float] = None,
+        controller_mode=ControllerMode.CartesianImpedance,
+    ):
+        """
+        Start a persistent joint-position control session for realtime servoing.
+
+        Call _set_joint_target() from an outer loop to update the goal joint
+        position; call _stop_joint_servo() when done. Do not call _move_joint()
+        while a servo session is active.
+        """
+        with self.motion_lock:
+            if self.is_moving:
+                raise RuntimeError("Already moving; call _stop_joint_servo() first")
+
+            max_vel = max_vel or self.motion_cfg.max_joint_vel
+
+            self.stop_event.clear()
+            self.is_moving = True
+            self._servo_kind = "joint"
+
+            active = self.robot.start_joint_position_control(controller_mode)
+            self.active_control = active
+
+            state, _ = active.readOnce()
+            self._cache_state(state)
+            current_q = np.array(state.q, dtype=float).copy()
+            active.writeOnce(JointPositions(current_q.tolist()))
+
+            with self.servo_lock:
+                self.servo_target = current_q.copy()
+
+            self._servo_thread = threading.Thread(
+                target=self._joint_servo_loop,
+                args=(active, max_vel),
+                daemon=True,
+            )
+            self._servo_thread.start()
+
+    def _set_joint_target(self, target_q: Sequence[float]):
+        """Update the goal joint position chased by the running joint servo loop."""
+        if self._servo_kind != "joint" or self._servo_thread is None:
+            raise RuntimeError("Joint servo is not running; call _start_joint_servo() first")
+        target = self._validate_joint7(target_q)
+        with self.servo_lock:
+            self.servo_target = target
+
+    def _stop_joint_servo(self, timeout: float = 2.0):
+        """Stop the running joint servo loop and release control."""
+        if self._servo_kind != "joint" or self._servo_thread is None:
+            return
+        self._stop_servo_thread(timeout)
+
+    def _joint_servo_loop(self, active, max_vel: float):
+        try:
+            while not self.stop_event.is_set():
+                state, duration = active.readOnce()
+                self._cache_state(state)
+                dt = duration.to_sec()
+
+                with self.servo_lock:
+                    target_q = self.servo_target.copy()
+
+                current_q = np.array(state.q, dtype=float)
+                delta = target_q - current_q
+                max_step = max_vel * dt
+                step = np.clip(delta, -max_step, max_step)
+                next_q = current_q + step
+
+                cmd = JointPositions(next_q.tolist())
+                if self.stop_event.is_set():
+                    cmd.motion_finished = True
+                active.writeOnce(cmd)
+
+        except Exception as e:
+            print(f"[FrankaController] Joint servo loop error: {e}")
+            self.force_stop()
+
+        finally:
+            self.active_control = None
+            self.is_moving = False
+            self._servo_kind = None
+            self.servo_target = None
+            try:
+                self.update_idle_state()
+            except Exception:
+                pass
+
+    def _stop_servo_thread(self, timeout: float):
+        self.stop_event.set()
+        thread = self._servo_thread
+        if thread is not None:
+            thread.join(timeout=timeout)
+        self._servo_thread = None
+        self.stop_event.clear()
+
+    def _step_toward_pose(
+        self,
+        current_pose: np.ndarray,
+        target_pose: np.ndarray,
+        dt: float,
+        max_vel: float,
+        max_ang_vel: float,
+    ) -> np.ndarray:
+        """Return the next pose, one servo cycle closer to target_pose, rate-limited."""
+        cur_T = self._pose_to_matrix(current_pose)
+        tgt_T = self._pose_to_matrix(target_pose)
+
+        cur_pos = cur_T[:3, 3]
+        tgt_pos = tgt_T[:3, 3]
+        delta = tgt_pos - cur_pos
+        dist = float(np.linalg.norm(delta))
+        max_step = max_vel * dt
+        if dist < 1e-9 or dist <= max_step:
+            step_pos = tgt_pos
+        else:
+            step_pos = cur_pos + delta / dist * max_step
+
+        q0 = self._rot_to_quat(cur_T[:3, :3])
+        q1 = self._rot_to_quat(tgt_T[:3, :3])
+        dot = float(np.clip(np.dot(q0, q1), -1.0, 1.0))
+        if dot < 0.0:
+            q1 = -q1
+            dot = -dot
+        angle = 2.0 * np.arccos(np.clip(dot, -1.0, 1.0))
+        max_angle_step = max_ang_vel * dt
+        if angle < 1e-9 or angle <= max_angle_step:
+            alpha = 1.0
+        else:
+            alpha = max_angle_step / angle
+        step_R = self._quat_to_rot(self._slerp(q0, q1, alpha))
+
+        step_T = tgt_T.copy()
+        step_T[:3, :3] = step_R
+        step_T[:3, 3] = step_pos
+        return self._matrix_to_pose(step_T)
 
     # -------------------------
     # Helpers
@@ -478,6 +884,23 @@ class FrankaController:
     @staticmethod
     def _matrix_to_pose(T: np.ndarray) -> np.ndarray:
         return np.array(T, dtype=float).reshape(16, order="F")
+
+    @staticmethod
+    def _pose6_to_O_T_EE(pose6: Sequence[float]) -> np.ndarray:
+        """Convert (6,) [x, y, z, rx, ry, rz] rotation-vector pose to a 16-value column-major O_T_EE."""
+        pose6 = np.asarray(pose6, dtype=float).reshape(6)
+        T = np.eye(4)
+        T[:3, :3] = st.Rotation.from_rotvec(pose6[3:]).as_matrix()
+        T[:3, 3] = pose6[:3]
+        return FrankaController._matrix_to_pose(T)
+
+    @staticmethod
+    def _O_T_EE_to_pose6(pose16: Sequence[float]) -> np.ndarray:
+        """Convert a 16-value column-major O_T_EE to (6,) [x, y, z, rx, ry, rz] rotation-vector pose."""
+        T = FrankaController._pose_to_matrix(pose16)
+        pos = T[:3, 3]
+        rotvec = st.Rotation.from_matrix(T[:3, :3]).as_rotvec()
+        return np.concatenate([pos, rotvec]).astype(np.float32)
 
     @staticmethod
     def _rot_to_quat(R: np.ndarray) -> np.ndarray:
@@ -571,28 +994,28 @@ def main():
     args = parser.parse_args()
 
     franka = FrankaController(
-        ip=args.ip,
+        robot_ip=args.ip,
         use_gripper=args.gripper,
         do_gripper_homing=args.homing,
         realtime=False,
     )
 
 
-    print(franka.get_ee())
-    
+    print(franka.get_tcp_pose())
+
 
 
     # def robot_thread_task():
-    #     pose = franka.get_ee()
+    #     pose = franka.get_tcp_pose()
     #     target = pose.copy()
 
     #     # Demo: move +2 cm in x direction.
-    #     target[12] += 0.02
+    #     target[0] += 0.02
 
-    #     franka.move_ee(
+    #     franka.move_tcp_pose(
     #         target,
-    #         max_vel=0.02,
-    #         max_acc=0.10,
+    #         velocity=0.02,
+    #         acceleration=0.10,
     #     )
 
     #     if franka.gripper is not None:
@@ -603,8 +1026,8 @@ def main():
 
     # try:
     #     while robot_thread.is_alive():
-    #         pose = franka.get_ee()
-    #         xyz = pose[[12, 13, 14]]
+    #         pose = franka.get_tcp_pose()
+    #         xyz = pose[:3]
     #         print(f"Current EE xyz: {xyz}")
     #         time.sleep(0.2)
 
