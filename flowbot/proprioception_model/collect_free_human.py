@@ -161,7 +161,7 @@ def main():
                         help="Number of random waypoints (default 60)")
     parser.add_argument("--equil_s", type=float, default=0.1,
                         help="Equilibrium logging duration after each step (default 0.2 s)")
-    parser.add_argument("--settling_s", type=float, default=1.7,
+    parser.add_argument("--settling_s", type=float, default=1.2,
                         help="Delay after each step before logging (default 2.0 s)")
     parser.add_argument("--output", default=None,
                         help="Output CSV path (default data/flow_tip_free/free_<timestamp>.csv)")
@@ -195,7 +195,7 @@ def main():
                         help="Camera recording fps (default 15)")
     parser.add_argument("--load", type=int, default=None,
                         help="Load at the End effector")
-    parser.add_argument("--min_xy_dist", type=float, default=15.0,
+    parser.add_argument("--min_xy_dist", type=float, default=10.0,
                         help="Min XY radial distance from workspace centre (mm). "
                              "Biases sampling toward large bending angles. Default 0 (no constraint)")
 
@@ -297,7 +297,7 @@ def main():
 
     
     try:
-        fb.step(np.array([0.0, 0.0, 12.0])) 
+        fb.step(np.array([0.0, 0.0, 10.0])) 
         input("   Press Enter when ready to begin... ")
         print(" Warmup step done. Starting main loop...")
         for wp_idx in range(args.n_waypoints):
@@ -305,7 +305,7 @@ def main():
             for _ in range(10000):
                 target = rng.uniform(bbox_lo, bbox_hi)
                 if (fb.ws.is_inside_workspace(target, fb.tri)
-                        and target[2] > fb.pc_init[2] + 10.0
+                        and target[2] > fb.pc_init[2] + 5.0
                         and target[2] < bbox_hi[2] - 1.0
                         and target[0]**2 + target[1]**2 > args.min_xy_dist**2):
                     break
@@ -335,7 +335,7 @@ def main():
 
             # ── SETTLE ────────────────────────────────────────────────────────
             print(f"   Settling {args.settling_s:.1f} s...")
-            if ((wp_idx - 1) % 10 == 0 and wp_idx > 0) or wp_idx == 0:
+            if ((wp_idx - 1) % 25 == 0 and wp_idx > 0) or wp_idx == 0:
                 print("   (First waypoint — allowing extra settling time)")
                 time.sleep(args.settling_s + 1.5)
             else:
@@ -347,12 +347,12 @@ def main():
                                fb.last_pwm, "free_human", args.equil_s, t0)
             print(f"   → {n_free} rows (free_human)")
 
-            if wp_idx % 10 == 0 and wp_idx > 0:
+            if wp_idx % 25 == 0 and wp_idx > 0:
                 print(f"\n[collect] Reached waypoint {wp_idx}/{args.n_waypoints} "
                       f"— pausing briefly to reset robot.")
                 try:
                     fb.reset()
-                    time.sleep(35.0)
+                    time.sleep(20.0)
                 except Exception:
                     pass
 

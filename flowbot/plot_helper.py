@@ -21,7 +21,7 @@ from scipy.spatial import ConvexHull
 HULL_DOWNSAMPLE = 6  # keep your constant
 
 class plot_helper:
-    def setup_plot(self, points: np.ndarray):
+    def setup_plot(self, points: np.ndarray,draw_hull=False):
         points = np.asarray(points, dtype=float)
         P_vis = points[::max(1, int(HULL_DOWNSAMPLE)), :]
 
@@ -66,9 +66,10 @@ class plot_helper:
                 ax.scatter(pts2[:, 0], pts2[:, 1], s=2, alpha=0.4)
 
         # Draw projected hulls
-        _plot_hull_2d(ax_xy, P_vis[:, [0, 1]])
-        _plot_hull_2d(ax_xz, P_vis[:, [0, 2]])
-        _plot_hull_2d(ax_yz, P_vis[:, [1, 2]])
+        if draw_hull:
+            _plot_hull_2d(ax_xy, P_vis[:, [0, 1]])
+            _plot_hull_2d(ax_xz, P_vis[:, [0, 2]])
+            _plot_hull_2d(ax_yz, P_vis[:, [1, 2]])
 
         # Set limits
         ax_xy.set_xlim(mn[0], mx[0]); ax_xy.set_ylim(mn[1], mx[1])
@@ -100,7 +101,7 @@ class plot_helper:
             loc="center",
             frameon=True,
             fontsize=14,          # bigger text
-            markerscale=1.6,      # bigger scatter markers in legend
+            markerscale=1.2,      # bigger scatter markers in legend
             handlelength=2.2,     # longer line sample
             handletextpad=0.8,    # space between handle and text
             labelspacing=0.8,     # vertical spacing between entries

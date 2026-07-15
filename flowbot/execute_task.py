@@ -38,14 +38,13 @@ from flowbot.video_recorder import VideoRecorder
 # CSV Logger
 # ──────────────────────────────────────────────────────────────
 class TaskLogger:
-    """Logs timestamped rows: t, pwm, pc (commanded), optitrack pos + quat."""
+    """Logs timestamped rows: t, pwm, pc (commanded), optitrack in manipulator frame (mm)."""
 
     HEADER = [
         "t_s",
         "pwm_1", "pwm_2", "pwm_3",
         "cmd_pc_x", "cmd_pc_y", "cmd_pc_z",
-        "opti_x", "opti_y", "opti_z",
-        "opti_qx", "opti_qy", "opti_qz", "opti_qw",
+        "opti_mm_x", "opti_mm_y", "opti_mm_z",  # manipulator frame mm
     ]
 
     def __init__(self, path: str):
@@ -56,21 +55,19 @@ class TaskLogger:
         self._t0 = time.perf_counter()
         print(f"[logger] Writing to {path}")
 
-    def log(self, pwm, pc, opti_sample=None):
+    def log(self, pwm, pc, opti_mm=None):
         t = time.perf_counter() - self._t0
         pwm = np.asarray(pwm, dtype=int).reshape(3,)
         pc  = np.asarray(pc,  dtype=float).reshape(3,)
-        if opti_sample is not None:
-            ox, oy, oz = opti_sample.pos_xyz
-            qx, qy, qz, qw = opti_sample.quat_xyzw
+        if opti_mm is not None:
+            ox, oy, oz = float(opti_mm[0]), float(opti_mm[1]), float(opti_mm[2])
         else:
-            ox = oy = oz = qx = qy = qz = qw = float("nan")
+            ox = oy = oz = float("nan")
         self._w.writerow([
             f"{t:.4f}",
             int(pwm[0]), int(pwm[1]), int(pwm[2]),
             f"{pc[0]:.4f}", f"{pc[1]:.4f}", f"{pc[2]:.4f}",
-            f"{ox:.6f}", f"{oy:.6f}", f"{oz:.6f}",
-            f"{qx:.6f}", f"{qy:.6f}", f"{qz:.6f}", f"{qw:.6f}",
+            f"{ox:.3f}", f"{oy:.3f}", f"{oz:.3f}",
         ])
 
     def flush(self):
@@ -103,22 +100,14 @@ def load_task_module(task: str):
 ARRIVAL_THRESHOLD_MM = 1.0   # mm — close enough to declare waypoint reached
 
 
-def _opti_transform(opti, opti_sample, opti_origin_m):
-    """Apply opti_to_manip and flip X/Y axes. Returns transformed 3-vector or None."""
-    if opti is None or opti_sample is None:
-        return None
-    t = opti.opti_to_manip(np.array(opti_sample.pos_xyz, dtype=float), opti_origin_m)
-    t[0] = -t[0]
-    t[1] = -t[1]
-    return t
-
 def move_to_waypoint(fb, target_pc, hold_s, logger, opti,
                      plot_handles=None, opti_trail_buf=None,
                      opti_origin_m=None, optitrack_init_ref=None,
                      stop_event: threading.Event = None,
                      recorder=None,
                      robot_trail_buf=None, robot_trail_handles=None,
-                     log_data: bool = True):
+                     log_data: bool = True,
+                     opti_signs=(1.0, 1.0, 1.0)):
     """
     Drive fb toward target_pc using step(), then hold for hold_s seconds.
     Logs every control tick when log_data=True.
@@ -131,6 +120,7 @@ def move_to_waypoint(fb, target_pc, hold_s, logger, opti,
 
     # ── Phase 1: move toward target ──────────────────────────
     max_iters = 5000
+    import random
     for _ in range(max_iters):
         if _stopped():
             return
@@ -145,11 +135,12 @@ def move_to_waypoint(fb, target_pc, hold_s, logger, opti,
 
         opti_sample = opti.get_latest() if opti is not None else None
         if log_data:
-            logger.log(pwm, fb.pc, opti_sample)
+            opti_mm = opti.transform_to_manip_mm(opti_sample, opti_origin_m, opti_signs) if opti is not None else None
+            logger.log(pwm, fb.pc, opti_mm=opti_mm)
 
         if plot_handles is not None:
             _update_plot(fb, opti, opti_sample, opti_trail_buf,
-                         opti_origin_m, optitrack_init_ref, recorder)
+                         opti_origin_m, optitrack_init_ref, recorder, opti_signs)
 
     # ── Phase 2: hold at target ───────────────────────────────────
     t_hold_end = time.perf_counter() + hold_s
@@ -160,18 +151,19 @@ def move_to_waypoint(fb, target_pc, hold_s, logger, opti,
         pwm = fb.step(np.zeros(3))
         opti_sample = opti.get_latest() if opti is not None else None
         if log_data:
-            logger.log(pwm, fb.pc, opti_sample)
+            opti_mm = opti.transform_to_manip_mm(opti_sample, opti_origin_m, opti_signs) if opti is not None else None
+            logger.log(pwm, fb.pc, opti_mm=opti_mm)
 
         if plot_handles is not None:
             _update_plot(fb, opti, opti_sample, opti_trail_buf,
-                         opti_origin_m, optitrack_init_ref, recorder)
+                         opti_origin_m, optitrack_init_ref, recorder, opti_signs)
 
     # Record the OptiTrack position at end of hold as a waypoint dot
     if (robot_trail_buf is not None and robot_trail_handles is not None
             and opti is not None and optitrack_init_ref is not None
             and not optitrack_init_ref[0]):
         hold_sample = opti.get_latest()
-        pt = _opti_transform(opti, hold_sample, opti_origin_m)
+        pt = opti.transform_to_manip_mm(hold_sample, opti_origin_m, opti_signs)
         if pt is not None:
             robot_trail_buf.append(pt.copy())
             pts = np.vstack(robot_trail_buf)
@@ -181,7 +173,8 @@ def move_to_waypoint(fb, target_pc, hold_s, logger, opti,
 
 
 def _update_plot(fb, opti, opti_sample, opti_trail_buf,
-                 opti_origin_m, optitrack_init_ref, recorder=None):
+                 opti_origin_m, optitrack_init_ref, recorder=None,
+                 opti_signs=(1.0, 1.0, 1.0)):
     """Update the 2D projection plot (pc + optitrack trail), then capture a frame."""
     OPTITRACK_TRAIL_LEN = 15
 
@@ -192,7 +185,7 @@ def _update_plot(fb, opti, opti_sample, opti_trail_buf,
             optitrack_init_ref[0] = False
 
         if not optitrack_init_ref[0]:
-            transformed = _opti_transform(opti, opti_sample, opti_origin_m)
+            transformed = opti.transform_to_manip_mm(opti_sample, opti_origin_m, opti_signs)
             fb.pl.update_opti_handle(fb.opti_handles, transformed)
 
             opti_trail_buf.append(transformed.copy())
@@ -234,15 +227,21 @@ def main():
                     help="Frame rate for recorded video (default 15).")
     ap.add_argument("--record-output",  default=None,
                     help="Video output path (auto-generated alongside CSV if omitted).")
-    ap.add_argument("--seed",           type=int, default=None,
-                    help="Random seed passed to get_waypoints (useful for random task).")
+    ap.add_argument("--inf",           type=str, default=None,
+                    help="information about the task (randome seed, radius, etc.)")
+    ap.add_argument("--seed",          type=int, default=8,
+                    help="Random seed for reproducible tasks (default 8).")
     ap.add_argument("--home-every",     type=int, default=None,
                     help="Return to home and rest after every N waypoints (disabled if omitted).")
     ap.add_argument("--home-rest",      type=float, default=20.0,
                     help="Hold time at home during periodic rest (default 20.0 s).")
-    ap.add_argument("--reverse",        action="store_true", default=False,
+    ap.add_argument("--reverse",     type=bool, default=False,
                     help="For tasks with forward+reverse waypoints (e.g. lemniscate), "
                          "only do the reverse (inner→outer) half.")
+    # ── Frame alignment ──────────────────────────────────────────
+    ap.add_argument("--opti_signs", type=float, nargs=3, default=[1.0, 1.0, 1.0],
+                    metavar=("SX", "SY", "SZ"),
+                    help="Sign per axis for optitrack display and logging (default: 1 1 1).")
     # ── Compensation model ───────────────────────────────────────
     ap.add_argument("--compensate",     action="store_true", default=False,
                     help="Enable error compensator (ResGRU).")
@@ -271,12 +270,13 @@ def main():
 
     # ── Output paths ─────────────────────────────────────────────
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    inf_tag = f"_{args.inf}" if args.inf is not None else ""
     if args.output is None:
-        seed_tag = f"_s{args.seed}" if args.seed is not None else ""
+        
         out_path = str(Path(FILE_DIR).parent / "data" / "task_logs"
-                       / f"{task_name}{seed_tag}_{ts}.csv")
+                       / f"{task_name}{inf_tag}_FF_{ts}.csv")
     else:
-        out_path = args.output if args.output.endswith(".csv") else args.output + ".csv"
+        out_path = str(Path(args.output) / f"{task_name}{inf_tag}_FF_{ts}.csv")
 
     # ── Serial port ─────────────────────────────────────────────
     os_name = platform.system().lower()
@@ -309,13 +309,22 @@ def main():
             rigid_body_id=1,
         )
         opti.start()
+        time.sleep(1.0)
+        s = opti.get_latest()
+        if s is not None:
+            opti_origin_m[:] = np.array(s.pos_xyz, dtype=float)
+            opti_origin_m[1] += (fb.flowbot.l0 + fb.flowbot.lu) / 1000.0
+            optitrack_init_ref[0] = False
+            print(f"[optitrack] Origin set: {np.round(opti_origin_m, 4)}")
+        else:
+            print("[optitrack] WARNING: no sample yet — origin stays [0,0,0]")
 
     # ── Get waypoints ────────────────────────────────────────────
     import inspect
     _gw_sig   = inspect.signature(task_mod.get_waypoints)
     _gw_kwargs = {}
-    if "seed"    in _gw_sig.parameters and args.seed    is not None:
-        _gw_kwargs["seed"]    = args.seed
+    if "seed"    in _gw_sig.parameters:
+        _gw_kwargs["seed"]    = _gw_sig.parameters["seed"].default if args.seed is None else args.seed
     if "reverse" in _gw_sig.parameters:
         _gw_kwargs["reverse"] = args.reverse
     waypoints = task_mod.get_waypoints(fb, **_gw_kwargs)
@@ -408,6 +417,7 @@ def main():
         recorder=recorder,
         robot_trail_buf=robot_trail_buf,
         robot_trail_handles=robot_trail_handles,
+        opti_signs=tuple(args.opti_signs),
     )
 
     home_pc        = np.asarray(fb.pc_init, dtype=float).reshape(3,)
@@ -416,6 +426,8 @@ def main():
     waypoint_count = 0                  # counts executed non-home waypoints
 
     try:
+        fb.step(np.array([0.0, 0.0, 15.0])) 
+        input("   Press Enter when ready to begin... ")
         for rep in range(args.repeat):
             if stop_event.is_set():
                 break
@@ -449,6 +461,10 @@ def main():
         logger.close()
         if recorder is not None:
             recorder.close()
+        if fb.fig is not None:
+            plot_path = out_path.replace(".csv", ".eps")
+            fb.fig.savefig(plot_path, dpi=300, bbox_inches="tight")
+            print(f"Plot saved to: {plot_path}")
         fb.stop()
         if opti is not None:
             opti.stop()

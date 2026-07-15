@@ -10,14 +10,15 @@ import numpy as np
 
 TASK_NAME    = "random"
 
-SEED         = 8      # set to None for truly random each run
-N_POINTS     = 40
-Z_MIN_OFFSET = 5.0      # min Z above home (mm)
-Z_MAX_OFFSET = 23.0     # max Z above home (mm)
+SEED         = 2      # set to None for truly random each run
+N_POINTS     = 20     # number of random waypoints
+Z_MIN_OFFSET = 7.0      # min Z above home (mm)
+Z_MAX_OFFSET = 20.0     # max Z above home (mm)
 HOLD_S       = 1      # hold time at each waypoint (s)
 
 # Fallback cylinder (used only when robot=None)
-RADIUS_MM    = 17.5     # max radial offset in XY (mm)
+RADIUS_MIN    = 10     # max radial offset in XY (mm)
+RADIUS_MAX    = 20     # max radial offset in XY (mm)
 
 
 def _sample_in_workspace(robot, z_min, z_max, n_points, rng, max_tries=10000):
@@ -46,7 +47,7 @@ def _sample_in_workspace(robot, z_min, z_max, n_points, rng, max_tries=10000):
                 f"workspace after {max_tries} tries. Relax Z bounds or reduce N_POINTS."
             )
         q = mn + (mx - mn) * rng.random(3)
-        if robot.ws.is_inside_workspace(q, robot.tri):
+        if robot.ws.is_inside_workspace(q, robot.tri) and RADIUS_MIN**2 <= q[0]**2 + q[1]**2 <= RADIUS_MAX**2:
             points.append(q)
         attempts += 1
 
@@ -69,7 +70,7 @@ def get_waypoints(robot=None, seed=SEED):
         z_max  = z_home + Z_MAX_OFFSET
 
         angles = rng.uniform(0, 2 * np.pi, N_POINTS)
-        radii  = RADIUS_MM * np.sqrt(rng.uniform(0, 1, N_POINTS))
+        radii  = rng.uniform(RADIUS_MIN, RADIUS_MAX, N_POINTS)
         z_vals = rng.uniform(z_min, z_max, N_POINTS)
         pts = [np.array([r * np.cos(a), r * np.sin(a), z], dtype=float)
                for r, a, z in zip(radii, angles, z_vals)]

@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import os
 
+import numpy as np
+
 try:
     from flowbot.video_recorder import VideoRecorder, CameraRecorder
     _CV2_AVAILABLE = True
@@ -16,6 +18,13 @@ except ImportError:
     VideoRecorder    = None
     CameraRecorder   = None
     _CV2_AVAILABLE   = False
+
+try:
+    from flowbot.online_optitrack import MotiveNatNetReader
+    _OPTI_AVAILABLE = True
+except ImportError:
+    MotiveNatNetReader = None
+    _OPTI_AVAILABLE   = False
 
 BAUD_RATE = 115200
 
@@ -89,9 +98,15 @@ def reader_logger(ser, writer, buffers, stop_flag):
             t0 = t_ms
         t_s = (t_ms - t0) / 1000.0
 
+        try:
+            press = float(parts[8])
+        except (ValueError, IndexError):
+            press = 0.0
+
         buffers["t"].append(t_s)
         buffers["r1"].append(r1);  buffers["r2"].append(r2);  buffers["r3"].append(r3)
         buffers["p1"].append(pf1); buffers["p2"].append(pf2); buffers["p3"].append(pf3)
+        buffers["press"].append(press)
 
         if len(buffers["t"]) > MAX_POINTS:
             for b in buffers.values():
@@ -208,6 +223,21 @@ def main():
                         help='Record USB camera video alongside the CSV (requires opencv-python)')
     parser.add_argument('--camera_id', type=int, default=1,
                         help='USB camera device index (default 0)')
+    # ── elongation command options ──────────────────────────────────────────────
+    parser.add_argument('--settling_s', type=float, default=2.0,
+                        help='Seconds to wait after each PWM step before logging (elongation, default 2.0)')
+    parser.add_argument('--equil_s', type=float, default=0.1,
+                        help='Seconds to log at each steady-state PWM level (elongation, default 1.5)')
+    parser.add_argument('--sweep_down', action='store_true',
+                        help='Also sweep PWM back down from 25→1 after the up-sweep (elongation)')
+    # ── OptiTrack options (used by elongation command) ──────────────────────────
+    parser.add_argument('--opti_ip',    default='150.65.146.84')
+    parser.add_argument('--local_ip',   default='150.65.146.84')
+    parser.add_argument('--opti_id',    type=int, default=1)
+    parser.add_argument('--opti_alpha', type=float, default=-30.0,
+                        help='OptiTrack-to-manipulator rotation angle in degrees (default -30)')
+    parser.add_argument('--no_optitrack', action='store_true',
+                        help='Disable OptiTrack for elongation command (opti columns will be NaN)')
 
     args = parser.parse_args()
     mode = args.mode
@@ -225,9 +255,12 @@ def main():
     f = open(OUTPUT_CSV, "w", newline="")
     writer = csv.writer(f)
 
-    buffers = {"t": [], "r1": [], "r2": [], "r3": [], "p1": [], "p2": [], "p3": []}
+    buffers = {"t": [], "r1": [], "r2": [], "r3": [], "p1": [], "p2": [], "p3": [], "press": []}
     stop_flag = {"stop": False}
     save_fig = True
+
+    opti = None
+    opti_origin = np.zeros(3)
 
     reader_thread = threading.Thread(target=reader_logger,
                                      args=(ser, writer, buffers, stop_flag),
@@ -235,6 +268,7 @@ def main():
     reader_thread.start()
 
     def _input_loop():
+        nonlocal opti
         try:
             while not stop_flag["stop"]:
                 text = input(">> ").strip()
@@ -291,6 +325,107 @@ def main():
                     f_timestamp.close()
                     stop_flag["stop"] = True
                     break
+                elif text.lower() in ("elongation", "elong"):
+                    # ── Pure-elongation calibration sweep ───────────────────
+                    # Sends equal PWM to all 3 actuators (1→25) for kinematic
+                    # model recalibration: pwm2flow, flow2press, stiffness.
+
+                    # Lazy OptiTrack init (skipped for all other commands)
+                    if opti is None and not args.no_optitrack and MotiveNatNetReader is not None:
+                        print(f"[optitrack] Connecting to {args.opti_ip} ...")
+                        opti = MotiveNatNetReader(
+                            server_ip=args.opti_ip,
+                            local_ip=args.local_ip,
+                            use_multicast=False,
+                            rigid_body_id=args.opti_id,
+                            alpha=np.deg2rad(args.opti_alpha),
+                        )
+                        opti.start()
+                        time.sleep(1.0)
+                        sp = opti.get_latest()
+                        if sp is not None:
+                            opti_origin[:] = np.array(sp.pos_xyz, dtype=float)
+                            print(f"[optitrack] Rest origin: {opti_origin} m")
+                        else:
+                            print("[optitrack] WARNING: no sample — origin stays [0,0,0].")
+
+                    # pwm_levels = list(range(3, 26))
+                    pwm_levels = list(range(4, 22, 2))
+                    if args.sweep_down:
+                        pwm_levels += list(range(24, 0, -1))
+
+                    calib_path = f"data/{mode}/{file_name}_elongation.csv"
+                    fc = open(calib_path, "w", newline="")
+                    cw = csv.writer(fc)
+                    cw.writerow(["t_s", "pwm_cmd",
+                                 "proc_flow1", "proc_flow2", "proc_flow3",
+                                 "proc_press",
+                                 "opti_x_mm", "opti_y_mm", "opti_z_mm"])
+
+                    t0_elong = time.perf_counter()
+
+                    def _log_elong_rows(pwm_val, duration):
+                        deadline = time.perf_counter() + duration
+                        n = 0
+                        while time.perf_counter() < deadline:
+                            loop_t = time.perf_counter()
+                            if buffers["p1"]:
+                                t_now = time.perf_counter() - t0_elong
+                                pf1   = buffers["p1"][-1]
+                                pf2   = buffers["p2"][-1]
+                                pf3   = buffers["p3"][-1]
+                                press = buffers["press"][-1] if buffers["press"] else float("nan")
+                                ox = oy = oz = float("nan")
+                                if opti is not None:
+                                    sp = opti.get_latest()
+                                    if sp is not None:
+                                        mm = opti.opti_to_manip(
+                                            np.array(sp.pos_xyz, dtype=float), opti_origin)
+                                        ox, oy, oz = float(mm[0]), float(mm[1]), float(mm[2])
+                                cw.writerow([f"{t_now:.4f}", pwm_val,
+                                             f"{pf1:.4f}", f"{pf2:.4f}", f"{pf3:.4f}",
+                                             f"{press:.5f}",
+                                             f"{ox:.3f}", f"{oy:.3f}", f"{oz:.3f}"])
+                                n += 1
+                            rem = 0.05 - (time.perf_counter() - loop_t)
+                            if rem > 0:
+                                time.sleep(rem)
+                        fc.flush()
+                        return n
+
+                    print(f"\n[elongation] Output: {calib_path}")
+                    print(f"[elongation] Sweep 1→25, settling={args.settling_s}s, log={args.equil_s}s")
+
+                    # Rest state baseline
+                    print("[elongation] PWM=0 (rest)")
+                    n = _log_elong_rows(0, args.equil_s)
+                    print(f"  → {n} rows")
+                    ser.write(f"{13} {13} {13}\n".encode("ascii"))
+                    input("Press Enter to go next...")
+                    ser.write(f"{3} {3} {3}\n".encode("ascii"))
+                    input("Press Enter to start the elongation sweep (or Ctrl+C to cancel)...")
+                    for pwm_val in pwm_levels:
+                        print(f"[elongation] PWM={pwm_val}")
+                        ser.write(f"{pwm_val} {pwm_val} {pwm_val}\n".encode("ascii"))
+                        time.sleep(args.settling_s)
+                        n = _log_elong_rows(pwm_val, args.equil_s)
+                        fl = f"{buffers['p1'][-1]:.3f}" if buffers["p1"] else "n/a"
+                        pr = f"{buffers['press'][-1]:.5f}" if buffers["press"] else "n/a"
+                        print(f"  → {n} rows  flow1={fl} L/min  press={pr} MPa")
+
+                    # Return to rest
+                    ser.write(b"0 0 0\n")
+                    print("[elongation] PWM=0 (return to rest)")
+                    time.sleep(args.settling_s)
+                    n = _log_elong_rows(0, args.equil_s)
+                    print(f"  → {n} rows")
+
+                    fc.flush()
+                    fc.close()
+                    print(f"[elongation] Done. Saved: {calib_path}")
+                    stop_flag["stop"] = True
+                    break
+
                 elif text.lower() in ("triple", "t"):
                     fn3 = f"log_module{mode}_{ts}"
                     pairs = [(m1, m2, m3)
@@ -357,7 +492,10 @@ def main():
     reader_thread.join(timeout=2.0)
     f.flush()
     f.close()
+    ser.write(b"0 0 0\n")
     ser.close()
+    if opti is not None:
+        opti.stop()
     print("Closed serial, data saved to", OUTPUT_CSV)
 
 if __name__ == "__main__":

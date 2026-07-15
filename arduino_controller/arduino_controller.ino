@@ -22,8 +22,10 @@ const float FLOW_ZERO2_LPM = 1.0f;
 const float FLOW_ZERO3_LPM = 1.0f;
 
 // ---- Pressure sensor ISE20A parameters ----
-const float P_MIN_MPA = 0.0f;   // MPa at 1.0 V
-const float P_MAX_MPA = 1.0f;   // MPa at 5.0 V
+const float P_MIN_MPA    = 0.0f;   // MPa at 1.0 V
+const float P_MAX_MPA    = 1.0f;   // MPa at 5.0 V
+const float P_ZERO_MPA   = 0.0f;   // MPa at rest (run with valves closed, set to resting value)
+const float PRESS_ALPHA  = 0.15f;  // IIR smoothing — same as FLOW_ALPHA
 
 // Sampling period
 const unsigned long SAMPLE_PERIOD_MS = 50;  // 100 Hz
@@ -53,11 +55,12 @@ float voltToLinear(float v, float minVal, float maxVal) {
   return minVal + (v - 1.0f) * (maxVal - minVal) / 4.0f;
 }
 
-// IIR low-pass filter state (initialised on first sample)
+// IIR low-pass filter state (initialised on first sample, -1 = uninitialised)
 const float FLOW_ALPHA = 0.15f;  // 0 = max smoothing, 1 = no filter
 static float filt_flow1 = -1.0f;
 static float filt_flow2 = -1.0f;
 static float filt_flow3 = -1.0f;
+static float filt_press = -1.0f;
 
 float iirFlow(float &state, float newVal) {
   if (state < 0.0f) state = newVal;  // seed on first call
@@ -70,7 +73,7 @@ int pwm1_target = 0, pwm2_target = 0, pwm3_target = 0;
 int pwm_init_extra = 0;
 int base1 = 149;
 int base2 = 151;
-int base3 = 151;
+int base3 = 149;
 int pww_init1 = base1 + pwm_init_extra;
 int pww_init2 = base2 + pwm_init_extra;
 int pww_init3 = base3 + pwm_init_extra;
@@ -253,7 +256,9 @@ void loop() {
       float processed_flow1 = max(0.0f, iirFlow(filt_flow1, raw1_lpm) - FLOW_ZERO1_LPM);
       float processed_flow2 = max(0.0f, iirFlow(filt_flow2, raw2_lpm) - FLOW_ZERO2_LPM);
       float processed_flow3 = max(0.0f, iirFlow(filt_flow3, raw3_lpm) - FLOW_ZERO3_LPM);
-      float pressMPa = voltToLinear(vPress, P_MIN_MPA, P_MAX_MPA);
+
+      float rawPressMPa     = voltToLinear(vPress, P_MIN_MPA, P_MAX_MPA);
+      float processed_press = max(0.0f, iirFlow(filt_press, rawPressMPa) - P_ZERO_MPA);
 
       // Print CSV line (note: we log CURRENT PWM values)
       Serial.print(now);         Serial.print(",");
@@ -263,8 +268,8 @@ void loop() {
       Serial.print(processed_flow2, 3);  Serial.print(",");
       Serial.print(rawFlow3);     Serial.print(",");
       Serial.print(processed_flow3, 3);  Serial.print(",");
-      Serial.print(rawPress);    Serial.print(",");
-      Serial.print(pressMPa, 4); Serial.print(",");
+      Serial.print(rawPress);           Serial.print(",");
+      Serial.print(processed_press, 5); Serial.print(",");
       Serial.print(pwm1_cur);    Serial.print(",");
       Serial.print(pwm2_cur);    Serial.print(",");
       Serial.println(pwm3_cur);

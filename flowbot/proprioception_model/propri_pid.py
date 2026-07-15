@@ -170,10 +170,12 @@ class ProprioceptionPIDController:
         Kd:             float = 0.0,
         integral_limit: float = 5.0,
         device:         str   = "cpu",
+        pred_signs:     tuple = (1.0, 1.0, 1.0),
     ):
-        self._reader = reader
-        self._pid    = _TaskSpacePID(Kp, Ki, Kd, integral_limit)
-        self._device = device
+        self._reader     = reader
+        self._pid        = _TaskSpacePID(Kp, Ki, Kd, integral_limit)
+        self._device     = device
+        self._pred_signs = np.array(pred_signs, dtype=float)
 
         # ── Load checkpoint ──────────────────────────────────────────────
         ckpt = Path(ckpt_dir)
@@ -207,6 +209,7 @@ class ProprioceptionPIDController:
         print(f"[propri_pid] Checkpoint  : {ckpt_dir}")
         print(f"[propri_pid] Features    : {feat_names}  ({input_size}-dim)")
         print(f"[propri_pid] Gains       : Kp={Kp}  Ki={Ki}  Kd={Kd}  iclamp={integral_limit}")
+        print(f"[propri_pid] pred_signs  : {list(pred_signs)}")
 
     # ── Inference ─────────────────────────────────────────────────────────────
 
@@ -222,11 +225,11 @@ class ProprioceptionPIDController:
         return self._y_scaler.inverse_transform(y_s)[0]                       # (3,) mm
 
     def predict_pos(self, fb) -> Optional[np.ndarray]:
-        """Return current proprioception position estimate (mm) or None if no flow data."""
+        """Return proprioception estimate in IK frame (mm), or None if no flow data."""
         flow = self._reader.latest()
         if flow is None:
             return None
-        return self._infer(fb.last_pwm, flow)
+        return self._infer(fb.last_pwm, flow) * self._pred_signs
 
     # ── Control ───────────────────────────────────────────────────────────────
 
@@ -234,36 +237,51 @@ class ProprioceptionPIDController:
         """Clear integrator and derivative state. Call before each new hold phase."""
         self._pid.reset()
 
-    def correct(self, fb, target_mm: np.ndarray) -> np.ndarray:
+    def correct(self, fb, target_mm: np.ndarray):
         """
         One PID correction step during the hold phase.
 
-        Returns the PWM array (same type as fb.step()).
+        Returns (pwm, pred_ik_mm): the sent PWM array and the proprioception
+        estimate used for this correction (both in sync — same last_pwm).
 
         Algorithm:
           pred_pos       = propri_model(flow, fb.last_pwm)
           error          = target_mm − pred_pos
           u (mm)         = PID(error)
           virtual_target = target_mm + u          ← biased IK goal
-          fb.step(direction toward virtual_target)
+          IK(virtual_target) → PWM → Arduino
 
-        The IK aims for virtual_target instead of target_mm, producing a PWM
-        that over-shoots by the correction amount u, compensating the systematic
-        IK error measured by the proprioception model.
+        Direct IK on virtual_target (not fb.step) so the full correction is
+        applied immediately. fb.step's one-step limit would otherwise prevent
+        the PWM from changing when fb.pc is reset between calls.
         """
         flow = self._reader.latest()
         if flow is None:
-            return fb.step(np.zeros(3))
+            return fb.last_pwm.copy(), None
 
-        pred  = self._infer(fb.last_pwm, flow)
-        error = np.asarray(target_mm, dtype=float) - pred
+        pred_ik = self._infer(fb.last_pwm, flow) * self._pred_signs
+
+        # target_mm is in IK absolute frame (Z ≈ 95–120 mm).
+        # Subtract fb.pc_init to convert to IK relative frame (Z ≈ 0–25 mm).
+        target_rel = np.asarray(target_mm, dtype=float) - np.asarray(fb.pc_init, dtype=float)
+        error = target_rel - pred_ik
         u     = self._pid.step(error)
-
+        # print(f"[propri_pid] target={target_mm}  pred={pred_ik}  error={error}  u={u}")
         virtual_target = np.asarray(target_mm, dtype=float) + u
-        d    = virtual_target - fb.pc
-        dist = float(np.linalg.norm(d))
+        # Clamp to workspace so IK never sees an out-of-range position.
+        virtual_safe = fb.apply_workspace_constraint(fb.pc, virtual_target, "backtrack")
 
-        if dist < 0.05:
-            return fb.step(np.zeros(3))
+        try:
+            ik  = fb.flowbot.inverse_pressures_from_position(virtual_safe)
+            pwm = np.asarray(ik["pwm"], dtype=int).reshape(3,)
+        except Exception:
+            pwm = fb.last_pwm.copy()
 
-        return fb.step(d / dist)
+        fb.serial_sending(pwm)
+        fb.last_pwm = pwm
+
+        # Keep fb.pc at the nominal target so the display dot stays on the waypoint
+        # and the next MOVE phase starts from the correct nominal position.
+        fb.pc[:] = np.asarray(target_mm, dtype=float)
+
+        return pwm, pred_ik

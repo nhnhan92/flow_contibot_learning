@@ -115,6 +115,23 @@ class MotiveNatNetReader:
     def get_latest(self) -> Optional[RigidBodySample]:
         with self._lock:
             return self._latest
+
+    def transform_to_manip_mm(
+        self,
+        sample: Optional[RigidBodySample],
+        origin: np.ndarray,
+        signs=(1.0, 1.0, 1.0),
+    ) -> Optional[np.ndarray]:
+        """
+        Convert a RigidBodySample to manipulator-frame mm with optional axis signs.
+
+        Returns None if sample is None.
+        signs: per-axis multiplier, e.g. (-1,-1,1) to flip X and Y.
+        """
+        if sample is None:
+            return None
+        t = self.opti_to_manip(np.array(sample.pos_xyz, dtype=float), origin)
+        return t * np.array(signs, dtype=float)
         
     def parse_vec3(self,s: str) -> np.ndarray:
         """Parse 'x,y,z' into a (3,) numpy array."""

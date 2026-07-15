@@ -46,10 +46,9 @@ class TaskLogger:
         "t_s",
         "pwm_1", "pwm_2", "pwm_3",
         "cmd_pc_x", "cmd_pc_y", "cmd_pc_z",
-        "pred_x", "pred_y", "pred_z",          # proprioception estimate
+        "pred_x", "pred_y", "pred_z",          # proprioception estimate (IK frame, mm)
         "pid_err_x", "pid_err_y", "pid_err_z", # target − pred
-        "opti_x", "opti_y", "opti_z",
-        "opti_qx", "opti_qy", "opti_qz", "opti_qw",
+        "opti_mm_x", "opti_mm_y", "opti_mm_z", # optitrack in manipulator frame (mm)
     ]
 
     def __init__(self, path: str):
@@ -60,7 +59,7 @@ class TaskLogger:
         self._t0 = time.perf_counter()
         print(f"[logger] Writing to {path}")
 
-    def log(self, pwm, pc, target_pc, pred_pos=None, opti_sample=None):
+    def log(self, pwm, pc, target_pc, pred_pos=None, opti_mm=None):
         t   = time.perf_counter() - self._t0
         pwm = np.asarray(pwm,      dtype=int).reshape(3,)
         pc  = np.asarray(pc,       dtype=float).reshape(3,)
@@ -72,11 +71,10 @@ class TaskLogger:
         else:
             px = py = pz = ex = ey = ez = float("nan")
 
-        if opti_sample is not None:
-            ox, oy, oz = opti_sample.pos_xyz
-            qx, qy, qz, qw = opti_sample.quat_xyzw
+        if opti_mm is not None:
+            ox, oy, oz = float(opti_mm[0]), float(opti_mm[1]), float(opti_mm[2])
         else:
-            ox = oy = oz = qx = qy = qz = qw = float("nan")
+            ox = oy = oz = float("nan")
 
         self._w.writerow([
             f"{t:.4f}",
@@ -84,8 +82,7 @@ class TaskLogger:
             f"{pc[0]:.4f}", f"{pc[1]:.4f}", f"{pc[2]:.4f}",
             f"{px:.4f}", f"{py:.4f}", f"{pz:.4f}",
             f"{ex:.4f}", f"{ey:.4f}", f"{ez:.4f}",
-            f"{ox:.6f}", f"{oy:.6f}", f"{oz:.6f}",
-            f"{qx:.6f}", f"{qy:.6f}", f"{qz:.6f}", f"{qw:.6f}",
+            f"{ox:.3f}", f"{oy:.3f}", f"{oz:.3f}",
         ])
 
     def flush(self):
@@ -116,23 +113,14 @@ def load_task_module(task: str):
 # ──────────────────────────────────────────────────────────────
 ARRIVAL_THRESHOLD_MM = 1.0
 
-
-def _opti_transform(opti, opti_sample, opti_origin_m):
-    if opti is None or opti_sample is None:
-        return None
-    t = opti.opti_to_manip(np.array(opti_sample.pos_xyz, dtype=float), opti_origin_m)
-    t[0] = -t[0]
-    t[1] = -t[1]
-    return t
-
-
 def move_to_waypoint(fb, target_pc, hold_s, logger, opti, pid_ctrl,
                      plot_handles=None, opti_trail_buf=None,
                      opti_origin_m=None, optitrack_init_ref=None,
                      stop_event: threading.Event = None,
                      recorder=None,
                      robot_trail_buf=None, robot_trail_handles=None,
-                     log_data: bool = True):
+                     log_data: bool = True,
+                     opti_signs=(1.0, 1.0, 1.0)):
     """
     Drive fb toward target_pc (open-loop IK), then hold with PID correction.
 
@@ -142,8 +130,8 @@ def move_to_waypoint(fb, target_pc, hold_s, logger, opti, pid_ctrl,
     """
     def _stopped():
         return stop_event is not None and stop_event.is_set()
-
     # ── Phase 1: open-loop transit ────────────────────────────────
+    # target_pc = fb.pc  # uncomment when testing the task
     for _ in range(5000):
         if _stopped():
             return
@@ -151,18 +139,20 @@ def move_to_waypoint(fb, target_pc, hold_s, logger, opti, pid_ctrl,
         dist = float(np.linalg.norm(target_pc - fb.pc))
         if dist < ARRIVAL_THRESHOLD_MM:
             break
-
+        
         d         = target_pc - fb.pc
         direction = d / (np.linalg.norm(d) + 1e-12)
+        
         pwm       = fb.step(direction)
 
         opti_sample = opti.get_latest() if opti is not None else None
         if log_data:
-            logger.log(pwm, fb.pc, target_pc, opti_sample=opti_sample)
+            opti_mm = opti.transform_to_manip_mm(opti_sample, opti_origin_m, opti_signs) if opti is not None else None
+            logger.log(pwm, fb.pc, target_pc, opti_mm=opti_mm)
 
         if plot_handles is not None:
             _update_plot(fb, opti, opti_sample, opti_trail_buf,
-                         opti_origin_m, optitrack_init_ref, recorder)
+                         opti_origin_m, optitrack_init_ref, recorder, opti_signs)
 
     # ── Phase 2: PID-corrected hold ───────────────────────────────
     pid_ctrl.reset()
@@ -172,23 +162,23 @@ def move_to_waypoint(fb, target_pc, hold_s, logger, opti, pid_ctrl,
         if _stopped():
             return
 
-        pwm      = pid_ctrl.correct(fb, target_pc)
-        pred_pos = pid_ctrl.predict_pos(fb)         # for logging
+        pwm, pred_pos = pid_ctrl.correct(fb, target_pc)
 
         opti_sample = opti.get_latest() if opti is not None else None
         if log_data:
-            logger.log(pwm, fb.pc, target_pc, pred_pos=pred_pos, opti_sample=opti_sample)
+            opti_mm = opti.transform_to_manip_mm(opti_sample, opti_origin_m, opti_signs) if opti is not None else None
+            logger.log(pwm, fb.pc, target_pc, pred_pos=pred_pos, opti_mm=opti_mm)
 
         if plot_handles is not None:
             _update_plot(fb, opti, opti_sample, opti_trail_buf,
-                         opti_origin_m, optitrack_init_ref, recorder)
+                         opti_origin_m, optitrack_init_ref, recorder, opti_signs)
 
     # Record OptiTrack arrival dot
     if (robot_trail_buf is not None and robot_trail_handles is not None
             and opti is not None and optitrack_init_ref is not None
             and not optitrack_init_ref[0]):
         hold_sample = opti.get_latest()
-        pt = _opti_transform(opti, hold_sample, opti_origin_m)
+        pt = opti.transform_to_manip_mm(hold_sample, opti_origin_m, opti_signs)
         if pt is not None:
             robot_trail_buf.append(pt.copy())
             pts = np.vstack(robot_trail_buf)
@@ -198,7 +188,8 @@ def move_to_waypoint(fb, target_pc, hold_s, logger, opti, pid_ctrl,
 
 
 def _update_plot(fb, opti, opti_sample, opti_trail_buf,
-                 opti_origin_m, optitrack_init_ref, recorder=None):
+                 opti_origin_m, optitrack_init_ref, recorder=None,
+                 opti_signs=(1.0, 1.0, 1.0)):
     OPTITRACK_TRAIL_LEN = 15
 
     if opti is not None and opti_sample is not None:
@@ -208,7 +199,7 @@ def _update_plot(fb, opti, opti_sample, opti_trail_buf,
             optitrack_init_ref[0] = False
 
         if not optitrack_init_ref[0]:
-            transformed = _opti_transform(opti, opti_sample, opti_origin_m)
+            transformed = opti.transform_to_manip_mm(opti_sample, opti_origin_m, opti_signs)
             fb.pl.update_opti_handle(fb.opti_handles, transformed)
 
             opti_trail_buf.append(transformed.copy())
@@ -247,6 +238,8 @@ def main():
     ap.add_argument("--pressure-model", choices=["learned", "linear"], default="linear")
     ap.add_argument("--max-pos-speed", type=float, default=30.0,
                     help="Max task-space speed in mm/s (default 30).")
+    ap.add_argument("--seed",          type=int, default=2,
+                    help="Random seed for reproducible tasks (default 8).")
     # ── OptiTrack ─────────────────────────────────────────────────
     ap.add_argument("--optitrack", "-opt", action="store_true", default=True)
     # ── Recording ─────────────────────────────────────────────────
@@ -254,17 +247,18 @@ def main():
     ap.add_argument("--record",        action="store_true")
     ap.add_argument("--record-fps",    type=float, default=15.0)
     ap.add_argument("--record-output", default=None)
+
     # ── Task options ──────────────────────────────────────────────
-    ap.add_argument("--seed",          type=int, default=None)
+    ap.add_argument("--inf",           type=str, default=None)
     ap.add_argument("--home-every",    type=int, default=None,
                     help="Return home after every N waypoints.")
-    ap.add_argument("--home-rest",     type=float, default=20.0)
+    ap.add_argument("--home-rest",     type=float, default=3.0)
     ap.add_argument("--reverse",       action="store_true", default=False)
     # ── Proprioception PID ────────────────────────────────────────
-    ap.add_argument("--propri-ckpt",
+    ap.add_argument("--ckpt_dir", type=str,
                     default="flowbot/proprioception_model/checkpoints/free_human/freeload",
                     help="Checkpoint directory for the proprioception model.")
-    ap.add_argument("--pid-kp",    type=float, default=0.4,
+    ap.add_argument("--pid-kp",    type=float, default=1.0,
                     help="Proportional gain (mm → mm).  Start here; tune before adding Ki.")
     ap.add_argument("--pid-ki",    type=float, default=0.01,
                     help="Integral gain.  Eliminate residual offset.  Keep small.")
@@ -272,6 +266,15 @@ def main():
                     help="Derivative gain.  Usually 0; flow noise amplifies this term.")
     ap.add_argument("--pid-iclamp", type=float, default=5.0,
                     help="Anti-windup clamp on the integral term (mm, default 5).")
+    # ── Frame alignment ───────────────────────────────────────────
+    ap.add_argument("--opti_signs", type=float, nargs=3, default=[1.0, 1.0, 1.0],
+                    metavar=("SX", "SY", "SZ"),
+                    help="Sign per axis for optitrack display (default: 1 1 1 — M-frame = IK frame).")
+    ap.add_argument("--pred_signs", type=float, nargs=3, default=[1.0, 1.0, 1.0],
+                    metavar=("SX", "SY", "SZ"),
+                    help="Sign per axis applied to model prediction before PID error "
+                         "(default: 1 1 1 — model trained on new calibration with X,Y "
+                         "in same orientation as current IK frame).")
     args = ap.parse_args()
 
     # ── Load task ─────────────────────────────────────────────────
@@ -280,12 +283,12 @@ def main():
 
     # ── Output paths ──────────────────────────────────────────────
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    inf_tag = f"_{args.inf}" if args.inf is not None else ""
     if args.output is None:
-        seed_tag = f"_s{args.seed}" if args.seed is not None else ""
         out_path = str(Path(FILE_DIR).parent / "data" / "task_logs"
-                       / f"{task_name}{seed_tag}_pid_{ts}.csv")
+                       / f"{task_name}{inf_tag}_PID_{ts}.csv")
     else:
-        out_path = args.output if args.output.endswith(".csv") else args.output + ".csv"
+        out_path = str(Path(args.output) / f"{task_name}{inf_tag}_PID_{ts}.csv")
 
     # ── Serial port ───────────────────────────────────────────────
     os_name = platform.system().lower()
@@ -301,6 +304,7 @@ def main():
         frequency      = 30.0,
         max_pos_speed  = args.max_pos_speed,
         pressure_model = args.pressure_model,
+        draw_hull       = False,
     )
     fb.start()
 
@@ -312,16 +316,19 @@ def main():
     time.sleep(0.15)
     fb.ser.reset_input_buffer()
     serial_reader = SerialReader(fb.ser)
+    pred_signs = tuple(args.pred_signs)
     pid_ctrl = ProprioceptionPIDController(
-        ckpt_dir       = args.propri_ckpt,
+        ckpt_dir       = args.ckpt_dir,
         reader         = serial_reader,
         Kp             = args.pid_kp,
         Ki             = args.pid_ki,
         Kd             = args.pid_kd,
         integral_limit = args.pid_iclamp,
+        pred_signs     = pred_signs,
     )
     print(f"[task] Propri-PID    : Kp={args.pid_kp}  Ki={args.pid_ki}  "
-          f"Kd={args.pid_kd}  ckpt={args.propri_ckpt}")
+          f"Kd={args.pid_kd}  ckpt={args.ckpt_dir}")
+    print(f"[task] pred_signs    : {pred_signs}  opti_signs={tuple(args.opti_signs)}")
 
     # ── Init OptiTrack ────────────────────────────────────────────
     opti = None
@@ -337,13 +344,22 @@ def main():
             rigid_body_id=1,
         )
         opti.start()
+        time.sleep(1.0)
+        s = opti.get_latest()
+        if s is not None:
+            opti_origin_m[:] = np.array(s.pos_xyz, dtype=float)
+            opti_origin_m[1] += (fb.flowbot.l0 + fb.flowbot.lu) / 1000.0
+            optitrack_init_ref[0] = False
+            print(f"[optitrack] Origin set: {np.round(opti_origin_m, 4)}")
+        else:
+            print("[optitrack] WARNING: no sample yet — origin stays [0,0,0]")
 
     # ── Get waypoints ─────────────────────────────────────────────
     import inspect
     _gw_sig    = inspect.signature(task_mod.get_waypoints)
     _gw_kwargs = {}
-    if "seed"    in _gw_sig.parameters and args.seed    is not None:
-        _gw_kwargs["seed"]    = args.seed
+    if "seed"    in _gw_sig.parameters:
+        _gw_kwargs["seed"]    = _gw_sig.parameters["seed"].default if args.seed is None else args.seed
     if "reverse" in _gw_sig.parameters:
         _gw_kwargs["reverse"] = args.reverse
     waypoints = task_mod.get_waypoints(fb, **_gw_kwargs)
@@ -407,6 +423,7 @@ def main():
         recorder=recorder,
         robot_trail_buf=robot_trail_buf,
         robot_trail_handles=robot_trail_handles,
+        opti_signs=tuple(args.opti_signs),
     )
 
     home_pc        = np.asarray(fb.pc_init, dtype=float).reshape(3,)
@@ -415,6 +432,8 @@ def main():
     waypoint_count = 0
 
     try:
+        fb.step(np.array([0.0, 0.0, 15.0])) 
+        input("   Press Enter when ready to begin... ")
         for rep in range(args.repeat):
             if stop_event.is_set():
                 break
@@ -433,8 +452,31 @@ def main():
                     if waypoint_count % home_every == 0:
                         print(f"  [home-every] Returning home for {home_rest_s}s "
                               f"(after {waypoint_count} waypoints)")
-                        move_to_waypoint(fb, home_pc, home_rest_s, logger, opti,
-                                         log_data=False, **_move_kwargs)
+                        # move_to_waypoint(fb, home_pc, home_rest_s, logger, opti,
+                        #                  log_data=False, **_move_kwargs)
+                        # fb.serial_sending([13, 13, 13])  # relax
+                        time.sleep(home_rest_s)
+                        pid_ctrl = ProprioceptionPIDController(
+                                    ckpt_dir       = "flowbot/proprioception_model/checkpoints/free_human/load200/",
+                                    reader         = serial_reader,
+                                    Kp             = 1.75,
+                                    Ki             = args.pid_ki,
+                                    Kd             = args.pid_kd,
+                                    integral_limit = args.pid_iclamp,
+                                    pred_signs     = pred_signs,
+                                )
+                        _move_kwargs = dict(
+                                    pid_ctrl=pid_ctrl,
+                                    plot_handles=plot_handles,
+                                    opti_trail_buf=opti_trail_buf,
+                                    opti_origin_m=opti_origin_m,
+                                    optitrack_init_ref=optitrack_init_ref,
+                                    stop_event=stop_event,
+                                    recorder=recorder,
+                                    robot_trail_buf=robot_trail_buf,
+                                    robot_trail_handles=robot_trail_handles,
+                                    opti_signs=tuple(args.opti_signs),
+                                )
 
         if not stop_event.is_set():
             print("\nTask complete. Returning to home.")
@@ -447,6 +489,10 @@ def main():
         logger.close()
         if recorder is not None:
             recorder.close()
+        if fb.fig is not None:
+            plot_path = out_path.replace(".csv", ".eps")
+            fb.fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+            print(f"Plot saved to: {plot_path}")
         serial_reader.stop()
         fb.stop()
         if opti is not None:

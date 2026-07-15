@@ -14,11 +14,11 @@ ROTATIONS controls which variants to run (executed in order):
 import numpy as np
 
 TASK_NAME    = "lemniscate"
-ROTATIONS    = [0.0]   # list of rotation angles (deg) to execute in sequence
-SEMI_AXIS_MM = 25.0           # half-width of the figure-8 (mm)
+ROTATIONS    = [90.0]   # list of rotation angles (deg) to execute in sequence
+SEMI_AXIS_MM = 15.0           # half-width of the figure-8 (mm)
 Z_OFFSET     = 10.0           # height above home (mm)
-N_POINTS     = 40             # waypoints per full loop
-HOLDING_TIME = 0.75           # hold time at each waypoint (s)
+N_POINTS     = 30             # waypoints per full loop
+HOLDING_TIME = 1.6         # hold time at each waypoint (s)
 
 
 def _lemniscate_xy(a, n, rotation_deg=0.0):

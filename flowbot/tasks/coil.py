@@ -13,12 +13,12 @@ outward along the same spiral path.
 import numpy as np
 
 TASK_NAME    = "coil"
-R_MIN_MM     = 10.0   # inner radius (mm)
-R_MAX_MM     = 28.0   # outer radius (mm)
-N_TURNS      = 3      # number of full turns
+R_MIN_MM     = 7.0   # inner radius (mm)
+R_MAX_MM     = 20.0   # outer radius (mm)
+N_TURNS      = 2.5    # number of full turns
 Z_OFFSET     = 15.0    # height above home (mm)
-N_POINTS     = 50     # total waypoints
-HOLDING_TIME = 0.8      # hold time at each waypoint (s)
+N_POINTS     = 20     # total waypoints
+HOLDING_TIME = 1.5      # hold time at each waypoint (s)
 
 
 def _coil_xy(r_min, r_max, n_turns, n_pts):

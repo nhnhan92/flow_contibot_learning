@@ -129,6 +129,7 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt_dir",    required=True)
+    parser.add_argument("--output",      type=str, default=None)
     parser.add_argument("--port",        default=None)
     parser.add_argument("--pwm_min",     type=int, default=0)
     parser.add_argument("--pwm_max",     type=int, default=26)
@@ -142,17 +143,26 @@ def main():
     parser.add_argument("--opti_alpha", type=float, default=-30.0)
     parser.add_argument("--record",     action="store_true")
     parser.add_argument("--csv_run",    default=None)
-    parser.add_argument("--csv_delay",  type=float, default=0.05)
+    parser.add_argument("--csv_delay",  type=float, default=1.5,
+                        help="Settling time (s) at each CSV waypoint before recording (default 2.0)")
+    parser.add_argument("--record_window", type=float, default=0.2,
+                        help="Duration (s) to capture data after settling at each waypoint (default 0.5)")
+    parser.add_argument("--ramp_step",  type=int, default=1,
+                        help="Max PWM increment per ramp step in CSV replay (default 1)")
     parser.add_argument("--device",     default="cpu")
-    # GT frame alignment: set sign per axis to match model training frame.
-    # Default -1 -1 1 because current optitrack calibration has X,Y flipped vs training.
-    # If you recalibrate and pred/GT go opposite again, try --gt_signs 1 1 1 first,
-    # then -1 1 1 or 1 -1 1 until pred and GT move together.
-    parser.add_argument("--gt_signs", type=float, nargs=3, default=[-1, -1, 1],
+    # Frame alignment.
+    # opti_to_manip output (M-frame) = IK/task frame — no sign flip needed for GT.
+
+    parser.add_argument("--pred_signs", type=float, nargs=3, default=[1, 1, 1],
                         metavar=("SX", "SY", "SZ"),
-                        help="Sign correction for live GT axes (default: -1 -1 1)")
+                        help="Sign per axis applied to model output to reach IK frame. "
+                             "Use -1 -1 1 for old model; 1 1 1 after retraining on new data.")
+    parser.add_argument("--gt_signs", type=float, nargs=3, default=[1, 1, 1],
+                        metavar=("SX", "SY", "SZ"),
+                        help="Sign per axis applied to optitrack GT (default: 1 1 1 — M-frame = IK frame)")
     args = parser.parse_args()
-    gt_signs = np.array(args.gt_signs, dtype=float)
+    pred_signs = np.array(args.pred_signs, dtype=float)
+    gt_signs   = np.array(args.gt_signs,   dtype=float)
 
     # ── Load model ────────────────────────────────────────────────────────────
     ckpt = Path(args.ckpt_dir)
@@ -190,31 +200,31 @@ def main():
         return y_scaler.inverse_transform(y_s)[0]   # opti_to_manip frame (same as training)
 
     # ── Shared state ──────────────────────────────────────────────────────────
-    _pwm  = np.zeros(3, dtype=np.float32)
-    _flow: list[Optional[np.ndarray]] = [None]   # None until first sample
+    _pwm     = np.zeros(3, dtype=np.float32)
+    _flow:    list[Optional[np.ndarray]] = [None]   # None until first sample
+    _cmd_pc:  list[Optional[np.ndarray]] = [None]   # reference position from CSV row
 
     _pred_buf = deque(maxlen=N_WINDOW)
     _gt_buf   = deque(maxlen=N_WINDOW)
     _flow_buf = deque(maxlen=N_WINDOW)
     _quit     = threading.Event()
 
-    # ── Serial / CSV setup ────────────────────────────────────────────────────
-    _ser        = None
-    _ser_reader = None
-    csv_rows    = None
+    # ── Serial setup (always needed — CSV replay controls real hardware) ────────
+    import serial as _serial_mod
+    port        = args.port or _default_port()
+    _ser        = _serial_mod.Serial(port, BAUD_RATE, timeout=1.0)
+    time.sleep(0.5)
+    _ser.reset_input_buffer()
+    _ser_reader = SerialReader(_ser)
+    print(f"[demo] Serial: {port}")
 
+    # ── CSV replay waypoints ──────────────────────────────────────────────────
+    csv_rows = None
     if args.csv_run is not None:
         import pandas as pd
         csv_rows = pd.read_csv(args.csv_run).to_dict("records")
-        print(f"[demo] CSV replay: {len(csv_rows)} rows")
-    else:
-        import serial
-        port        = args.port or _default_port()
-        _ser        = serial.Serial(port, BAUD_RATE, timeout=1.0)
-        time.sleep(0.5)
-        _ser.reset_input_buffer()
-        _ser_reader = SerialReader(_ser)
-        print(f"[demo] Serial: {port}")
+        print(f"[demo] CSV replay: {len(csv_rows)} waypoints  "
+              f"hold={args.csv_delay}s  ramp_step={args.ramp_step}")
 
     # ── OptiTrack ─────────────────────────────────────────────────────────────
     opti        = None
@@ -273,36 +283,58 @@ def main():
     threading.Thread(target=_terminal_loop, daemon=True).start()
 
     # ── CSV replay thread ─────────────────────────────────────────────────────
-    _csv_gt: list[Optional[np.ndarray]] = [None]
+    # Sequence per waypoint:
+    #   1. Ramp PWM to target (±ramp_step per step at _RAMP_DT interval)
+    #   2. Settle for csv_delay seconds (robot reaches position, flow stabilises)
+    #   3. Open record window for record_window seconds (data logged here)
+    #   4. Close record window, move to next waypoint
+    # In live mode (no CSV), _log_active stays True so every frame is logged.
+    _RAMP_DT    = 0.08   # ramp interval (s) — matches animation interval
+    _log_active: list[bool] = [csv_rows is None]   # True always in live mode
 
     if csv_rows is not None:
-        _csv_has_gt = "opti_x_mm" in csv_rows[0]
-
         def _csv_loop():
-            nonlocal _pwm
             for row in csv_rows:
                 if _quit.is_set():
                     break
                 try:
-                    _pwm      = np.array([row["pwm1_cmd"],   row["pwm2_cmd"],   row["pwm3_cmd"]],
-                                          dtype=np.float32)
-                    _flow[0]  = np.array([row["proc_flow1"], row["proc_flow2"], row["proc_flow3"]],
-                                          dtype=np.float32)
+                    target = np.array([row["pwm1_cmd"], row["pwm2_cmd"], row["pwm3_cmd"]],
+                                      dtype=np.float32)
                 except KeyError:
                     continue
-                if _csv_has_gt:
-                    try:
-                        _csv_gt[0] = np.array([row["opti_x_mm"], row["opti_y_mm"], row["opti_z_mm"]],
-                                               dtype=float)
-                    except (KeyError, ValueError):
-                        _csv_gt[0] = None
+
+                # Set reference position from CSV (used as cmd_pc in the log)
+                try:
+                    _cmd_pc[0] = np.array([row["opti_x_mm"], row["opti_y_mm"], row["opti_z_mm"]],
+                                          dtype=float)
+                except (KeyError, ValueError):
+                    _cmd_pc[0] = None
+
+                # 1. Ramp to target
+                while not _quit.is_set():
+                    diff = target - _pwm
+                    if np.max(np.abs(diff)) <= 0.5:
+                        break
+                    step = np.sign(diff) * np.minimum(np.abs(diff), args.ramp_step)
+                    _send_pwm((_pwm + step).astype(int))
+                    time.sleep(_RAMP_DT)
+                if not _quit.is_set():
+                    _send_pwm(target.astype(int))   # snap to exact target
+
+                # 2. Settle
                 time.sleep(args.csv_delay)
+
+                # 3. Record window
+                _log_active[0] = True
+                time.sleep(args.record_window)
+                _log_active[0] = False
+
             _quit.set()
 
         threading.Thread(target=_csv_loop, daemon=True).start()
 
     # ── Figure ────────────────────────────────────────────────────────────────
-    fig = plt.figure(figsize=(14, 8))
+    fig = plt.figure(figsize=(15, 8))
     fig.canvas.manager.set_window_title("Proprioception — Live Demo")
     status_text = fig.text(
         0.5, 0.97,
@@ -312,7 +344,7 @@ def main():
         bbox=dict(boxstyle="round,pad=0.3", facecolor="#222222", alpha=0.75),
         color="white",
     )
-    gs   = gridspec.GridSpec(4, 5, figure=fig, hspace=0.55, wspace=0.45,
+    gs   = gridspec.GridSpec(4, 5, figure=fig, hspace=0.55, wspace=0.55,
                              top=0.91)
     ax3d = fig.add_subplot(gs[:, :2], projection="3d")
     ax_xe = fig.add_subplot(gs[0, 2:])
@@ -327,8 +359,8 @@ def main():
     ax3d.set_title("Tip Position  blue=pred  green=GT", fontsize=9)
     pred_trace, = ax3d.plot([], [], [], color="tab:blue",  lw=1.0, alpha=0.5)
     gt_trace,   = ax3d.plot([], [], [], color="tab:green", lw=1.0, alpha=0.5)
-    pred_dot,   = ax3d.plot([], [], [], "o", color="tab:blue",  ms=9,  label="Predicted")
-    gt_dot,     = ax3d.plot([], [], [], "o", color="tab:green", ms=9,  label="GT (OptiTrack)")
+    pred_dot,   = ax3d.plot([], [], [], "o", color="tab:blue",  ms=7,  label="Predicted")
+    gt_dot,     = ax3d.plot([], [], [], "o", color="tab:green", ms=7,  label="Ground truth")
     ax3d.legend(loc="upper left", fontsize=8)
 
     err_colors  = ["tab:red", "tab:orange", "tab:purple"]
@@ -358,14 +390,25 @@ def main():
     fig.canvas.mpl_connect("key_press_event",
                             lambda e: _quit.set() if e.key in ("q", "Q", "escape") else None)
 
-    # ── Video recorder ────────────────────────────────────────────────────────
-    recorder = None
+    # ── Video recorder + data log ─────────────────────────────────────────────
+    _data_log: list[dict] = []
+    _t0_demo  = time.perf_counter()
+
+    recorder  = None
+    data_path = None
+    eps_path  = None
     if args.record:
         from flowbot.video_recorder import VideoRecorder
-        ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
-        vid_path = str(ckpt / f"demo_{ts}.mp4")
-        recorder = VideoRecorder(vid_path, fps=15.0, fig=fig)
+        ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = Path(args.output) if args.output else ckpt
+        out_dir.mkdir(parents=True, exist_ok=True)
+        vid_path  = str(out_dir / f"proprioception_test_{ts}.mp4")
+        data_path = str(out_dir / f"proprioception_test_{ts}.csv")
+        eps_path  = str(out_dir / f"proprioception_test_{ts}.eps")
+        recorder  = VideoRecorder(vid_path, fps=15.0, fig=fig)
         print(f"[demo] Recording: {vid_path}")
+        print(f"[demo] Data CSV : {data_path}")
+        print(f"[demo] Plot EPS : {eps_path}")
 
     # ── Animation update ──────────────────────────────────────────────────────
     def _update(_):
@@ -375,9 +418,6 @@ def main():
             plt.close(fig)
             return
 
-        # Pull from serial reader (live mode)
-        # _pwm is NOT updated here — it tracks the 0–26 command sent from Python.
-        # pwm1_cur from Arduino includes the base offset (149+) and would corrupt K features.
         if _ser_reader is not None:
             row = _ser_reader.latest()
             if row is not None:
@@ -387,22 +427,46 @@ def main():
         if _flow[0] is None:
             return
 
-        # Predict (opti_to_manip frame — same as training labels)
-        pred = _infer(_pwm, _flow[0])
+        # Predict → convert M-frame to IK frame via pred_signs
+        pred = _infer(_pwm, _flow[0]) * pred_signs
 
-        # Ground truth: live optitrack has X,Y flipped vs training frame → negate X,Y.
-        # CSV GT from old training files is already in training frame → no flip.
+        # GT from live OptiTrack (works in both live and CSV replay mode)
         gt = None
         if opti is not None:
             s = opti.get_latest()
             if s is not None:
                 gt = _apply_gt_signs(opti.opti_to_manip(np.array(s.pos_xyz), opti_origin), gt_signs)
-        elif _csv_gt[0] is not None:
-            gt = _csv_gt[0].copy()
 
         _pred_buf.append(pred.copy())
         _gt_buf.append(gt)
         _flow_buf.append(_flow[0].copy())
+
+        if args.record and _log_active[0]:
+            p, f   = _pwm, _flow[0]
+            cmd    = _cmd_pc[0]
+            _data_log.append(dict(
+                t_s       = round(time.perf_counter() - _t0_demo, 4),
+                # ── task-log columns (compatible with analyze_task.py) ──────
+                cmd_pc_x  = round(float(cmd[0]), 3)  if cmd is not None else float("nan"),
+                cmd_pc_y  = round(float(cmd[1]), 3)  if cmd is not None else float("nan"),
+                cmd_pc_z  = round(float(cmd[2]), 3)  if cmd is not None else float("nan"),
+                opti_mm_x = round(float(gt[0]),  3)  if gt  is not None else float("nan"),
+                opti_mm_y = round(float(gt[1]),  3)  if gt  is not None else float("nan"),
+                opti_mm_z = round(float(gt[2]),  3)  if gt  is not None else float("nan"),
+                # ── model prediction ──────────────────────────────────────
+                pred_x    = round(float(pred[0]), 3),
+                pred_y    = round(float(pred[1]), 3),
+                pred_z    = round(float(pred[2]), 3),
+                # ── sensor inputs ─────────────────────────────────────────
+                pwm1      = int(p[0]), pwm2=int(p[1]), pwm3=int(p[2]),
+                flow1     = round(float(f[0]), 4), flow2=round(float(f[1]), 4), flow3=round(float(f[2]), 4),
+                K1        = round(float(f[0] / (p[0] + 1e-3)), 4),
+                K2        = round(float(f[1] / (p[1] + 1e-3)), 4),
+                K3        = round(float(f[2] / (p[2] + 1e-3)), 4),
+                diff12    = round(float(f[0] - f[1]), 4),
+                diff23    = round(float(f[1] - f[2]), 4),
+                diff13    = round(float(f[0] - f[2]), 4),
+            ))
 
         # Status bar
         p, f = _pwm, _flow[0]
@@ -471,6 +535,15 @@ def main():
         _quit.set()
         if recorder is not None:
             recorder.close()
+        if args.record and _data_log:
+            import pandas as pd
+            pd.DataFrame(_data_log).to_csv(data_path, index=False)
+            print(f"[demo] Data saved : {data_path}")
+            try:
+                fig.savefig(eps_path, format="eps", bbox_inches="tight")
+                print(f"[demo] Plot saved : {eps_path}")
+            except Exception as e:
+                print(f"[demo] EPS save failed: {e}")
         if _ser_reader is not None:
             _ser_reader.stop()
         if _ser is not None:
@@ -480,6 +553,11 @@ def main():
             except Exception:
                 pass
         if opti is not None:
+            if _ser is not None:
+                try:
+                    _ser.write(b"0 0 0\n")
+                except Exception:
+                    pass
             opti.stop()
         print("[demo] Done.")
 

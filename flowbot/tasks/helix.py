@@ -11,12 +11,12 @@ The robot starts at the bottom of the helix and spirals upward.
 import numpy as np
 
 TASK_NAME    = "helix"
-RADIUS_MM    = 20.0   # radius of the helix (mm)
-PITCH_MM     = 10.0    # vertical rise per full turn (mm)
-N_TURNS      = 2      # number of full turns
-Z_OFFSET     = 10.0    # height of helix bottom above home (mm)
-N_POINTS     = 60     # total waypoints across all turns
-HOLDING_TIME = 1    # hold time at each waypoint (s)
+RADIUS_MM    = 17.0   # radius of the helix (mm)
+PITCH_MM     = 6.0    # vertical rise per full turn (mm)
+N_TURNS      = 2.5     # number of full turns
+Z_OFFSET     = 5.0    # height of helix bottom above home (mm)
+N_POINTS     = 30    # total waypoints across all turns
+HOLDING_TIME = 1.5   # hold time at each waypoint (s)
 
 
 def _helix_xyz(R, pitch, n_turns, n_pts, z0):

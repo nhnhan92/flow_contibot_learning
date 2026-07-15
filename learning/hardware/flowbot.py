@@ -51,7 +51,8 @@ class flowbot:
                 frequency: float = 30.0,
                 max_pos_speed: float = 150.0,
                 initial_pwm: Optional[Sequence[float]] = None,
-                pressure_model: str = "learned",   # "learned" or "linear"
+                pressure_model: str = "linear",   # "learned" or "linear"
+                draw_hull: bool = False,
                 ):
         # # --- Serial ---
         self.serial_port = serial_port
@@ -107,8 +108,7 @@ class flowbot:
         if enable_plot:
             plt.ion()
             self.pl = self.plot_helper()
-            # self.fig, self.ax, self.pc_handle, self.opti_handle, self.opti_trail = self.pl.setup_plot(self.ws.P)
-            self.fig, self.axes, self.pc_handles, self.opti_handles, self.trail_handles = self.pl.setup_plot(self.ws.P)
+            self.fig, self.axes, self.pc_handles, self.opti_handles, self.trail_handles = self.pl.setup_plot(self.ws.P, draw_hull=draw_hull)
 
             self.fig.canvas.draw_idle()
             self.fig.canvas.flush_events()
@@ -121,6 +121,7 @@ class flowbot:
             self.opti_trail = None
 
     def flowbot_init(self):
+        
         _k_model = lambda deltal: 0.18417922367667078 + 0.1511268093994831 * (1.0 - np.exp(-0.18801952663756039 * deltal))
         _common = dict(D_in=5, D_out=16.5, l0=82, d=28.17, lb=0.0, lu=13.5,
                        k_model=_k_model, a_delta=0, b_delta=0)
@@ -351,9 +352,11 @@ class flowbot:
                         print(f"[comp/simple] corr={np.round(correction,2)}  pwm→{pwm}")
                     except Exception:
                         pass   # fallback to nominal pwm
-
-        self.last_pwm = pwm
-        self.serial_sending(pwm)
+        # offset = np.random.randint(-3, 3, size=3, dtype=np.int32)  # small random offset to avoid repeated identical commands
+        offset = np.asarray([0, 0, 0], dtype=np.int32)
+        sent_pwm = pwm + offset 
+        self.serial_sending(sent_pwm)
+        self.last_pwm = sent_pwm
 
         elapsed = time.time() - t0
         if elapsed < self.dt:
