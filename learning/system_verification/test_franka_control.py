@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Check if the Franka robot is connected and responsive via FrankaRobot interface.
+Check if the Franka robot is connected and responsive via FrankaController
+(pylibfranka) interface. Mirrors test_franka.py (which uses the franky-based
+FrankaRobot) so the two backends can be compared directly on hardware.
 
 Usage:
-    python check_franka_connection.py [--ip 172.16.0.2]
+    python test_franka_control.py [--ip 172.16.0.2]
 
     # Also exercise move_tcp_pose / servo_tcp_pose / move_joints (moves the
     # real arm a small amount and back). Off by default -- opt in explicitly:
-    python check_franka_connection.py --move
+    python test_franka_control.py --move
 """
 
 import argparse
@@ -18,15 +20,15 @@ import traceback
 import numpy as np
 
 
-def check_franky_import():
-    print("[1/6] Checking franky installation ...")
+def check_pylibfranka_import():
+    print("[1/6] Checking pylibfranka installation ...")
     try:
-        import franky
-        print(f"      franky found: {franky.__file__}")
+        import pylibfranka
+        print(f"      pylibfranka found: {pylibfranka.__file__}")
         return True
     except ImportError as e:
         print(f"      FAIL: {e}")
-        print("      Install with: pip install franky-control")
+        print("      Install with: pip install pylibfranka")
         return False
 
 
@@ -34,8 +36,8 @@ def check_connection(robot_ip: str):
     print(f"[2/6] Connecting to Franka at {robot_ip} ...")
     try:
         sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "hardware"))
-        from franka_robot import FrankaRobot
-        robot = FrankaRobot(robot_ip=robot_ip)
+        from franka_control import FrankaController
+        robot = FrankaController(robot_ip=robot_ip)
         print("      Connection OK")
         return robot
     except Exception as e:
@@ -128,6 +130,48 @@ def check_servo_tcp_pose(robot, delta: float, dt: float, steps: int,
         print(f"      FAIL: {e}")
         traceback.print_exc()
         return False
+    finally:
+        # Make sure the persistent servo session is closed even on failure --
+        # FrankaController raises on move_tcp_pose/move_joints if a servo
+        # session is left open.
+        try:
+            robot.stop()
+        except Exception:
+            pass
+
+
+def check_set_ee_velocity(robot, speed: float, duration: float, hold_dt: float,
+                           max_vel: float, max_ang_vel: float):
+    """Hold a constant +Z EE velocity for `duration`s, then the reverse, then stop."""
+    print("[5d/6] Testing set_ee_velocity (real-time velocity control) ...")
+    try:
+        start = robot.get_tcp_pose()
+        steps = max(1, int(duration / hold_dt))
+
+        for _ in range(steps):
+            robot.set_ee_velocity([0.0, 0.0, speed], max_vel=max_vel, max_ang_vel=max_ang_vel)
+            time.sleep(hold_dt)
+        mid = robot.get_tcp_pose()
+        print(f"      Held +Z velocity {speed:.3f} m/s for {duration:.2f}s: Z {start[2]:.4f} -> {mid[2]:.4f}")
+
+        for _ in range(steps):
+            robot.set_ee_velocity([0.0, 0.0, -speed], max_vel=max_vel, max_ang_vel=max_ang_vel)
+            time.sleep(hold_dt)
+        back = robot.get_tcp_pose()
+        print(f"      Held -Z velocity for {duration:.2f}s: Z {mid[2]:.4f} -> {back[2]:.4f} (start was {start[2]:.4f})")
+        return True
+    except Exception as e:
+        print(f"      FAIL: {e}")
+        traceback.print_exc()
+        return False
+    finally:
+        # Persistent velocity-servo session must be closed even on failure --
+        # FrankaController raises on move_tcp_pose/move_joints/servo_tcp_pose
+        # if a session is left open.
+        try:
+            robot.stop()
+        except Exception:
+            pass
 
 
 def check_move_joints(robot, delta: float, velocity: float, acceleration: float):
@@ -164,7 +208,7 @@ def check_error_recovery(robot):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Check Franka robot connection.")
+    parser = argparse.ArgumentParser(description="Check Franka robot connection (pylibfranka backend).")
     parser.add_argument("--ip", default="172.16.0.2", help="Franka FCI IP address")
     parser.add_argument("--move", action="store_true",
                          help="Also exercise move_tcp_pose/servo_tcp_pose/move_joints "
@@ -172,26 +216,33 @@ def main():
                               "Requires interactive confirmation unless --yes is given.")
     parser.add_argument("--yes", action="store_true",
                          help="Skip the interactive confirmation before moving (use with care).")
-    parser.add_argument("--delta", type=float, default=0.04,
-                         help="Cartesian test displacement in metres (default 0.02 = 2cm).")
+    parser.add_argument("--delta", type=float, default=0.02,
+                         help="Cartesian test displacement in metres (default 0.04 = 4cm).")
     parser.add_argument("--joint_delta", type=float, default=0.5,
-                         help="Joint test displacement in radians (default 0.1).")
+                         help="Joint test displacement in radians (default 0.5).")
     parser.add_argument("--velocity", type=float, default=0.01, help="Test move velocity.")
     parser.add_argument("--acceleration", type=float, default=0.01, help="Test move acceleration.")
     parser.add_argument("--servo_steps", type=int, default=20,
                          help="Number of servo_tcp_pose ticks per direction.")
     parser.add_argument("--servo_dt", type=float, default=0.1, help="Servo tick period (s).")
+    parser.add_argument("--ee_velocity", type=float, default=0.01,
+                         help="set_ee_velocity test speed in m/s.")
+    parser.add_argument("--ee_velocity_duration", type=float, default=1.0,
+                         help="How long to hold each velocity direction (s).")
+    parser.add_argument("--ee_velocity_dt", type=float, default=0.05,
+                         help="Interval between set_ee_velocity calls (s); "
+                              "must stay under the 0.5s watchdog timeout.")
     args = parser.parse_args()
 
     print("=" * 50)
-    print(" Franka Connection Check")
+    print(" Franka Connection Check (pylibfranka / FrankaController)")
     print("=" * 50)
 
     results = {}
 
-    results["franky"] = check_franky_import()
-    if not results["franky"]:
-        print("\nAborting: franky not available.")
+    results["pylibfranka"] = check_pylibfranka_import()
+    if not results["pylibfranka"]:
+        print("\nAborting: pylibfranka not available.")
         sys.exit(1)
 
     robot = check_connection(args.ip)
@@ -199,16 +250,30 @@ def main():
     if robot is None:
         print("\nAborting: could not connect to robot.")
         sys.exit(1)
-
+    stop_flag = {"stop": False}
+    
+    # try:
+    #     while True:
+    #         results["state"] = check_state(robot)
+    #         results["ft_sensor"] = check_ft_sensor(robot)
+    #         if not (results["state"] and results["ft_sensor"]):
+    #             print("\nAborting: failed to read robot state or FT sensor.")
+    #             stop_flag["stop"] = True
+    #             break
+    #         time.sleep(1.0)
+    # except KeyboardInterrupt:
+    #     print("\nKeyboardInterrupt received. Stopping the loop.")
+    #     stop_flag["stop"] = True
+            
     results["state"] = check_state(robot)
     results["ft_sensor"] = check_ft_sensor(robot)
-
     if args.move:
         if not args.yes:
             print(f"\nAbout to move the real Franka arm at {args.ip}:")
             print(f"  - Cartesian +{args.delta*1000:.0f}mm in Z and back (move_tcp_pose)")
             print(f"  - Cartesian +{args.delta*1000:.0f}mm in Z and back (servo_tcp_pose)")
             print(f"  - Joint 7 +{args.joint_delta:.3f} rad and back (move_joints)")
+            print(f"  - Hold {args.ee_velocity:.3f} m/s in +Z then -Z for {args.ee_velocity_duration:.2f}s each (set_ee_velocity)")
             confirm = input("Proceed? [y/N] ").strip().lower()
             if confirm != "y":
                 print("Aborted by user.")
@@ -219,11 +284,14 @@ def main():
         #     robot, args.delta, args.velocity, args.acceleration)
         # results["servo_tcp_pose"] = check_servo_tcp_pose(
         #     robot, args.delta, args.servo_dt, args.servo_steps, args.velocity, args.acceleration)
-        results["move_joints"] = check_move_joints(
-            robot, args.joint_delta, args.velocity, args.acceleration)
+        # results["move_joints"] = check_move_joints(
+        #     robot, args.joint_delta, args.velocity, args.acceleration)
+        results["set_ee_velocity"] = check_set_ee_velocity(
+            robot, args.ee_velocity, args.ee_velocity_duration, args.ee_velocity_dt,
+            args.velocity, args.acceleration)
     else:
         print("\n[5/6] Skipping motion tests (pass --move to exercise "
-              "move_tcp_pose/servo_tcp_pose/move_joints).")
+              "move_tcp_pose/servo_tcp_pose/move_joints/set_ee_velocity).")
 
     results["recovery"] = check_error_recovery(robot)
 

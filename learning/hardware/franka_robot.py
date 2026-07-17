@@ -21,7 +21,10 @@ import numpy as np
 import time
 
 try:
-    from franky import Robot, Affine, RobotPose, JointMotion, CartesianMotion, ReferenceType
+    from franky import (
+        Robot, Affine, RobotPose, JointMotion, CartesianMotion, ReferenceType,
+        CartesianState, Twist,
+    )
     _FRANKY_AVAILABLE = True
 except ImportError:
     _FRANKY_AVAILABLE = False
@@ -32,10 +35,9 @@ def _robotpose_to_pose(robot_pose) -> np.ndarray:
     """Convert franky RobotPose → (6,) [x, y, z, rx, ry, rz] in m/rad."""
     import scipy.spatial.transform as st
     aff = robot_pose.end_effector_pose          # franky Affine (SE3)
-    pos = np.array(aff.translation(), dtype=np.float32)
-    rot = st.Rotation.from_matrix(
-        np.array(aff.rotation_matrix())
-    ).as_rotvec()
+    T = np.asarray(aff.matrix, dtype=np.float64)  # (4,4) homogeneous transform (property, not a method)
+    pos = T[:3, 3].astype(np.float32)
+    rot = st.Rotation.from_matrix(T[:3, :3]).as_rotvec()
     return np.concatenate([pos, rot]).astype(np.float32)
 
 
@@ -60,6 +62,10 @@ class FrankaRobot:
         move_tcp_pose()      → blocking linear move
         move_joints()        → blocking joint move
         disconnect()         → cleanup
+
+    Plus Franka-specific extras (no UR5e equivalent):
+        get_ee_wrench()             → np.ndarray (6,) estimated EE force/torque
+        get_joint_external_torques() → np.ndarray (7,) estimated joint torques
     """
 
     def __init__(self, robot_ip: str = "172.16.0.2", frequency: float = 10.0,
@@ -97,6 +103,30 @@ class FrankaRobot:
         """Return current joint angles as (7,) rad."""
         return np.array(self._robot.current_joint_state.position, dtype=np.float32)
 
+    def get_ee_wrench(self, frame: str = "base") -> np.ndarray:
+        """
+        Return Franka's built-in estimated external wrench at the EE.
+
+        This comes from the arm's joint-torque sensing (no external F/T
+        sensor needed) -- libfranka's O_F_ext_hat_K / K_F_ext_hat_K.
+
+        Parameters
+        ----------
+        frame : "base" -> wrench expressed in the robot base frame (O_F_ext_hat_K)
+                "ee"   -> wrench expressed in the stiffness/EE frame (K_F_ext_hat_K)
+
+        Returns
+        -------
+        np.ndarray (6,) [Fx, Fy, Fz, Tx, Ty, Tz] in N / N*m.
+        """
+        state = self._robot.state
+        field = state.O_F_ext_hat_K if frame == "base" else state.K_F_ext_hat_K
+        return np.asarray(field, dtype=np.float32).reshape(6)
+
+    def get_joint_external_torques(self) -> np.ndarray:
+        """Return filtered estimated external joint torques (7,) in N*m."""
+        return np.asarray(self._robot.state.tau_ext_hat_filtered, dtype=np.float32).reshape(7)
+
     # ── Motion ────────────────────────────────────────────────────────────────
 
     def move_tcp_pose(self, target_pose, velocity: float = 0.1,
@@ -129,19 +159,41 @@ class FrankaRobot:
             self._robot.relative_dynamics_factor = prev_dyn
 
     def servo_tcp_pose(self, target_pose, velocity: float = 0.1,
-                       acceleration: float = 0.1, dt: float = None):
+                       acceleration: float = 0.1, dt: float = None,
+                       lookahead_time: float = None, gain: float = None):
         """
         High-frequency Cartesian servo step (mirrors UR5e servo_tcp_pose API).
 
-        Sends an incremental relative motion toward target_pose.
-        Called every control tick.
+        franky has no raw per-cycle streaming primitive like RTDE's servoL --
+        every move() plans a fresh trajectory, which by default targets zero
+        velocity at its end (see franky docs: "the robot will stop at each
+        waypoint unless you specify a target velocity"). Calling that once
+        per control tick made the arm brake to a full stop every tick, which
+        is what showed up as jerky/pulsing motion.
+
+        To avoid that, this tick's (clipped, safety-bounded) step is issued
+        as an absolute CartesianState carrying a non-zero feed-forward
+        velocity toward target_pose, with return_when_finished=False so this
+        call does not block waiting for that open-ended motion to finish --
+        the next servo_tcp_pose() call is expected to supersede it before it
+        would naturally stop.
+
+        NOT verified on hardware -- start with small velocity/acceleration
+        and watch closely; franky raises a discontinuity error if successive
+        motions' dynamics are too aggressive to hand off smoothly.
 
         Parameters
         ----------
         target_pose  : (6,) [x, y, z, rx, ry, rz] m/rad  (absolute target)
-        velocity     : Max translation step per tick (m/s × dt).
-        acceleration : Max rotation step per tick (rad/s × dt).
+        velocity     : Max translation step per tick (m/s × dt); also the
+                       feed-forward linear speed given to this tick's motion.
+        acceleration : Max rotation step per tick (rad/s × dt); also the
+                       feed-forward angular speed (reused loosely, same
+                       convention as elsewhere in this class).
         dt           : Time step (s); defaults to self.dt.
+        lookahead_time, gain : Accepted for signature compatibility with
+                      UR5eRobot.servo_tcp_pose (RTDE trajectory-smoothing
+                      params); unused here, franky has no equivalent.
         """
         if dt is None:
             dt = self.dt
@@ -149,24 +201,49 @@ class FrankaRobot:
         target_pose  = np.asarray(target_pose, dtype=float)
         current_pose = self.get_tcp_pose()
 
-        # Clip positional displacement to max step size
+        import scipy.spatial.transform as st
+
+        # Clip this tick's step the same way as before (bounds how far a
+        # single call can move the arm, e.g. against a noisy/jumpy caller).
         delta_pos = target_pose[:3] - current_pose[:3]
         delta_pos_clipped = np.clip(delta_pos, -velocity * dt, velocity * dt)
+        step_pos = current_pose[:3] + delta_pos_clipped
 
-        import scipy.spatial.transform as st
-        r_cur    = st.Rotation.from_rotvec(current_pose[3:])
-        r_tgt    = st.Rotation.from_rotvec(target_pose[3:])
-        r_rel    = r_tgt * r_cur.inv()
-        rotvec   = r_rel.as_rotvec()
+        r_cur  = st.Rotation.from_rotvec(current_pose[3:])
+        r_tgt  = st.Rotation.from_rotvec(target_pose[3:])
+        rotvec = (r_tgt * r_cur.inv()).as_rotvec()
         rotvec_clipped = np.clip(rotvec, -acceleration * dt, acceleration * dt)
+        step_rot = st.Rotation.from_rotvec(rotvec_clipped) * r_cur
 
-        delta_quat = st.Rotation.from_rotvec(rotvec_clipped).as_quat().tolist()
-        delta_aff  = Affine(delta_pos_clipped.tolist(), delta_quat)
-        delta_pose = RobotPose(delta_aff)
+        # Feed-forward velocity toward the (unclipped) target so this tick's
+        # motion doesn't target zero velocity -- that's what caused the stop
+        # every tick.
+        dist = float(np.linalg.norm(delta_pos))
+        lin_vel = (delta_pos / dist * velocity) if dist > 1e-9 else np.zeros(3)
+        angle = float(np.linalg.norm(rotvec))
+        ang_vel = (rotvec / angle * acceleration) if angle > 1e-9 else np.zeros(3)
+
+        step_affine = Affine(step_pos.tolist(), step_rot.as_quat().tolist())
+        step_state = CartesianState(RobotPose(step_affine), Twist(lin_vel.tolist(), ang_vel.tolist()))
+
+        # No relative_dynamics_factor here: it would multiply with
+        # self._robot.relative_dynamics_factor (set once in __init__), and
+        # that stacking made the effective velocity ceiling far smaller than
+        # the feed-forward `velocity`/`acceleration` targets above -- Ruckig
+        # rejected every tick as infeasible (error -100 / ErrorInvalidInput).
+        # The physical step is already bounded by the explicit dt-based clip
+        # above, so a second dynamics-scaling layer here is both redundant
+        # and was the actual bug.
+        motion = CartesianMotion(
+            step_state,
+            ReferenceType.Absolute,
+            return_when_finished=False,
+        )
 
         try:
-            self._robot.move(CartesianMotion(delta_pose, ReferenceType.Relative))
-        except Exception:
+            self._robot.move(motion)
+        except Exception as e:
+            print(f"[franka] servo_tcp_pose motion error: {e}")
             self._robot.recover_from_errors()
 
     def move_joints(self, target_joints, velocity: float = 0.5,
@@ -177,9 +254,12 @@ class FrankaRobot:
         Parameters
         ----------
         target_joints : (7,) target joint angles in rad
+        velocity      : Scales relative_dynamics_factor (0-1 range; higher = faster).
+        acceleration  : Scales relative_dynamics_factor (0-1 range; higher = faster).
         """
         target_joints = list(np.asarray(target_joints, dtype=float))
-        motion = JointMotion(target_joints)
+        dyn_factor = float(np.clip(min(velocity, acceleration), 0.01, 1.0))
+        motion = JointMotion(target_joints, relative_dynamics_factor=dyn_factor)
         if asynchronous:
             self._robot.move_async(motion)
         else:
