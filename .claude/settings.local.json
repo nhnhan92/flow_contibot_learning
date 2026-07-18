@@ -41,7 +41,13 @@
       "Bash(/tmp/pylibfranka_venv/bin/pip install *)",
       "Bash(/tmp/pylibfranka_venv/bin/python *)",
       "Bash(python3 -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/learning/hardware/franka_control.py)",
-      "Bash(python3 -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/learning/system_verification/test_franka_control.py)"
+      "Bash(python3 -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/learning/system_verification/test_franka_control.py)",
+      "Bash(python3 -c ' *)",
+      "Bash(~/.pyenv/versions/flow_bot/bin/python -c \"import hardware; print\\(hardware.__file__\\)\")",
+      "Bash(~/.pyenv/versions/flow_bot/bin/pip show *)",
+      "Bash(python3 -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/suction_force_test.py)",
+      "Bash(~/.pyenv/versions/flow_bot/bin/python -c ' *)",
+      "Bash(~/.pyenv/versions/flow_bot/bin/python *)"
     ]
   }
 }
