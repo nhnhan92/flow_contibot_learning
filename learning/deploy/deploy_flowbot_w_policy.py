@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 """
-Deploy trained Diffusion Policy on real UR5e + Flowbot soft manipulator
+Deploy trained Diffusion Policy on real UR5e/Franka + Flowbot soft manipulator
 
 Usage:
     python deploy/deploy_real_robot.py \
         --checkpoint train/checkpoints/best_model.pt \
+        --arm ur5 \
         --robot_ip 192.168.1.100 \
         --flowbot_port /dev/ttyACM0
 
+    python deploy/deploy_real_robot.py \
+        --checkpoint train/checkpoints/franka_best_model.pt \
+        --arm franka \
+        --flowbot_port /dev/ttyACM0
+
 Hardware:
-    - UR5e robot arm (RTDE control)
+    - UR5e (RTDE servoL) or Franka (pylibfranka Cartesian velocity control)
     - Flowbot soft pneumatic manipulator (3 valves via Arduino serial)
     - Intel RealSense camera (auto-detected)
 
 State  (8D): robot TCP xyz (3D) + flowbot pwm (3D) + operation_mode (2D)  [rotation excluded]
-Action (8D): target TCP xyz (3D) + target pwm (3D) + operation_mode (2D)  [rotation excluded]
+Action (8D): [target TCP xyz | UR5e] or [linear velocity xyz | Franka] (3D)
+             + target pwm (3D) + operation_mode (2D)
+    A checkpoint is only valid for the arm it was trained on -- the action
+    field means something different per arm (see demo_collect.py's
+    _servo_toward docstring), so --arm must match the collection arm.
 """
 
 import os
@@ -34,6 +44,7 @@ LEARNING_DIR = os.path.dirname(DEPLOY_DIR)
 PROJECT_ROOT = os.path.dirname(LEARNING_DIR)
 sys.path.insert(0, LEARNING_DIR)
 from hardware.ur5e_rtde import UR5eRobot
+from hardware.franka_control import FrankaController
 from hardware.flowbot import flowbot
 from hardware.realsense_camera import RealSenseCamera
 from train.eval import DiffusionPolicyInference
@@ -42,11 +53,19 @@ from train.eval import DiffusionPolicyInference
 PWM_MIN = 0   # 0 = fully deflated (release); model must be able to command this
 PWM_MAX = 26
 
+_DEFAULT_ROBOT_IP = {"ur5": "150.65.146.87", "franka": "172.16.0.2"}
+
 # Default start pose (from collect_demos_with_camera.py)
 DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
 
+# Franka start pose -- matches init_pose in demo_collect.py, i.e. where
+# Franka demonstrations actually started from.
+FRANKA_START_POSE = [0.550, 0.045, 0.45, 3.14, 0.0, -0.05]
+
 # Fixed TCP rotation used when executing XYZ-only actions from the policy.
 # Rotation is not predicted by the model (action_dim=8) so we hold it constant.
+# UR5e-only: the Franka path commands velocity, not absolute pose, so there's
+# no "target rotation" to hold -- angular_velocity is just left at zero.
 TCP_FIXED_ROTATION = DEFAULT_START_POSE[3:]   # [rx, ry, rz]
 
 # Control frequency (Hz)
@@ -55,14 +74,21 @@ DT = 1.0 / CONTROL_FREQ
 DT_FLOWBOT = 0.3     # Step time (s) when flowbot is actively actuating
 FLOWBOT_FREQ = 10.0  # Flowbot command frequency — must match CONTROL_FREQ
 
-# servo_l speed/acceleration (lower = smoother)
+# servo_l speed/acceleration (lower = smoother) -- UR5e only
 SERVO_SPEED = 0.05     # m/s
 SERVO_ACCEL = 0.05     # m/s^2
 
-MAX_TCP_DELTA = 0.02   # m per step
+MAX_TCP_DELTA = 0.02   # m per step -- UR5e only
+
+# Franka set_ee_velocity caps -- runtime safety limit on the linear/angular
+# speed a policy-predicted action is allowed to command, independent of
+# whatever speed it saw in training data.
+FRANKA_MAX_VEL = 0.05      # m/s
+FRANKA_MAX_ANG_VEL = 0.1   # rad/s
+
 SERVO_LOOKAHEAD = 0.1   # s
 SERVO_GAIN = 300
-    
+
 
 class _ReleaseDetected(Exception):
     """Internal sentinel: raised when op_mode [1,1] is predicted to exit episode loop."""
@@ -156,6 +182,7 @@ class RobotDeployment:
         self,
         checkpoint_path: str,
         robot_ip: str,
+        arm: str = 'ur5',
         flowbot_port: str = '/dev/ttyACM0',
         flowbot_baud: int = 115200,
         image_size: tuple = (216, 288),
@@ -165,6 +192,8 @@ class RobotDeployment:
         camera_width: int = 640,
     ):
         self.verbose = verbose
+        self.arm = arm.lower()
+        self.is_franka = self.arm == "franka"
         self.current_pwm = np.array([0, 0, 0], dtype=int)
         self.prev_pwm    = np.zeros(3, dtype=np.float32)   # command from previous step
 
@@ -192,10 +221,13 @@ class RobotDeployment:
         )
         print("      Camera OK")
 
-        # ── UR5e RTDE ─────────────────────────────────────────────────────────
-        print(f"\n[3/4] Connecting to UR5e at {robot_ip} ...")
-        self.ur5 = UR5eRobot(robot_ip=robot_ip,frequency=CONTROL_FREQ)
-        print("      UR5e connected")
+        # ── Robot arm ─────────────────────────────────────────────────────────
+        print(f"\n[3/4] Connecting to {self.arm.upper()} at {robot_ip} ...")
+        if self.is_franka:
+            self.robot = FrankaController(robot_ip=robot_ip, frequency=CONTROL_FREQ, use_gripper=False)
+        else:
+            self.robot = UR5eRobot(robot_ip=robot_ip, frequency=CONTROL_FREQ)
+        print(f"      {self.arm.upper()} connected")
 
         # ── Flowbot ───────────────────────────────────────────────────────────
         print(f"\n[4/4] Connecting to Flowbot on {flowbot_port} ...")
@@ -228,7 +260,7 @@ class RobotDeployment:
             image_raw  : np.ndarray (H,W,3) uint8 — cropped camera frame
         """
         # Robot TCP pose — slice to tcp_dims (3=xyz only, 6=xyz+rotation)
-        tcp_pose = self.ur5.get_tcp_pose()
+        tcp_pose = self.robot.get_tcp_pose()
 
         # PWM from previous step — matches the physical state visible in the current image
         pwm = self.prev_pwm.copy()                                                          # (3,)
@@ -334,15 +366,20 @@ class RobotDeployment:
 
         Args:
             action : np.ndarray (tcp_dims+5,) — [tcp[:tcp_dims], pwm1,pwm2,pwm3, ur5_active, flowbot_active]
-                     When tcp_dims=3 the fixed rotation TCP_FIXED_ROTATION is appended to form 6D target.
+                     UR5e: action[:tcp_dims] is an absolute TCP target (fixed rotation
+                     TCP_FIXED_ROTATION is appended when tcp_dims=3 to form a 6D target).
+                     Franka: action[:tcp_dims] is a linear velocity (m/s, base frame);
+                     angular velocity is zero when tcp_dims=3, else action[3:6] (rad/s).
 
         Returns:
             pwm_int      : np.ndarray (3,) int — clamped PWM actually sent
             op_mode_pred : np.ndarray (2,) int — [ur5_active, flowbot_active]
         """
         d = self.tcp_dims
-        # Build 6D TCP target for servo_tcp_pose
-        if d == 6:
+        if self.is_franka:
+            lin_vel = np.array(action[:3], dtype=np.float64)
+            ang_vel = np.array(action[3:6], dtype=np.float64) if d == 6 else np.zeros(3)
+        elif d == 6:
             tcp_target = action[:6].tolist()
         else:  # d == 3: append fixed rotation so the robot holds its orientation
             tcp_target = action[:3].tolist() + TCP_FIXED_ROTATION
@@ -356,21 +393,35 @@ class RobotDeployment:
         # Decode predicted operation mode (denorm ~[0,1] → binary)
         op_mode_pred = np.clip(np.round(action[d+3:d+5]), 0, 1).astype(int)
 
-        # Gate UR5 servo: only move when ur5_active
+        # Gate arm command: only move when ur5_active (field name kept for both arms)
         if op_mode_pred[0] == 1:
-            # Safety clamp: limit XYZ displacement per step to MAX_TCP_DELTA
-            current_tcp = self.ur5.get_tcp_pose()
-            tcp_arr = np.array(tcp_target, dtype=np.float64)
-            delta_xyz = tcp_arr[:3] - current_tcp[:3]
-            dist = np.linalg.norm(delta_xyz)
-            if dist > MAX_TCP_DELTA:
-                tcp_arr[:3] = current_tcp[:3] + delta_xyz * (MAX_TCP_DELTA / dist)
-                tcp_target = tcp_arr.tolist()
-                if self.verbose:
-                    print(f"  ⚠️  TCP delta {dist*1000:.1f}mm clamped to {MAX_TCP_DELTA*1000:.0f}mm")
-            self.ur5.servo_tcp_pose(target_pose=tcp_target, velocity=SERVO_SPEED,
-                                    acceleration=SERVO_ACCEL, dt=DT,
-                                    lookahead_time=SERVO_LOOKAHEAD, gain=SERVO_GAIN)
+            if self.is_franka:
+                # Safety clamp: cap commanded speed to FRANKA_MAX_VEL regardless
+                # of what speed the policy saw in training data.
+                speed = float(np.linalg.norm(lin_vel))
+                if speed > FRANKA_MAX_VEL and speed > 1e-9:
+                    lin_vel = lin_vel / speed * FRANKA_MAX_VEL
+                    if self.verbose:
+                        print(f"  ⚠️  Predicted speed {speed:.3f} m/s clamped to {FRANKA_MAX_VEL:.3f} m/s")
+                self.robot.set_ee_velocity(lin_vel, angular_velocity=ang_vel,
+                                            max_vel=FRANKA_MAX_VEL, max_ang_vel=FRANKA_MAX_ANG_VEL)
+            else:
+                # Safety clamp: limit XYZ displacement per step to MAX_TCP_DELTA
+                current_tcp = self.robot.get_tcp_pose()
+                tcp_arr = np.array(tcp_target, dtype=np.float64)
+                delta_xyz = tcp_arr[:3] - current_tcp[:3]
+                dist = np.linalg.norm(delta_xyz)
+                if dist > MAX_TCP_DELTA:
+                    tcp_arr[:3] = current_tcp[:3] + delta_xyz * (MAX_TCP_DELTA / dist)
+                    tcp_target = tcp_arr.tolist()
+                    if self.verbose:
+                        print(f"  ⚠️  TCP delta {dist*1000:.1f}mm clamped to {MAX_TCP_DELTA*1000:.0f}mm")
+                self.robot.servo_tcp_pose(target_pose=tcp_target, velocity=SERVO_SPEED,
+                                        acceleration=SERVO_ACCEL, dt=DT,
+                                        lookahead_time=SERVO_LOOKAHEAD, gain=SERVO_GAIN)
+            # Franka note: when ur5_active is 0 we simply send nothing here --
+            # set_ee_velocity's own watchdog ramps to zero after ~0.5s of no
+            # calls, same behavior relied on in demo_collect.py's teleop loop.
 
         # Gate flowbot PWM: only send when flowbot_active
         if op_mode_pred[1] == 1 and np.any(pwm_int >= PWM_MIN):
@@ -382,12 +433,18 @@ class RobotDeployment:
         self.current_op_mode = op_mode_pred.astype(np.float32)
 
         if self.verbose:
-            tcp = np.array(tcp_target, dtype=np.float32)
             mode_str = ['idle', 'FB', 'UR5', 'release'][op_mode_pred[0] * 2 + op_mode_pred[1]]
-            print(
-                f"  [{mode_str}] TCP: [{tcp[0]:.3f}, {tcp[1]:.3f}, {tcp[2]:.3f}]  "
-                f"PWM: {pwm_int.tolist()}"
-            )
+            if self.is_franka:
+                print(
+                    f"  [{mode_str}] VEL: [{lin_vel[0]:.3f}, {lin_vel[1]:.3f}, {lin_vel[2]:.3f}] m/s  "
+                    f"PWM: {pwm_int.tolist()}"
+                )
+            else:
+                tcp = np.array(tcp_target, dtype=np.float32)
+                print(
+                    f"  [{mode_str}] TCP: [{tcp[0]:.3f}, {tcp[1]:.3f}, {tcp[2]:.3f}]  "
+                    f"PWM: {pwm_int.tolist()}"
+                )
 
         return pwm_int, op_mode_pred
 
@@ -395,11 +452,13 @@ class RobotDeployment:
 
     def move_to_start(self, speed: float = 0.1, accel: float = 0.1):
         """
-        Move UR5e to DEFAULT_START_POSE using moveL, then reset flowbot.
+        Move the arm to its default start pose using a point-to-point move,
+        then reset flowbot.
         """
         print("\nMoving to start position ...")
-        self.ur5.move_tcp_pose(DEFAULT_START_POSE, velocity=speed, acceleration=accel)
-        print(f"  TCP at: {DEFAULT_START_POSE}")
+        start_pose = FRANKA_START_POSE if self.is_franka else DEFAULT_START_POSE
+        self.robot.move_tcp_pose(start_pose, velocity=speed, acceleration=accel)
+        print(f"  TCP at: {start_pose}")
 
         print("Resetting Flowbot ...")
         self.fb.reset()
@@ -504,8 +563,8 @@ class RobotDeployment:
         elapsed_total = time.time() - episode_start
         print(f"\n✅ Episode finished: {total_steps} steps in {elapsed_total:.1f}s")
 
-        # Stop UR5e servoing and allow RTDE to settle before any subsequent moveL
-        self.ur5.stop()
+        # Stop arm servoing/velocity control and let it settle before any subsequent move
+        self.robot.stop()
         time.sleep(0.5)
 
         # Reset Flowbot
@@ -522,9 +581,9 @@ class RobotDeployment:
         """Safely disconnect all hardware."""
         print("\nShutting down ...")
         try:
-            self.ur5.disconnect()
+            self.robot.disconnect()
         except Exception as e:
-            print(f"  UR5e shutdown error: {e}")
+            print(f"  {self.arm.upper()} shutdown error: {e}")
         try:
             self.fb.reset()
         except Exception as e:
@@ -537,11 +596,15 @@ class RobotDeployment:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Deploy Diffusion Policy on UR5e + Flowbot')
+    parser = argparse.ArgumentParser(description='Deploy Diffusion Policy on UR5e/Franka + Flowbot')
     parser.add_argument('--checkpoint',    type=str,   required=True,
-                        help='Path to trained checkpoint (.pt)')
-    parser.add_argument('--robot_ip',      type=str, default= "150.65.146.87",
-                        help='UR5e IP address (e.g. 192.168.1.100)')
+                        help='Path to trained checkpoint (.pt). Must match --arm: a checkpoint '
+                             'trained on UR5e (position actions) is not valid for Franka '
+                             '(velocity actions), and vice versa.')
+    parser.add_argument('--arm',           type=str,   default='ur5', choices=['ur5', 'franka'],
+                        help='Which arm to deploy on -- must match the arm the checkpoint was trained for.')
+    parser.add_argument('--robot_ip',      type=str, default=None,
+                        help='Robot IP (default: 150.65.146.87 for ur5, 172.16.0.2 for franka)')
     parser.add_argument('--flowbot_port',  type=str,   default='/dev/ttyACM0',
                         help='Arduino serial port for Flowbot')
     parser.add_argument('--flowbot_baud',  type=int,   default=115200,
@@ -564,11 +627,14 @@ def main():
         print(f"❌ Checkpoint not found: {args.checkpoint}")
         return 1
 
+    robot_ip = args.robot_ip or _DEFAULT_ROBOT_IP[args.arm]
+
     robot = None
     try:
         robot = RobotDeployment(
             checkpoint_path=args.checkpoint,
-            robot_ip=args.robot_ip,
+            robot_ip=robot_ip,
+            arm=args.arm,
             flowbot_port=args.flowbot_port,
             flowbot_baud=args.flowbot_baud,
             device=args.device,

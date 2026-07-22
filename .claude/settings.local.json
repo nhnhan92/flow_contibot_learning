@@ -47,7 +47,11 @@
       "Bash(~/.pyenv/versions/flow_bot/bin/pip show *)",
       "Bash(python3 -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/suction_force_test.py)",
       "Bash(~/.pyenv/versions/flow_bot/bin/python -c ' *)",
-      "Bash(~/.pyenv/versions/flow_bot/bin/python *)"
+      "Bash(~/.pyenv/versions/flow_bot/bin/python *)",
+      "Bash(python3 -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/learning/hardware/use_franka.py /home/nhnhan/Desktop/flow_contibot_learning/suction_force_test.py)",
+      "Bash(python3 -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/learning/system_verification/test_spacemouse_velocity.py)",
+      "Bash(python3 -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/learning/demo_collect.py)",
+      "Bash(python3 -)"
     ]
   }
 }

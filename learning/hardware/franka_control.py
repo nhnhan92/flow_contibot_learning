@@ -42,7 +42,6 @@ class FrankaController:
         get_tcp_pose()       -> np.ndarray (6,)  [x,y,z,rx,ry,rz] m/rad (rotvec)
         get_joint_angles()   -> np.ndarray (7,)  joint angles rad
         move_tcp_pose()      -> blocking (or async) point-to-point Cartesian move
-        servo_tcp_pose()     -> real-time Cartesian servo (persistent control loop)
         move_joints()        -> blocking (or async) point-to-point joint move
         stop()                -> stop motion/servo, keep the connection alive
         recover()             -> automatic error recovery
@@ -87,14 +86,12 @@ class FrankaController:
         self.is_moving = False
 
         self._servo_thread: Optional[threading.Thread] = None
-        self._servo_kind: Optional[str] = None   # "cartesian", "joint", or "cartesian_velocity"
+        self._servo_kind: Optional[str] = None   # "joint" or "cartesian_velocity"
         self._async_thread: Optional[threading.Thread] = None
         self.servo_target = None
 
-        # Ramped speed state for the servo loops (see _step_toward_pose /
-        # _joint_servo_loop): reset to zero whenever a servo session starts.
-        self._servo_lin_speed = 0.0
-        self._servo_ang_speed = 0.0
+        # Ramped per-joint speed state for _joint_servo_loop; reset to zero
+        # whenever a joint servo session starts.
         self._servo_joint_vel = np.zeros(7)
 
         # Velocity-control (set_ee_velocity) state: reset whenever that
@@ -332,41 +329,6 @@ class FrankaController:
             return thread
         return self._move_ee(target16, max_vel=velocity, max_acc=acceleration)
 
-    def servo_tcp_pose(
-        self,
-        target_pose,
-        velocity: float = 0.1,
-        acceleration: float = 0.1,
-        dt: Optional[float] = None,
-        lookahead_time: Optional[float] = None,
-        gain: Optional[float] = None,
-    ):
-        """
-        High-frequency Cartesian servo step (mirrors UR5e/FrankaRobot servo_tcp_pose).
-
-        Lazily starts a persistent Cartesian control session on the first call;
-        every call after that just updates the goal pose that the background
-        loop chases, rate-limited by velocity/acceleration. `dt` is accepted
-        for signature compatibility but unused: libfranka supplies its own
-        real per-cycle timestep internally.
-
-        Parameters
-        ----------
-        target_pose  : (6,) [x, y, z, rx, ry, rz] m/rad, absolute target.
-        velocity     : Max translation speed (m/s).
-        acceleration : Max rotation speed (rad/s), reused loosely as the
-                       angular-rate cap -- same convention as FrankaRobot's
-                       own servo_tcp_pose.
-        lookahead_time, gain : Accepted for signature compatibility with
-                       UR5eRobot.servo_tcp_pose (RTDE trajectory-smoothing
-                       params); unused here, libfranka has no equivalent.
-        """
-        if self._servo_kind in ("joint", "cartesian_velocity"):
-            raise RuntimeError(f"{self._servo_kind} servo is active; call stop() first")
-        if self._servo_kind != "cartesian":
-            self._start_cartesian_servo(max_vel=velocity, max_ang_vel=acceleration)
-        self._set_cartesian_target(self._pose6_to_O_T_EE(target_pose))
-
     def set_ee_velocity(
         self,
         linear_velocity: Sequence[float],
@@ -394,8 +356,8 @@ class FrankaController:
         max_vel, max_ang_vel : Speed caps; only used on the first call, when
                        the session starts.
         """
-        if self._servo_kind in ("cartesian", "joint"):
-            raise RuntimeError(f"{self._servo_kind} servo is active; call stop() first")
+        if self._servo_kind == "joint":
+            raise RuntimeError("joint servo is active; call stop() first")
         if self._servo_kind != "cartesian_velocity":
             self._start_cartesian_velocity_servo(max_vel=max_vel, max_ang_vel=max_ang_vel)
         self._set_cartesian_velocity_target(linear_velocity, angular_velocity)
@@ -428,9 +390,7 @@ class FrankaController:
 
     def stop(self):
         """Stop any active motion or servo loop. Mirrors UR5e's stop(): halts motion, keeps the connection alive."""
-        if self._servo_kind == "cartesian":
-            self._stop_cartesian_servo()
-        elif self._servo_kind == "joint":
+        if self._servo_kind == "joint":
             self._stop_joint_servo()
         elif self._servo_kind == "cartesian_velocity":
             self._stop_cartesian_velocity_servo()
@@ -498,18 +458,25 @@ class FrankaController:
                 # Send current pose once to avoid first-command jump.
                 active.writeOnce(CartesianPose(start_pose))
 
-                if distance < 1e-6:
+                R0 = self._pose_to_matrix(start_pose)[:3, :3]
+                R1 = self._pose_to_matrix(target)[:3, :3]
+                q0 = self._rot_to_quat(R0)
+                q1 = self._rot_to_quat(R1)
+                dot = float(np.clip(np.dot(q0, q1), -1.0, 1.0))
+                if dot < 0.0:
+                    q1 = -q1
+                    dot = -dot
+                angle = 2.0 * np.arccos(np.clip(dot, -1.0, 1.0))
+
+                if distance < 1e-9 and angle < 1e-9:
                     cmd = CartesianPose(target)
                     cmd.motion_finished = True
                     active.writeOnce(cmd)
                     return
 
-                direction = delta / distance
-
-                R0 = self._pose_to_matrix(start_pose)[:3, :3]
-                R1 = self._pose_to_matrix(target)[:3, :3]
-                q0 = self._rot_to_quat(R0)
-                q1 = self._rot_to_quat(R1)
+                direction = delta / distance if distance > 1e-9 else np.zeros(3)
+                max_ang_vel = self.motion_cfg.max_ang_vel
+                max_ang_acc = self.motion_cfg.max_ang_acc
 
                 time_elapsed = 0.0
                 motion_finished = False
@@ -521,17 +488,30 @@ class FrankaController:
                     dt = duration.to_sec()
                     time_elapsed += dt
 
-                    desired_s, total_time = self._trapezoid_position(
-                        time_elapsed,
-                        distance,
-                        max_vel,
-                        max_acc,
+                    # Translation and rotation are timed independently (each
+                    # respecting its own vel/acc cap) and synchronized by
+                    # progress, not by sharing one trapezoid derived from
+                    # distance alone. Driving the slerp off the translation
+                    # trapezoid's progress meant a small position delta with
+                    # a large orientation change (e.g. a few cm but 140
+                    # degrees) forced the whole rotation through in whatever
+                    # short time the tiny translation needed, well past
+                    # libfranka's angular velocity/acceleration limits --
+                    # exactly the "cartesian_motion_generator_*_discontinuity"
+                    # reflex this was tripping.
+                    desired_s, total_time_trans = self._trapezoid_position(
+                        time_elapsed, distance, max_vel, max_acc,
                     )
+                    desired_angle, total_time_rot = self._trapezoid_position(
+                        time_elapsed, angle, max_ang_vel, max_ang_acc,
+                    )
+                    total_time = max(total_time_trans, total_time_rot)
 
-                    progress = float(np.clip(desired_s / distance, 0.0, 1.0))
-                    desired_pos = start_pos + direction * desired_s
+                    progress_trans = float(np.clip(desired_s / distance, 0.0, 1.0)) if distance > 1e-9 else 1.0
+                    progress_rot = float(np.clip(desired_angle / angle, 0.0, 1.0)) if angle > 1e-9 else 1.0
 
-                    desired_R = self._quat_to_rot(self._slerp(q0, q1, progress))
+                    desired_pos = start_pos + direction * (progress_trans * distance)
+                    desired_R = self._quat_to_rot(self._slerp(q0, q1, progress_rot))
 
                     desired_T = self._pose_to_matrix(start_pose)
                     desired_T[:3, :3] = desired_R
@@ -654,129 +634,15 @@ class FrankaController:
                     pass
 
     # -------------------------
-    # Cartesian servo (persistent realtime loop, internal)
-    # -------------------------
-    #
-    # _move_ee() opens start_cartesian_pose_control(), blocks until the whole
-    # trapezoid trajectory is done, then closes the control session. That is
-    # fine for one-shot point-to-point moves but wrong for an outer loop that
-    # wants to push a new target every tick (e.g. a policy running at 20-30 Hz):
-    # reopening start_cartesian_pose_control() every tick means restarting
-    # libfranka's realtime session on every call, which the FCI does not
-    # support at that rate.
-    #
-    # _start_cartesian_servo() instead opens the control session once and keeps
-    # a background thread alive that runs libfranka's own read/write cycle
-    # continuously. servo_tcp_pose() (the public entry point) just calls
-    # _set_cartesian_target() whenever it has a new goal pose; the background
-    # thread chases the latest target, clipping per-cycle motion to max_vel /
-    # max_ang_vel so a stale or jumpy target from outside can't cause a step
-    # change on the robot.
-
-    def _start_cartesian_servo(
-        self,
-        max_vel: Optional[float] = None,
-        max_ang_vel: Optional[float] = None,
-        controller_mode=ControllerMode.JointImpedance,
-    ):
-        """
-        Start a persistent Cartesian control session for realtime servoing.
-
-        Call _set_cartesian_target() from an outer loop to update the goal
-        pose; call _stop_cartesian_servo() when done. Do not call _move_ee()
-        while a servo session is active.
-        """
-        with self.motion_lock:
-            if self.is_moving:
-                raise RuntimeError("Already moving; call _stop_cartesian_servo() first")
-
-            max_vel = max_vel or self.motion_cfg.max_cart_vel
-            max_ang_vel = max_ang_vel or self.motion_cfg.max_ang_vel
-
-            with self._servo_session("cartesian"):
-                active = self.robot.start_cartesian_pose_control(controller_mode)
-                self.active_control = active
-
-                state, _ = active.readOnce()
-                self._cache_state(state)
-                current_pose = np.array(state.O_T_EE, dtype=float).copy()
-                active.writeOnce(CartesianPose(current_pose))
-
-            with self.servo_lock:
-                self.servo_target = current_pose.copy()
-
-            self._servo_lin_speed = 0.0
-            self._servo_ang_speed = 0.0
-
-            self._servo_thread = threading.Thread(
-                target=self._cartesian_servo_loop,
-                args=(active, max_vel, max_ang_vel),
-                daemon=True,
-            )
-            self._servo_thread.start()
-
-    def _set_cartesian_target(self, target_O_T_EE: Sequence[float]):
-        """Update the goal pose chased by the running Cartesian servo loop."""
-        if self._servo_kind != "cartesian" or self._servo_thread is None:
-            raise RuntimeError("Cartesian servo is not running; call _start_cartesian_servo() first")
-        target = self._validate_pose16(target_O_T_EE)
-        with self.servo_lock:
-            self.servo_target = target
-
-    def _stop_cartesian_servo(self, timeout: float = 2.0):
-        """Stop the running Cartesian servo loop and release control."""
-        if self._servo_kind != "cartesian" or self._servo_thread is None:
-            return
-        self._stop_servo_thread(timeout)
-
-    def _cartesian_servo_loop(self, active, max_vel: float, max_ang_vel: float):
-        max_acc = self.motion_cfg.max_cart_acc
-        max_ang_acc = self.motion_cfg.max_ang_acc
-        try:
-            while not self.stop_event.is_set():
-                state, duration = active.readOnce()
-                self._cache_state(state)
-                dt = duration.to_sec()
-
-                with self.servo_lock:
-                    target = self.servo_target.copy()
-
-                current_pose = np.array(state.O_T_EE, dtype=float)
-                next_pose, self._servo_lin_speed, self._servo_ang_speed = self._step_toward_pose(
-                    current_pose, target, dt, max_vel, max_ang_vel,
-                    self._servo_lin_speed, self._servo_ang_speed, max_acc, max_ang_acc,
-                )
-
-                cmd = CartesianPose(next_pose)
-                if self.stop_event.is_set():
-                    cmd.motion_finished = True
-                active.writeOnce(cmd)
-
-        except Exception as e:
-            print(f"[FrankaController] Cartesian servo loop error: {e}")
-            self.force_stop()
-
-        finally:
-            self.active_control = None
-            self.is_moving = False
-            self._servo_kind = None
-            self.servo_target = None
-            try:
-                self.update_idle_state()
-            except Exception:
-                pass
-
-    # -------------------------
     # Cartesian velocity servo (persistent realtime loop, internal)
     # -------------------------
     #
-    # Unlike _start_cartesian_servo() (which chases a target *pose*),
     # pylibfranka has a native velocity-control mode: start_cartesian_
     # velocity_control() + writeOnce(CartesianVelocities(...)). There's no
     # "distance to target" to brake against here -- set_ee_velocity() just
     # feeds a live commanded velocity (e.g. from a spacemouse), which this
-    # loop acceleration-ramps toward every cycle via the same _ramp_toward
-    # helper the position servos use.
+    # loop acceleration-ramps toward every cycle via the _ramp_toward helper
+    # (also used by _joint_servo_loop).
 
     def _start_cartesian_velocity_servo(
         self,
@@ -790,8 +656,7 @@ class FrankaController:
 
         Call _set_cartesian_velocity_target() from an outer loop to update
         the commanded velocity; call _stop_cartesian_velocity_servo() when
-        done. Do not call _move_ee()/_start_cartesian_servo() while this is
-        active.
+        done. Do not call _move_ee() while this is active.
         """
         with self.motion_lock:
             if self.is_moving:
@@ -1027,70 +892,6 @@ class FrankaController:
             self.is_moving = False
             self._servo_kind = None
             raise
-
-    def _step_toward_pose(
-        self,
-        current_pose: np.ndarray,
-        target_pose: np.ndarray,
-        dt: float,
-        max_vel: float,
-        max_ang_vel: float,
-        lin_speed: float,
-        ang_speed: float,
-        max_acc: float,
-        max_ang_acc: float,
-    ):
-        """
-        Return (next_pose, next_lin_speed, next_ang_speed), one servo cycle
-        closer to target_pose, with both speed AND acceleration rate-limited
-        (see _braking_speed / _ramp_toward for why: a naive max_vel*dt
-        position clip is a step-function speed profile, which libfranka's
-        reflex system rejects as a velocity/acceleration discontinuity).
-        """
-        cur_T = self._pose_to_matrix(current_pose)
-        tgt_T = self._pose_to_matrix(target_pose)
-
-        cur_pos = cur_T[:3, 3]
-        tgt_pos = tgt_T[:3, 3]
-        delta = tgt_pos - cur_pos
-        dist = float(np.linalg.norm(delta))
-
-        desired_speed = self._braking_speed(max_vel, max_acc, dist)
-        lin_speed = max(float(self._ramp_toward(lin_speed, desired_speed, max_acc * dt)), 0.0)
-
-        # Clamp the *position* step to not overshoot, but never force
-        # lin_speed itself to zero here -- that would be a second, separate
-        # discontinuity (speed dropping from nonzero straight to 0 in one
-        # cycle). Instead let it keep decaying smoothly via the ramp above,
-        # since desired_speed already -> 0 as dist -> 0.
-        if dist < 1e-9:
-            step_pos = tgt_pos
-        else:
-            step_dist = min(lin_speed * dt, dist)
-            step_pos = cur_pos + delta / dist * step_dist
-
-        q0 = self._rot_to_quat(cur_T[:3, :3])
-        q1 = self._rot_to_quat(tgt_T[:3, :3])
-        dot = float(np.clip(np.dot(q0, q1), -1.0, 1.0))
-        if dot < 0.0:
-            q1 = -q1
-            dot = -dot
-        angle = 2.0 * np.arccos(np.clip(dot, -1.0, 1.0))
-
-        desired_ang_speed = self._braking_speed(max_ang_vel, max_ang_acc, angle)
-        ang_speed = max(float(self._ramp_toward(ang_speed, desired_ang_speed, max_ang_acc * dt)), 0.0)
-
-        if angle < 1e-9:
-            alpha = 1.0
-        else:
-            step_angle = min(ang_speed * dt, angle)
-            alpha = step_angle / angle
-        step_R = self._quat_to_rot(self._slerp(q0, q1, alpha))
-
-        step_T = tgt_T.copy()
-        step_T[:3, :3] = step_R
-        step_T[:3, 3] = step_pos
-        return self._matrix_to_pose(step_T), lin_speed, ang_speed
 
     # -------------------------
     # Helpers
