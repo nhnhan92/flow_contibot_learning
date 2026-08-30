@@ -23,7 +23,8 @@ HULL_DOWNSAMPLE = 6  # keep your constant
 class plot_helper:
     def setup_plot(self, points: np.ndarray,draw_hull=False):
         points = np.asarray(points, dtype=float)
-        P_vis = points[::max(1, int(HULL_DOWNSAMPLE)), :]
+        # P_vis = points[::max(1, int(HULL_DOWNSAMPLE)), :]
+        P_vis = points
 
         mn = points.min(axis=0)
         mx = points.max(axis=0)

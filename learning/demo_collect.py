@@ -277,17 +277,18 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--no_camera', is_flag=True, help='Run without camera')
 @click.option('--camera_width', default=640, type=int, help='Camera width')
 @click.option('--camera_height', default=480, type=int, help='Camera height')
-@click.option('--camera_fps', default=30, type=int, help='Camera FPS')
+@click.option('--camera_fps', default=10, type=int, help='Camera FPS')
 @click.option('--frequency', '-f', default=10.0, type=float, help='Control Hz')
-@click.option('--flowbot_freqency', '-fb_freq', default=10.0, type=float, help='Control Hz for flowbot')
+@click.option('--flowbot_freqency', '-fb_freq', default=30.0, type=float, help='Control Hz for flowbot')
+@click.option('--flowbot_speed_factor', '-fspeed', default =1.5, type=float)
 @click.option('--max_pos_speed', default=0.05, type=float)
 @click.option('--max_rot_speed', default=0.05, type=float)
-@click.option('--deadzone', default=0.2, type=float, help='Spacemouse threshold')
+@click.option('--deadzone', default=0.1, type=float, help='Spacemouse threshold')
 @click.option('--release_frames', default=10, type=int,
               help='Frames to record after release (both-button press). '
                    'At 10 Hz the default of 10 gives 1 s of released state.')
 def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_height,
-         camera_fps, arduino_port, flowbot_freqency, frequency, max_pos_speed,
+         camera_fps, arduino_port, flowbot_freqency,flowbot_speed_factor, frequency, max_pos_speed,
          max_rot_speed, deadzone, release_frames):
 
     print("="*60)
@@ -359,7 +360,8 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
                  pwm_max= 26,
                  enable_plot = True,
                 frequency = flowbot_freqency,
-                max_pos_speed = 30)
+                max_pos_speed = 30,
+                draw_hull = True)
     fb.start()
 
     # Connect SpaceMouse
@@ -511,11 +513,13 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
                 target_pose = robot.get_tcp_pose()
 
             if button_status[1] and not button_status[0]:          # right btn: flowbot
-                xyz_fb = sm.get_latest_xyz()
+                cmd_sm = sm.get_latest_xyz()
+                xyz_fb = cmd_sm * flowbot_speed_factor
                 xyz_fb[2] = -xyz_fb[2]
-                copied_xyz = xyz_fb.copy()
-                xyz_fb[1] = -copied_xyz[0]  # for better visualization during teleop
-                xyz_fb[0] = -copied_xyz[1]
+                xyz_fb[1] = -xyz_fb[1]
+                # copied_xyz = xyz_fb.copy()
+                # xyz_fb[1] = -copied_xyz[0]  # for better visualization during teleop
+                # xyz_fb[0] = -copied_xyz[1]
                 xyz_fb = np.where(np.abs(xyz_fb) < deadzone, 0.0, xyz_fb)
                 fb.step(xyz_fb)
                 fb.update_plot()

@@ -35,6 +35,7 @@ unsigned long lastSampleMs = 0;
 unsigned long lastRampMs   = 0;
 
 const float PWM_STEP = 1; 
+const float PWM_STEP_FAST = 2; 
 
 // ADC averaging: take N samples and return the mean raw count
 const int ADC_AVG_N = 10;
@@ -90,11 +91,16 @@ float rampPwm(int current, int target, int init) {
     if (current < init_min){
       current = init_min;
     }
+    else if (current >= init_min && target - current>1){
+      current += PWM_STEP_FAST;
+    }
     else {      
-      current += PWM_STEP;
+      current = target;
         }
-  } else if (current > target && target > init) {
-    current -= PWM_STEP;
+  } else if (current - target > 1 && target > init) {
+    current -= PWM_STEP_FAST;
+  } else if (current - target = 1 && target > init) {
+    current = target;
   }
   else if (target <= init){
     current = 0;
