@@ -15,7 +15,7 @@ Usage:
         --flowbot_port /dev/ttyACM0
 
 Hardware:
-    - UR5e (RTDE servoL) or Franka (pylibfranka Cartesian velocity control)
+    - UR5e (RTDE servoL) or Franka (franky Cartesian velocity control)
     - Flowbot soft pneumatic manipulator (3 valves via Arduino serial)
     - Intel RealSense camera (auto-detected)
 
@@ -44,7 +44,7 @@ LEARNING_DIR = os.path.dirname(DEPLOY_DIR)
 PROJECT_ROOT = os.path.dirname(LEARNING_DIR)
 sys.path.insert(0, LEARNING_DIR)
 from hardware.ur5e_rtde import UR5eRobot
-from hardware.franka_control import FrankaController
+from hardware.franka_robot import FrankaRobot
 from hardware.flowbot import flowbot
 from hardware.realsense_camera import RealSenseCamera
 from train.eval import DiffusionPolicyInference
@@ -224,7 +224,7 @@ class RobotDeployment:
         # ── Robot arm ─────────────────────────────────────────────────────────
         print(f"\n[3/4] Connecting to {self.arm.upper()} at {robot_ip} ...")
         if self.is_franka:
-            self.robot = FrankaController(robot_ip=robot_ip, frequency=CONTROL_FREQ, use_gripper=False)
+            self.robot = FrankaRobot(robot_ip=robot_ip, frequency=CONTROL_FREQ, use_gripper=False)
         else:
             self.robot = UR5eRobot(robot_ip=robot_ip, frequency=CONTROL_FREQ)
         print(f"      {self.arm.upper()} connected")
@@ -419,9 +419,17 @@ class RobotDeployment:
                 self.robot.servo_tcp_pose(target_pose=tcp_target, velocity=SERVO_SPEED,
                                         acceleration=SERVO_ACCEL, dt=DT,
                                         lookahead_time=SERVO_LOOKAHEAD, gain=SERVO_GAIN)
-            # Franka note: when ur5_active is 0 we simply send nothing here --
-            # set_ee_velocity's own watchdog ramps to zero after ~0.5s of no
-            # calls, same behavior relied on in demo_collect.py's teleop loop.
+        elif self.is_franka:
+            # ur5_active == 0 this step -- franky's set_ee_velocity has no
+            # staleness watchdog (unlike FrankaController/pylibfranka, which
+            # auto-ramped to zero after ~0.5s of no calls): a
+            # CartesianVelocityMotion keeps running at its last commanded
+            # velocity indefinitely until explicitly superseded or stopped.
+            # Simply not calling set_ee_velocity() here would leave the arm
+            # coasting at whatever speed the last active step commanded,
+            # not just for ~0.5s but until something else happens to stop
+            # it -- explicitly stop every tick the arm shouldn't be moving.
+            self.robot.stop()
 
         # Gate flowbot PWM: only send when flowbot_active
         if op_mode_pred[1] == 1 and np.any(pwm_int >= PWM_MIN):

@@ -103,31 +103,39 @@ def check_move_tcp_pose(robot, delta: float, velocity: float, acceleration: floa
         return False
 
 
-def check_servo_tcp_pose(robot, delta: float, dt: float, steps: int,
-                          velocity: float, acceleration: float):
-    """Real-time incremental Cartesian servo up by `delta` metres in Z, then back."""
-    print("[5b/6] Testing servo_tcp_pose (real-time incremental) ...")
+def check_set_ee_velocity(robot, speed: float, duration: float, hold_dt: float,
+                           max_vel: float, max_ang_vel: float):
+    """Hold a constant +Z EE velocity for `duration`s, then the reverse, then stop.
+
+    Mirrors test_franka_control.py's check_set_ee_velocity (FrankaController /
+    pylibfranka) so the two backends can be compared directly on hardware.
+    """
+    print("[5b/6] Testing set_ee_velocity (real-time velocity control) ...")
     try:
         start = robot.get_tcp_pose()
-        target_up = start.copy()
-        target_up[2] += delta
+        steps = max(1, int(duration / hold_dt))
 
         for _ in range(steps):
-            robot.servo_tcp_pose(target_up, velocity=velocity, acceleration=acceleration, dt=dt)
-            time.sleep(dt)
+            robot.set_ee_velocity([0.0, 0.0, speed], max_vel=max_vel, max_ang_vel=max_ang_vel)
+            time.sleep(hold_dt)
         mid = robot.get_tcp_pose()
-        print(f"      Servoed up to Z {mid[2]:.4f} (target {target_up[2]:.4f})")
+        print(f"      Held +Z velocity {speed:.3f} m/s for {duration:.2f}s: Z {start[2]:.4f} -> {mid[2]:.4f}")
 
         for _ in range(steps):
-            robot.servo_tcp_pose(start, velocity=velocity, acceleration=acceleration, dt=dt)
-            time.sleep(dt)
+            robot.set_ee_velocity([0.0, 0.0, -speed], max_vel=max_vel, max_ang_vel=max_ang_vel)
+            time.sleep(hold_dt)
         back = robot.get_tcp_pose()
-        print(f"      Servoed back to Z {back[2]:.4f} (start was {start[2]:.4f})")
+        print(f"      Held -Z velocity for {duration:.2f}s: Z {mid[2]:.4f} -> {back[2]:.4f} (start was {start[2]:.4f})")
         return True
     except Exception as e:
         print(f"      FAIL: {e}")
         traceback.print_exc()
         return False
+    finally:
+        try:
+            robot.stop()
+        except Exception:
+            pass
 
 
 def check_move_joints(robot, delta: float, velocity: float, acceleration: float):
@@ -176,11 +184,14 @@ def main():
                          help="Cartesian test displacement in metres (default 0.02 = 2cm).")
     parser.add_argument("--joint_delta", type=float, default=0.5,
                          help="Joint test displacement in radians (default 0.1).")
-    parser.add_argument("--velocity", type=float, default=0.01, help="Test move velocity.")
-    parser.add_argument("--acceleration", type=float, default=0.01, help="Test move acceleration.")
-    parser.add_argument("--servo_steps", type=int, default=20,
-                         help="Number of servo_tcp_pose ticks per direction.")
-    parser.add_argument("--servo_dt", type=float, default=0.1, help="Servo tick period (s).")
+    parser.add_argument("--velocity", type=float, default=0.05, help="Test move velocity.")
+    parser.add_argument("--acceleration", type=float, default=0.05, help="Test move acceleration.")
+    parser.add_argument("--ee_velocity", type=float, default=0.01,
+                         help="set_ee_velocity test speed in m/s.")
+    parser.add_argument("--ee_velocity_duration", type=float, default=1.0,
+                         help="How long to hold each velocity direction (s).")
+    parser.add_argument("--ee_velocity_dt", type=float, default=0.05,
+                         help="Interval between set_ee_velocity calls (s).")
     args = parser.parse_args()
 
     print("=" * 50)
@@ -207,7 +218,8 @@ def main():
         if not args.yes:
             print(f"\nAbout to move the real Franka arm at {args.ip}:")
             print(f"  - Cartesian +{args.delta*1000:.0f}mm in Z and back (move_tcp_pose)")
-            print(f"  - Cartesian +{args.delta*1000:.0f}mm in Z and back (servo_tcp_pose)")
+            print(f"  - Hold {args.ee_velocity:.3f} m/s in +Z then -Z for "
+                  f"{args.ee_velocity_duration:.2f}s each (set_ee_velocity)")
             print(f"  - Joint 7 +{args.joint_delta:.3f} rad and back (move_joints)")
             confirm = input("Proceed? [y/N] ").strip().lower()
             if confirm != "y":
@@ -215,15 +227,16 @@ def main():
                 robot.disconnect()
                 sys.exit(1)
 
-        # results["move_tcp_pose"] = check_move_tcp_pose(
-        #     robot, args.delta, args.velocity, args.acceleration)
-        # results["servo_tcp_pose"] = check_servo_tcp_pose(
-        #     robot, args.delta, args.servo_dt, args.servo_steps, args.velocity, args.acceleration)
+        results["move_tcp_pose"] = check_move_tcp_pose(
+            robot, args.delta, args.velocity, args.acceleration)
+        results["set_ee_velocity"] = check_set_ee_velocity(
+            robot, args.ee_velocity, args.ee_velocity_duration, args.ee_velocity_dt,
+            args.velocity, args.acceleration)
         results["move_joints"] = check_move_joints(
             robot, args.joint_delta, args.velocity, args.acceleration)
     else:
         print("\n[5/6] Skipping motion tests (pass --move to exercise "
-              "move_tcp_pose/servo_tcp_pose/move_joints).")
+              "move_tcp_pose/set_ee_velocity/move_joints).")
 
     results["recovery"] = check_error_recovery(robot)
 

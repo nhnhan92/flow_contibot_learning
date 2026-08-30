@@ -9,17 +9,28 @@ Synchronized data collection:
 - All with SAME timestamp
 
 Usage:
-     python scripts/collect_demos_with_camera.py     -o data/real_data     --robot_ip 192.168.11.20     --camera_width 640     --camera_height 480     --camera_fps 30
+     python demo_collect.py -o data/real_data --arm ur5 --robot_ip 150.65.146.87
+     python demo_collect.py -o data/real_data --arm franka --robot_ip 172.16.0.2
 
+Franka: driven via FrankaRobot (franky -- see learning/hardware/franka_robot.py).
+    FrankaController (pylibfranka, learning/hardware/franka_control.py) was
+    evaluated as an alternative backend and is kept in the tree for
+    reference, but is no longer wired up here. Recorded "action" is the
+    arm's absolute target TCP pose for UR5e, but the linear EE velocity
+    actually sent to set_ee_velocity() for Franka (no absolute-position
+    streaming primitive) -- a checkpoint trained on one arm is not valid
+    for the other.
 
 Controls:
     SpaceMouse:
         - Move: Robot XYZ
-        - Left button: Toggle gripper
-        - Right button: Rotation mode
+        - Left button: Move robot (UR5e/Franka)
+        - Right button: Move Flowbot
+        - Both buttons: Release (Flowbot depressurizes; robot holds position)
     Keyboard:
         - 'C': Start recording
-        - 'S': Stop recording
+        - 'S': Stop recording (also saves the episode and returns to init_pose)
+        - 'R': Reset robot + Flowbot to init_pose without saving
         - 'Q': Quit
 """
 
@@ -33,7 +44,7 @@ import scipy.spatial.transform as st
 from pathlib import Path
 from zarr.codecs.numcodecs import Blosc
 from hardware.ur5e_rtde import UR5eRobot
-from hardware.franka_control import FrankaController
+from hardware.franka_robot import FrankaRobot
 from hardware.spacemouse import _build_spacemouse
 from hardware.flowbot import flowbot
 from hardware.realsense_camera import RealSenseCamera
@@ -177,17 +188,11 @@ def _servo_toward(arm, is_franka, target_pose, dt, velocity, acceleration,
     UR5eRobot: servo_tcp_pose(target_pose, ...) -- RTDE servoL tracks the
     absolute target directly.
 
-    FrankaController: has no absolute-position streaming primitive (that's
-    why servo_tcp_pose was removed from it -- see franka_control.py), only
-    set_ee_velocity(). So the absolute target gets translated into an
+    FrankaRobot (franky): has no absolute-position streaming primitive,
+    only set_ee_velocity(). So the absolute target gets translated into an
     error-based feed-forward linear velocity, (target - current)/dt,
     clipped to `velocity` m/s. Angular velocity is left at zero, matching
     how rotation-via-spacemouse is already disabled on the UR5e path here.
-
-    Note: set_ee_velocity's max_vel/max_ang_vel caps only take effect on
-    the *first* call that opens the session (it stays open across ticks/
-    calls after that) -- keep `velocity`/`acceleration` consistent across
-    call sites for a given run if you rely on those caps.
 
     Returns
     -------
@@ -222,7 +227,7 @@ def _servo_toward(arm, is_franka, target_pose, dt, velocity, acceleration,
 
 
 def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
-                    velocity=0.1, acceleration=0.1, gain=200, lookahead_time=0.15,
+                    velocity=0.05, acceleration=0.1, gain=200, lookahead_time=0.15,
                     is_franka=False):
     """Move arm from start_pose to goal_pose.
 
@@ -230,9 +235,9 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
     seconds, streaming each waypoint via servo_tcp_pose (RTDE servoL) at
     ~1/dt Hz.
 
-    FrankaController: one direct move_tcp_pose() call. It's a single
+    FrankaRobot (franky): one direct move_tcp_pose() call. It's a single
     blocking point-to-point move with its own smooth, independently-timed
-    translation+rotation trapezoidal profile (see franka_control.py) --
+    translation+rotation trapezoidal profile (see franka_robot.py) --
     already the well-tested primitive for "go to this pose," so there's no
     need to hand-roll interpolation or open a set_ee_velocity session for a
     one-shot move like this."""
@@ -240,9 +245,9 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
     goal_pose  = np.asarray(goal_pose,  dtype=float).copy()
 
     if is_franka:
-        # move_tcp_pose() refuses to start while the persistent
-        # set_ee_velocity() servo session (opened by spacemouse driving)
-        # is still open -- close it first (no-op if nothing is running).
+        # Cleanly ramp down any active set_ee_velocity() session (opened by
+        # spacemouse driving) before handing off to a blocking position
+        # move -- no-op if nothing is running.
         arm.stop()
         arm.move_tcp_pose(goal_pose, velocity=velocity, acceleration=acceleration)
         return
@@ -263,7 +268,7 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 
 @click.command()
 @click.option('--output', '-o', required=True, default=None, help='Output folder name')
-@click.option('--arm', default='ur5', type=click.Choice(['ur5', 'franka'], case_sensitive=False),
+@click.option('--arm', default='franka', type=click.Choice(['ur5', 'franka'], case_sensitive=False),
               help='Which robotic arm to use: "ur5" (default) or "franka".')
 @click.option('--robot_ip', '-ri', default=None,
               help='Arm IP. Default: 150.65.146.87 (UR5) or 172.16.0.2 (Franka).')
@@ -275,7 +280,7 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--camera_fps', default=30, type=int, help='Camera FPS')
 @click.option('--frequency', '-f', default=10.0, type=float, help='Control Hz')
 @click.option('--flowbot_freqency', '-fb_freq', default=10.0, type=float, help='Control Hz for flowbot')
-@click.option('--max_pos_speed', default=0.03, type=float)
+@click.option('--max_pos_speed', default=0.05, type=float)
 @click.option('--max_rot_speed', default=0.05, type=float)
 @click.option('--deadzone', default=0.2, type=float, help='Spacemouse threshold')
 @click.option('--release_frames', default=10, type=int,
@@ -335,7 +340,7 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
     is_franka = arm.lower() == "franka"
     print(f"\nConnecting to {arm.upper()} at {ip} ...")
     if is_franka:
-        robot = FrankaController(robot_ip=ip, frequency=frequency, use_gripper=False)
+        robot = FrankaRobot(robot_ip=ip, frequency=frequency, use_gripper=False)
     else:
         robot = UR5eRobot(robot_ip=ip, frequency=frequency)
     # keep `ur5` as alias so the rest of the code works unchanged
@@ -387,7 +392,7 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
 
     last_action = init_pose.copy() if not is_franka else np.zeros(6)
 
-    move_2_init_pos(robot, tcp_pose, init_pose, dt=dt, duration=5.0, gain=150, is_franka=is_franka)
+    move_2_init_pos(robot, tcp_pose, init_pose, dt=dt, velocity=0.05, duration=5.0, gain=150, is_franka=is_franka)
     tcp_pose = robot.get_tcp_pose()
     print(f"\nInitial pose: [{', '.join([f'{x:.3f}' for x in tcp_pose])}]")
     print("\nReady! Press 'C' to start recording.\n")
@@ -516,15 +521,17 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
                 fb.update_plot()
 
             elif button_status[0] and not button_status[1]:        # left btn: UR5e/Franka
-                xyz_ur5 = sm.get_latest_xyz()
-
+                cmd_arm = sm.get_latest_xyz()
+                cpied_cmd = cmd_arm.copy()
+                cmd_arm[0] = -cmd_arm[1]  # X
+                cmd_arm[1] = cpied_cmd[0] # Y
                 if is_franka:
                     # Command velocity directly from stick deflection instead
                     # of routing through a target_pose/position-error
                     # round-trip (_servo_toward): that indirection exists for
                     # UR5e's absolute-position tracker, but for Franka's
                     # native velocity primitive it creates a P-loop that
-                    # fights FrankaController's own accel-limited ramp --
+                    # fights the backend's own accel-limited ramp --
                     # target_pose keeps advancing every tick faster than the
                     # accel cap lets the arm follow, the commanded velocity
                     # saturates and overshoots, error goes negative, and the
@@ -534,7 +541,19 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
                     # the feedback loop entirely: held at max deflection, the
                     # commanded velocity is constant and only the ramp (not
                     # a position error) shapes the acceleration.
-                    lin_vel = xyz_ur5[:3] * max_pos_speed
+                    lin_vel = cmd_arm[:3] * max_pos_speed
+                    # Each axis is independently bounded to max_pos_speed
+                    # above, but the combined vector's norm can still reach
+                    # up to max_pos_speed*sqrt(3) on a diagonal push --
+                    # set_ee_velocity clips that norm to max_vel internally
+                    # before sending, so replicate the same clip here first.
+                    # Otherwise last_action (the raw, pre-clip vector) would
+                    # disagree with what the robot actually executed on any
+                    # near-max diagonal push, breaking the train/deploy
+                    # action-consistency this recording scheme relies on.
+                    lin_speed = float(np.linalg.norm(lin_vel))
+                    if lin_speed > max_pos_speed and lin_speed > 1e-9:
+                        lin_vel = lin_vel / lin_speed * max_pos_speed
                     try:
                         robot.set_ee_velocity(lin_vel, angular_velocity=np.zeros(3),
                                                max_vel=max_pos_speed, max_ang_vel=max_rot_speed)
@@ -545,8 +564,8 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
                         print(f"\nControl error: {e}")
                         target_pose = robot.get_tcp_pose()
                 else:
-                    vel_linear  = xyz_ur5[:3] * max_pos_speed * dt
-                    vel_angular = xyz_ur5[3:] * max_rot_speed * dt
+                    vel_linear  = cmd_arm[:3] * max_pos_speed * dt
+                    vel_angular = cmd_arm[3:] * max_rot_speed * dt
                     vel_angular[:] = 0
 
                     target_pose[:3] += vel_linear
