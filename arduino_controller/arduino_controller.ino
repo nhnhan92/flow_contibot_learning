@@ -85,27 +85,29 @@ void applyPwm() {
   analogWrite(VALVE2_PIN, pwm2_cur);
   analogWrite(VALVE3_PIN, pwm3_cur);
 }
-// Ramp one PWM value toward its target
+// Ramp one PWM value toward its target. Steps by PWM_STEP_FAST while the
+// target is still more than one count away ("far"); once within one count,
+// snaps straight to it (equivalent to a final PWM_STEP=1 step).
 float rampPwm(int current, int target, int init) {
-  if (current < target && target > init) {
-    if (current < init_min){
-      current = init_min;
-    }
-    else if (current >= init_min && target - current>1){
-      current += PWM_STEP_FAST;
-    }
-    else {      
-      current = target;
-        }
-  } else if (current - target > 1 && target > init) {
-    current -= PWM_STEP_FAST;
-  } else if (current - target = 1 && target > init) {
-    current = target;
+  if (target <= init) {
+    return 0;
   }
-  else if (target <= init){
-    current = 0;
+  if (current < target) {
+    if (current < init_min) {
+      return init_min;  // jump past the pre-open deadband in one step
+    }
+    if (target - current > 1) {
+      return current + PWM_STEP_FAST;  // still far -- fast step
+    }
+    return target;  // within one step -- close the gap directly
   }
-  return current;
+  if (current > target) {
+    if (current - target > 1) {
+      return current - PWM_STEP_FAST;  // still far -- fast step
+    }
+    return target;  // within one step -- close the gap directly
+  }
+  return current;  // already at target
 }
 
 void updatePwmRamps() {
