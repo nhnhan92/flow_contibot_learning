@@ -58,23 +58,29 @@ def _pose6_to_affine(pose6) -> "Affine":
 def _dyn_factor(velocity: float, acceleration: float, floor: float = 0.01) -> "RelativeDynamicsFactor":
     """
     Build a franky RelativeDynamicsFactor with velocity and acceleration
-    scaled independently (jerk left unscaled at 1.0).
+    scaled independently, jerk capped to the acceleration factor.
 
-    Collapsing to a single min(velocity, acceleration) factor (the previous
+    Collapsing to a single min(velocity, acceleration) factor (an earlier
     approach here) let a small `acceleration` value -- physical-units-style
     callers commonly pass something like 0.01 as if it were a literal
     m/s^2, not a 0-1 dynamics fraction -- silently throttle *velocity* too,
-    and dragged jerk down to the same tiny fraction, which starves the
-    ramp-up phase and makes the whole move look stalled rather than just
-    slow. Scaling velocity/acceleration separately (and leaving jerk alone)
-    keeps a small acceleration factor from taking the rest of the motion
-    down with it.
+    making the whole move look stalled rather than just slow. Scaling
+    velocity/acceleration separately fixes that.
+
+    Jerk was then left fully unscaled (1.0) -- but that's its own failure
+    mode: with velocity/acceleration both small (e.g. 0.02/0.1) and jerk at
+    100%, Ruckig can plan a deceleration phase so abrupt the real robot's
+    tracking can't keep up by the exact final control cycle, tripping
+    libfranka's cartesian_motion_generator_*_discontinuity reflexes
+    ("Motion finished commanded, but the robot is still moving!").
+    Capping jerk to the acceleration factor keeps the rate-of-change of
+    acceleration proportioned to the acceleration ceiling itself, without
+    reintroducing the velocity-throttling bug above (jerk is tied to
+    acceleration, not to velocity).
     """
-    return RelativeDynamicsFactor(
-        float(np.clip(velocity, floor, 1.0)),
-        float(np.clip(acceleration, floor, 1.0)),
-        1.0,
-    )
+    vel_f = float(np.clip(velocity, floor, 1.0))
+    acc_f = float(np.clip(acceleration, floor, 1.0))
+    return RelativeDynamicsFactor(vel_f, acc_f, acc_f)
 
 
 def _affine_to_pose6(affine) -> np.ndarray:
@@ -258,6 +264,15 @@ class FrankaRobot:
         self._robot.relative_dynamics_factor = _dyn_factor(velocity, acceleration)
         try:
             self._robot.move(motion, asynchronous=asynchronous)
+        except Exception as e:
+            # A reflex (e.g. cartesian_motion_generator_*_discontinuity)
+            # leaves the robot in a fault state that blocks all further
+            # motion until recovered -- match set_ee_velocity()'s pattern
+            # instead of leaving the caller to figure that out from a bare
+            # exception.
+            print(f"[FrankaRobot] move_tcp_pose motion error: {e}")
+            self._robot.recover_from_errors()
+            raise
         finally:
             self._robot.relative_dynamics_factor = prev_dyn
 
@@ -326,7 +341,12 @@ class FrankaRobot:
         """
         target_joints = list(np.asarray(target_joints, dtype=float).reshape(7))
         motion = JointMotion(target_joints, relative_dynamics_factor=_dyn_factor(velocity, acceleration))
-        self._robot.move(motion, asynchronous=asynchronous)
+        try:
+            self._robot.move(motion, asynchronous=asynchronous)
+        except Exception as e:
+            print(f"[FrankaRobot] move_joints motion error: {e}")
+            self._robot.recover_from_errors()
+            raise
 
     def stop(self):
         """
