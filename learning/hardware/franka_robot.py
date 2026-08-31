@@ -258,14 +258,7 @@ class FrankaRobot:
         asynchronous : If True return immediately.
         """
         target_pose = np.asarray(target_pose, dtype=float)
-        # Preserve the arm's current elbow (redundant joint-3) configuration
-        # instead of leaving it to the planner to pick freely. This is a
-        # 7-DOF arm: an unconstrained elbow choice for the target pose can
-        # require a large, discontinuous null-space swing to reach even a
-        # modest Cartesian target, tripping joint_velocity_discontinuity
-        # (bundled with the cartesian_motion_generator_*_discontinuity
-        # reflexes) regardless of how conservatively translation/rotation
-        # dynamics are scaled.
+
         current_elbow = self._robot.current_pose.elbow_state
         target_robot_pose = RobotPose(_pose6_to_affine(target_pose), current_elbow)
         motion = CartesianMotion(target_robot_pose, ReferenceType.Absolute)
@@ -275,11 +268,7 @@ class FrankaRobot:
         try:
             self._robot.move(motion, asynchronous=asynchronous)
         except Exception as e:
-            # A reflex (e.g. cartesian_motion_generator_*_discontinuity)
-            # leaves the robot in a fault state that blocks all further
-            # motion until recovered -- match set_ee_velocity()'s pattern
-            # instead of leaving the caller to figure that out from a bare
-            # exception.
+
             print(f"[FrankaRobot] move_tcp_pose motion error: {e}")
             self._robot.recover_from_errors()
             raise
