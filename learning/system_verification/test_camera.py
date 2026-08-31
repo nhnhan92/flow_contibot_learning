@@ -464,8 +464,8 @@ def test_dual_streams(
 @click.option('--rgb-only', is_flag=True, help='Only test RGB stream (no depth)')
 @click.option('--dual', is_flag=True, help='Test the global + wrist cameras together '
               '(same connection path as demo_collect.py) instead of the default single-camera test.')
-@click.option('--camera_serial_global', default=None, help='Serial for the global camera (--dual only).')
-@click.option('--camera_serial_wrist', default=None, help='Serial for the wrist camera (--dual only).')
+@click.option('--camera_serial_global', default='051222061185', help='Serial for the global camera (--dual only).')
+@click.option('--camera_serial_wrist', default='827112072398', help='Serial for the wrist camera (--dual only).')
 @click.pass_context
 def main(ctx, width, height, fps, duration, display, target_width, target_height, rgb_only,
          dual, camera_serial_global, camera_serial_wrist):
@@ -505,6 +505,7 @@ def main(ctx, width, height, fps, duration, display, target_width, target_height
             width = 640
         if ctx.get_parameter_source('height') == src.DEFAULT:
             height = 480
+
         success = test_dual_streams(
             serial_global=camera_serial_global,
             serial_wrist=camera_serial_wrist,
