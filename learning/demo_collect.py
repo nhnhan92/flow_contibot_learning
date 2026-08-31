@@ -288,7 +288,8 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
               '--camera_serial_wrist unset makes which physical camera binds to which role '
               'unpredictable. Look up serials with system_verification/test_camera.py.')
 @click.option('--camera_serial_wrist', help='RealSense serial for the wrist camera. See --camera_serial_global.')
-@click.option('--no_camera', is_flag=True, help='Run without camera')
+@click.option('--no_camera_wrist', is_flag=True, help='Run without wrist_camera')
+@click.option('--no_camera_global', is_flag=True, help='Run without global_camera')
 @click.option('--camera_width', default=640, type=int, help='Camera width (both cameras)')
 @click.option('--camera_height', default=480, type=int, help='Camera height (both cameras)')
 @click.option('--camera_fps', default=30, type=int,
@@ -307,7 +308,7 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--release_frames', default=10, type=int,
               help='Frames to record after release (both-button press). '
                    'At 10 Hz the default of 10 gives 1 s of released state.')
-def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_camera,
+def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_camera_wrist,no_camera_global,
          camera_width, camera_height, camera_fps, arduino_port, flowbot_freqency,
          flowbot_speed_factor, frequency, max_pos_speed, max_rot_speed, deadzone, release_frames):
 
@@ -332,9 +333,9 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
     # back to --no_camera entirely if either fails to connect.
     camera_global = None
     camera_wrist = None
-    with_camera = not no_camera
-
-    if with_camera:
+    with_camera_wrist = not no_camera_wrist
+    with_camera_global = not no_camera_global
+    if with_camera_global or with_camera_wrist:
         try:
             print("\nInitializing global camera...")
             camera_global = RealSenseCamera(
