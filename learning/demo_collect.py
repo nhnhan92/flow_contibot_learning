@@ -451,7 +451,7 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
 
     last_action = init_pose.copy() if not is_franka else np.zeros(7)
 
-    move_2_init_pos(robot, tcp_pose, init_pose, dt=dt, velocity=0.03, duration=5.0, gain=150, is_franka=is_franka)
+    move_2_init_pos(robot, tcp_pose, init_pose, dt=dt, velocity=0.03, duration=2.0, gain=150, is_franka=is_franka)
     tcp_pose = robot.get_tcp_pose()
     print(f"\nInitial pose: [{', '.join([f'{x:.3f}' for x in tcp_pose])}]")
     print("\nReady! Press 'C' to start recording.\n")
@@ -480,7 +480,7 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                         fb.reset()  # Reset flowbot
                         fb.update_plot()
                         tcp_pose = ur5.get_tcp_pose()
-                        move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, velocity=0.03, duration=5.0, gain=150, is_franka=is_franka)
+                        move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, velocity=0.1, duration=2.0, gain=150, is_franka=is_franka)
                         print(f"✅ Robot reset to initial pose!\n")
                         target_pose = init_pose.copy()
                         last_action = init_pose.copy() if not is_franka else np.zeros(7)
@@ -512,7 +512,7 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                         time.sleep(1.0)
                         try:
                             tcp_pose = ur5.get_tcp_pose()
-                            move_2_init_pos(ur5, tcp_pose, init_pose, velocity=0.03, dt=dt, duration=5.0, gain=150, is_franka=is_franka)
+                            move_2_init_pos(ur5, tcp_pose, init_pose, velocity=0.1, dt=dt, duration=2.0, gain=150, is_franka=is_franka)
                             print(f"✅ Robot returned to start pose!\n")
                             target_pose = init_pose.copy()
                             last_action = init_pose.copy() if not is_franka else np.zeros(7)
