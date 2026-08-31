@@ -589,9 +589,11 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
 
             elif button_status[0] and button_status[1]:            # both btns: release
                 print("======== RELEASING =========")
+                fb.release()      # sends 'r' hardware command
+                time.sleep(0.5)
                 fb.reset()        # sets last_pwm = [0,0,0] and sends "0 0 0"
                 fb.update_plot()
-                fb.release()      # sends 'r' hardware command
+                
  
                 if is_recording:
                     print(f"  Recording {release_frames} release frames ...")
