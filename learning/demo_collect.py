@@ -55,7 +55,15 @@ import tty
 import platform
 
 class DataBuffer:
-    """Buffer for collecting episode data with camera"""
+    """Buffer for collecting episode data with camera(s).
+
+    camera_0 = global camera (matches the existing single-camera dataset
+    schema every downstream training/analysis script hardcodes -- see
+    learning/train/dataset.py etc.). camera_1 = wrist camera, a new,
+    additive stream: it's recorded alongside camera_0 but the training
+    pipeline doesn't consume it yet -- that's a separate follow-up if/when
+    the model is updated to take both views.
+    """
 
     def __init__(self, with_camera=False):
         self.with_camera = with_camera
@@ -69,10 +77,11 @@ class DataBuffer:
         self.pwm_signals = []
         self.operation_modes = []
         if self.with_camera:
-            self.camera_frames = []  # RGB images
+            self.camera_frames = []        # RGB images, global camera (camera_0)
+            self.camera_frames_wrist = []  # RGB images, wrist camera (camera_1)
 
     def add(self, timestamp, robot_state, joint_state, pwm_signals, action,
-            operation_mode=None, camera_frame=None):
+            operation_mode=None, camera_frame=None, camera_frame_wrist=None):
         self.timestamps.append(timestamp)
         self.robot_states.append(robot_state.copy())
         self.joint_states.append(joint_state.copy())
@@ -83,10 +92,10 @@ class DataBuffer:
         else:
             self.operation_modes.append(np.array([0, 0], dtype=np.uint8))
         if self.with_camera:
-            if camera_frame is not None:
-                self.camera_frames.append(camera_frame.copy())
-            else:
-                raise ValueError("Camera frame required when with_camera=True")
+            if camera_frame is None or camera_frame_wrist is None:
+                raise ValueError("Both camera frames are required when with_camera=True")
+            self.camera_frames.append(camera_frame.copy())
+            self.camera_frames_wrist.append(camera_frame_wrist.copy())
 
     def __len__(self):
         return len(self.timestamps)
@@ -105,6 +114,7 @@ class DataBuffer:
         if self.with_camera:
             # Stack frames: (T, H, W, 3)
             data['camera_0'] = np.array(self.camera_frames)
+            data['camera_1'] = np.array(self.camera_frames_wrist)
 
         return data
 
@@ -148,7 +158,7 @@ def save_episode(zarr_root, episode_data):
     for key, value in episode_data.items():
         if key not in data_group:
             # Create dataset
-            if key == 'camera_0':
+            if key in ('camera_0', 'camera_1'):
                 # Images: use compression
                 data_group.create_array(
                     key,
@@ -273,11 +283,15 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--robot_ip', '-ri', default=None,
               help='Arm IP. Default: 150.65.146.87 (UR5) or 172.16.0.2 (Franka).')
 @click.option('--arduino_port', default="/dev/ttyACM0")
-@click.option('--camera_serial', help='RealSense serial (auto-detect if None)')
+@click.option('--camera_serial_global', help='RealSense serial for the global (scene) camera. '
+              'Required when both cameras are connected -- leaving this and/or '
+              '--camera_serial_wrist unset makes which physical camera binds to which role '
+              'unpredictable. Look up serials with system_verification/test_camera.py.')
+@click.option('--camera_serial_wrist', help='RealSense serial for the wrist camera. See --camera_serial_global.')
 @click.option('--no_camera', is_flag=True, help='Run without camera')
-@click.option('--camera_width', default=640, type=int, help='Camera width')
-@click.option('--camera_height', default=480, type=int, help='Camera height')
-@click.option('--camera_fps', default=10, type=int, help='Camera FPS')
+@click.option('--camera_width', default=640, type=int, help='Camera width (both cameras)')
+@click.option('--camera_height', default=480, type=int, help='Camera height (both cameras)')
+@click.option('--camera_fps', default=10, type=int, help='Camera FPS (both cameras)')
 @click.option('--frequency', '-f', default=10.0, type=float, help='Control Hz')
 @click.option('--flowbot_freqency', '-fb_freq', default=30.0, type=float, help='Control Hz for flowbot')
 @click.option('--flowbot_speed_factor', '-fspeed', default =1.5, type=float)
@@ -287,9 +301,9 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--release_frames', default=10, type=int,
               help='Frames to record after release (both-button press). '
                    'At 10 Hz the default of 10 gives 1 s of released state.')
-def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_height,
-         camera_fps, arduino_port, flowbot_freqency,flowbot_speed_factor, frequency, max_pos_speed,
-         max_rot_speed, deadzone, release_frames):
+def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_camera,
+         camera_width, camera_height, camera_fps, arduino_port, flowbot_freqency,
+         flowbot_speed_factor, frequency, max_pos_speed, max_rot_speed, deadzone, release_frames):
 
     print("="*60)
     print("   PICK-PLACE DATA COLLECTION WITH CAMERA")
@@ -305,15 +319,28 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
         output_dir = Path(output)
         output_dir.mkdir(parents=True, exist_ok=True)
         print(f"\nOutput: {output_dir}")
-    # Initialize camera
-    camera = None
+    # Initialize cameras (global + wrist). All-or-nothing: the dataset schema
+    # records both streams every frame, so partial (one-of-two) connection
+    # would leave camera_1 without valid data for whatever fraction of the
+    # episode the missing camera was down -- simpler and safer to just fall
+    # back to --no_camera entirely if either fails to connect.
+    camera_global = None
+    camera_wrist = None
     with_camera = not no_camera
 
     if with_camera:
         try:
-            print("\nInitializing camera...")
-            camera = RealSenseCamera(
-                serial_number=camera_serial,
+            print("\nInitializing global camera...")
+            camera_global = RealSenseCamera(
+                serial_number=camera_serial_global,
+                width=camera_width,
+                height=camera_height,
+                fps=camera_fps,
+                enable_depth=False,
+            )
+            print("\nInitializing wrist camera...")
+            camera_wrist = RealSenseCamera(
+                serial_number=camera_serial_wrist,
                 width=camera_width,
                 height=camera_height,
                 fps=camera_fps,
@@ -324,7 +351,10 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
             print(f"⚠️  Camera failed: {e}")
             print("   Continuing without camera...")
             with_camera = False
-            camera = None
+            if camera_global is not None:
+                camera_global.stop()
+            camera_global = None
+            camera_wrist = None
     else:
         print("\nSkipping camera (--no_camera or not available)")
 
@@ -445,7 +475,7 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
                         is_recording = False
                         print(f"\n>>> Episode {ep_id} SAVED ({len(episode_buffer)} steps)")
                         if with_camera:
-                            print(f"    Camera: {ep_data['camera_0'].shape}")
+                            print(f"    Camera global: {ep_data['camera_0'].shape}  wrist: {ep_data['camera_1'].shape}")
                         print(f"    Total episodes: {episode_count}")
 
                         # Auto-return to start pose
@@ -607,13 +637,15 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
                         time.sleep(dt)
 
                         rel_frame = None
-                        if with_camera and camera:
+                        rel_frame_wrist = None
+                        if with_camera and camera_global and camera_wrist:
                             try:
-                                rel_frame, _ = camera.get_frames()
+                                rel_frame, _ = camera_global.get_frames()
+                                rel_frame_wrist, _ = camera_wrist.get_frames()
                             except Exception:
                                 pass
 
-                        if with_camera and rel_frame is None:
+                        if with_camera and (rel_frame is None or rel_frame_wrist is None):
                             continue
 
                         rel_tcp    = ur5.get_tcp_pose()
@@ -626,6 +658,7 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
                             pwm_signals=fb.last_pwm, # = [0,0,0] after reset
                             operation_mode=np.array([1, 1], dtype=np.uint8),
                             camera_frame=rel_frame,
+                            camera_frame_wrist=rel_frame_wrist,
                         )
                     print(f"  Release recorded ({release_frames} steps, PWM={fb.last_pwm.tolist()})")
 
@@ -637,9 +670,11 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
 
             # ── 4. Read ALL observations after robot has settled ──────────────
             camera_frame = None
-            if with_camera and camera:
+            camera_frame_wrist = None
+            if with_camera and camera_global and camera_wrist:
                 try:
-                    camera_frame, _ = camera.get_frames()
+                    camera_frame, _ = camera_global.get_frames()
+                    camera_frame_wrist, _ = camera_wrist.get_frames()
                 except Exception as e:
                     print(f"\n⚠️  Camera error: {e}\n")
 
@@ -647,8 +682,8 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
             # Skip idle frames (no button pressed) — they represent operator hesitation,
             # not intentional actions, and would teach the model to stall mid-task.
             if is_recording and np.any(op_mode):
-                if with_camera and camera_frame is None:
-                    print("\n⚠️  Warning: No camera frame!\n")
+                if with_camera and (camera_frame is None or camera_frame_wrist is None):
+                    print("\n⚠️  Warning: Missing a camera frame!\n")
                     continue
 
                 current_tcp = ur5.get_tcp_pose()
@@ -660,7 +695,8 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
                     action=last_action,
                     pwm_signals=prev_pwm,   # command from previous step (matches current image/tcp)
                     operation_mode=op_mode,
-                    camera_frame=camera_frame
+                    camera_frame=camera_frame,
+                    camera_frame_wrist=camera_frame_wrist,
                 )
 
             # ── 6. Status ─────────────────────────────────────────────────────
@@ -668,7 +704,7 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
             if iter_count % (frequency * 2) == 0:
                 status  = "REC" if is_recording else "---"
                 n_steps = len(episode_buffer) if is_recording else 0
-                cam_str = "CAM" if (with_camera and camera_frame is not None) else "---"
+                cam_str = "CAM" if (with_camera and camera_frame is not None and camera_frame_wrist is not None) else "---"
                 print(f"[{status}][{cam_str}] iter={iter_count:4d} eps={episode_count} steps={n_steps:3d}")
 
     except KeyboardInterrupt:
@@ -684,8 +720,10 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
         time.sleep(0.2)
         sm.stop()
         
-        if camera:
-            camera.stop()
+        if camera_global:
+            camera_global.stop()
+        if camera_wrist:
+            camera_wrist.stop()
 
         print(f"\n✅ Done! Collected {episode_count} episodes")
         print(f"Data: {output_dir / 'dataset.zarr'}\n")
