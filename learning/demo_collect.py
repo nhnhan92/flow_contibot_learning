@@ -15,11 +15,19 @@ Usage:
 Franka: driven via FrankaRobot (franky -- see learning/hardware/franka_robot.py).
     FrankaController (pylibfranka, learning/hardware/franka_control.py) was
     evaluated as an alternative backend and is kept in the tree for
-    reference, but is no longer wired up here. Recorded "action" is the
-    arm's absolute target TCP pose for UR5e, but the linear EE velocity
-    actually sent to set_ee_velocity() for Franka (no absolute-position
-    streaming primitive) -- a checkpoint trained on one arm is not valid
-    for the other.
+    reference, but is no longer wired up here.
+
+    Recorded "action" differs per arm -- a checkpoint trained on one arm is
+    not valid for the other:
+        UR5e:   (6,) the arm's absolute target TCP pose.
+        Franka: (7,) joint velocities (rad/s), even though the live control
+                input stays Cartesian (spacemouse -> set_ee_velocity()).
+                franky/libfranka resolve that Cartesian command into joint
+                velocities internally every control cycle; get_joint_velocities()
+                reads back what was actually executed. Training/deployment
+                then work purely in joint space (set_joint_velocity()),
+                never inverting the Jacobian again at deploy time -- see
+                hardware/franka_robot.py's get_joint_velocities() docstring.
 
 Controls:
     SpaceMouse:
@@ -211,20 +219,26 @@ def _servo_toward(arm, is_franka, target_pose, dt, velocity, acceleration,
     error-based feed-forward linear velocity, (target - current)/dt,
     clipped to `velocity` m/s. Angular velocity is left at zero, matching
     how rotation-via-spacemouse is already disabled on the UR5e path here.
+    Control input stays Cartesian -- but see Returns below, the recorded
+    action is not.
 
     Returns
     -------
-    np.ndarray (6,) -- the command actually sent this tick, meant to be
+    np.ndarray -- the command actually sent this tick, meant to be
     recorded as the dataset "action" so training/deployment stay
     consistent with what the robot really executes (not what was merely
     intended/interpolated):
-        UR5e:   the absolute target_pose itself (servo_tcp_pose tracks an
-                absolute target, so that *is* the executed command).
-        Franka: [linear_velocity, angular_velocity] (m/s, rad/s, base
-                frame) -- the velocity actually sent to set_ee_velocity().
-                At deploy time, feed the policy's predicted 6D action
-                straight into set_ee_velocity(action[:3], action[3:], ...)
-                for train/deploy consistency.
+        UR5e:   (6,) the absolute target_pose itself (servo_tcp_pose tracks
+                an absolute target, so that *is* the executed command).
+        Franka: (7,) joint velocities (rad/s) -- get_joint_velocities()
+                read back immediately after commanding the Cartesian
+                velocity above, i.e. what franky/libfranka's internal
+                Cartesian-to-joint resolution actually executed this tick,
+                not the Cartesian command itself. Deploy time then drives
+                Franka purely in joint space via set_joint_velocity(),
+                never inverting the Jacobian again -- see
+                hardware/franka_robot.py's get_joint_velocities() docstring
+                for why. Franka-only: UR5e keeps a Cartesian action.
     """
     if is_franka:
         current_pose = arm.get_tcp_pose()
@@ -235,7 +249,7 @@ def _servo_toward(arm, is_franka, target_pose, dt, velocity, acceleration,
         ang_vel = np.zeros(3)
         arm.set_ee_velocity(lin_vel, angular_velocity=ang_vel,
                              max_vel=velocity, max_ang_vel=acceleration)
-        return np.concatenate([lin_vel, ang_vel])
+        return arm.get_joint_velocities()
     else:
         arm.servo_tcp_pose(
             target_pose=target_pose, velocity=velocity, acceleration=acceleration,
@@ -247,28 +261,27 @@ def _servo_toward(arm, is_franka, target_pose, dt, velocity, acceleration,
 def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
                     velocity=0.05, acceleration=0.1, gain=200, lookahead_time=0.15,
                     is_franka=False):
-    """Move arm from start_pose to goal_pose.
+    """Move arm from start_pose to goal_pose, interpolating (position lerp +
+    rotation slerp) over `duration` seconds and streaming each waypoint --
+    UR5eRobot via servo_tcp_pose (RTDE servoL) at ~1/dt Hz, FrankaRobot
+    (franky) via _servo_toward's error-based feed-forward set_ee_velocity(),
+    same as live spacemouse driving.
 
-    UR5eRobot: interpolates (position lerp + rotation slerp) over `duration`
-    seconds, streaming each waypoint via servo_tcp_pose (RTDE servoL) at
-    ~1/dt Hz.
-
-    FrankaRobot (franky): one direct move_tcp_pose() call. It's a single
-    blocking point-to-point move with its own smooth, independently-timed
-    translation+rotation trapezoidal profile (see franka_robot.py) --
-    already the well-tested primitive for "go to this pose," so there's no
-    need to hand-roll interpolation or open a set_ee_velocity session for a
-    one-shot move like this."""
+    Franka used to take a shortcut here: one direct move_tcp_pose() call
+    (a single blocking CartesianMotion covering the whole distance). That's
+    fine for a short, nearby move, but after teleoperating the arm away
+    from goal_pose to some arbitrary reached position, the straight-line
+    Cartesian path back can pass close to a kinematic singularity, where
+    joint velocities spike (J^-1 * cartesian_velocity blows up) no matter
+    how conservatively translation/rotation/elbow dynamics are scaled --
+    tripping libfranka's cartesian_motion_generator_*_discontinuity /
+    joint_velocity_discontinuity reflexes. Interpolating through many small
+    waypoints instead reuses the exact mechanism that already drives the
+    arm robustly during live teleoperation (see _servo_toward /
+    demo_collect.py's spacemouse drive branch), rather than trusting a
+    single big automatic move to navigate whatever path it computes."""
     start_pose = np.asarray(start_pose, dtype=float).copy()
     goal_pose  = np.asarray(goal_pose,  dtype=float).copy()
-
-    if is_franka:
-        # Cleanly ramp down any active set_ee_velocity() session (opened by
-        # spacemouse driving) before handing off to a blocking position
-        # move -- no-op if nothing is running.
-        arm.stop()
-        arm.move_tcp_pose(goal_pose, velocity=velocity, acceleration=acceleration)
-        return
 
     r0    = st.Rotation.from_rotvec(start_pose[3:])
     r1    = st.Rotation.from_rotvec(goal_pose[3:])
@@ -436,7 +449,7 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
     init_pose = np.array([0.550, 0.045, 0.45, 3.14, 0.0, -0.05])
     target_pose = init_pose.copy()
 
-    last_action = init_pose.copy() if not is_franka else np.zeros(6)
+    last_action = init_pose.copy() if not is_franka else np.zeros(7)
 
     move_2_init_pos(robot, tcp_pose, init_pose, dt=dt, velocity=0.05, duration=5.0, gain=150, is_franka=is_franka)
     tcp_pose = robot.get_tcp_pose()
@@ -470,7 +483,7 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                         move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, duration=3.0, gain=150, is_franka=is_franka)
                         print(f"✅ Robot reset to initial pose!\n")
                         target_pose = init_pose.copy()
-                        last_action = init_pose.copy() if not is_franka else np.zeros(6)
+                        last_action = init_pose.copy() if not is_franka else np.zeros(7)
 
                         
                     except Exception as e:
@@ -501,7 +514,7 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                             move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, duration=3.0, gain=150, is_franka=is_franka)
                             print(f"✅ Robot returned to start pose!\n")
                             target_pose = init_pose.copy()
-                            last_action = init_pose.copy() if not is_franka else np.zeros(6)
+                            last_action = init_pose.copy() if not is_franka else np.zeros(7)
 
                             fb.reset()  # Reset flowbot
                             fb.update_plot()
@@ -607,7 +620,11 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                     try:
                         robot.set_ee_velocity(lin_vel, angular_velocity=np.zeros(3),
                                                max_vel=max_pos_speed, max_ang_vel=max_rot_speed)
-                        last_action = np.concatenate([lin_vel, np.zeros(3)])
+                        # Recorded action is joint velocity (7,), not the
+                        # Cartesian command above -- see get_joint_velocities()'s
+                        # docstring for why. Control input stays Cartesian;
+                        # only what gets *recorded* changes.
+                        last_action = robot.get_joint_velocities()
                         target_pose = robot.get_tcp_pose()  # keep in sync for release/idle-hold
                         print(f"Commanded velocity: [{', '.join([f'{x:.3f}' for x in lin_vel])}]")
                     except Exception as e:

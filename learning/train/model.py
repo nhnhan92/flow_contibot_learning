@@ -542,6 +542,7 @@ class DiffusionPolicy(nn.Module):
         use_spatial_softmax=None,   # None → auto (True if use_film_unet else False)
         num_keypoints=32,           # SpatialSoftmax keypoints (Stanford default: 32)
         crop_pad=0,                 # Random crop padding pixels (0 = disabled)
+        num_cameras=1,              # 1 = camera_0 (global) only, 2 = + camera_1 (wrist)
     ):
         super().__init__()
 
@@ -551,23 +552,34 @@ class DiffusionPolicy(nn.Module):
         self.num_diffusion_iters = num_diffusion_iters
         self.num_inference_steps = num_inference_steps
         self.use_film_unet = use_film_unet
+        self.num_cameras = num_cameras
+        if num_cameras not in (1, 2):
+            raise ValueError(f"num_cameras must be 1 or 2, got {num_cameras}")
 
         # Auto-enable SpatialSoftmax when using the FiLM UNet (Stanford-style)
         if use_spatial_softmax is None:
             use_spatial_softmax = use_film_unet
 
-        # ── Vision encoder ────────────────────────────────────────────────────
-        if use_resnet:
-            self.vision_encoder = ResNet18VisionEncoder(
-                obs_horizon=obs_horizon,
-                output_dim=vision_feature_dim,
-                pretrained=True,
-                use_spatial_softmax=use_spatial_softmax,
-                num_keypoints=num_keypoints,
-                crop_pad=crop_pad,
-            )
-        else:
-            self.vision_encoder = VisionEncoder(obs_horizon, vision_feature_dim)
+        # ── Vision encoder(s) ──────────────────────────────────────────────────
+        # One independent encoder per camera (standard multi-view setup --
+        # each view keeps its own ImageNet-pretrained-compatible 3-channel
+        # input rather than stacking views into extra input channels, which
+        # would require reinitializing conv1 and lose that pretraining).
+        # Features are concatenated before the state/action fusion below.
+        def _make_vision_encoder():
+            if use_resnet:
+                return ResNet18VisionEncoder(
+                    obs_horizon=obs_horizon,
+                    output_dim=vision_feature_dim,
+                    pretrained=True,
+                    use_spatial_softmax=use_spatial_softmax,
+                    num_keypoints=num_keypoints,
+                    crop_pad=crop_pad,
+                )
+            return VisionEncoder(obs_horizon, vision_feature_dim)
+
+        self.vision_encoder = _make_vision_encoder()
+        self.vision_encoder_wrist = _make_vision_encoder() if num_cameras == 2 else None
 
         # ── State encoder (MLP on flattened obs window) ───────────────────────
         self.state_encoder = nn.Sequential(
@@ -577,7 +589,7 @@ class DiffusionPolicy(nn.Module):
         )
 
         # ── Diffusion U-Net ───────────────────────────────────────────────────
-        cond_dim = vision_feature_dim + state_feature_dim
+        cond_dim = num_cameras * vision_feature_dim + state_feature_dim
 
         _down_dims = film_down_dims or [256, 512, 1024]
         self.diffusion_model = ConditionalUNet1D(
@@ -604,13 +616,19 @@ class DiffusionPolicy(nn.Module):
             prediction_type='epsilon',
         )
 
-    def forward(self, obs_state, obs_image, actions=None, train=True):
+    def forward(self, obs_state, obs_image, actions=None, train=True, obs_image_wrist=None):
         """
         Args:
-            obs_state : (B, obs_horizon, state_dim)
-            obs_image : (B, obs_horizon, C, H, W)
-            actions   : (B, pred_horizon, action_dim)  — training only
-            train     : True → return loss,  False → return predicted actions
+            obs_state       : (B, obs_horizon, state_dim)
+            obs_image       : (B, obs_horizon, C, H, W)  -- global (camera_0)
+            actions         : (B, pred_horizon, action_dim)  — training only
+            train           : True → return loss,  False → return predicted actions
+            obs_image_wrist : (B, obs_horizon, C, H, W)  -- wrist (camera_1),
+                              required iff num_cameras=2, ignored otherwise.
+                              Kept as a trailing kwarg (not inserted next to
+                              obs_image) so existing positional calls --
+                              model(obs_state, obs_image, actions, train=True) --
+                              stay correct unchanged.
 
         Returns:
             train=True  : scalar loss
@@ -620,6 +638,11 @@ class DiffusionPolicy(nn.Module):
 
         # ── Encode observations ───────────────────────────────────────────────
         vision_features = self.vision_encoder(obs_image)              # (B, vision_dim)
+        if self.num_cameras == 2:
+            if obs_image_wrist is None:
+                raise ValueError("num_cameras=2 but obs_image_wrist was not provided")
+            vision_features_wrist = self.vision_encoder_wrist(obs_image_wrist)  # (B, vision_dim)
+            vision_features = torch.cat([vision_features, vision_features_wrist], dim=-1)  # (B, 2*vision_dim)
         state_flat      = obs_state.reshape(B, -1)                    # (B, T*state_dim)
         state_features  = self.state_encoder(state_flat)              # (B, state_feat_dim)
         cond = torch.cat([vision_features, state_features], dim=-1)   # (B, cond_dim)

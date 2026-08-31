@@ -17,31 +17,44 @@ class DiffusionDataset(Dataset):
     """
     Dataset for robot demonstrations with Flowbot soft manipulator.
 
-    Data format from zarr (collected by collect_demos_with_camera.py):
-        - robot_eef_pose: (T, 6) - UR5e end-effector TCP pose [x, y, z, rx, ry, rz]
-        - robot_joint:    (T, 6) - UR5e joint angles (not used for training)
+    Data format from zarr (collected by demo_collect.py):
+        - robot_eef_pose: (T, 6) - arm end-effector TCP pose [x, y, z, rx, ry, rz]
+        - robot_joint:    (T, 6 or 7) - arm joint angles (not used for training)
         - pwm_signals:    (T, 3) - Flowbot PWM signals [pwm1, pwm2, pwm3]
-        - action:         (T, 6) - commanded UR5e target TCP pose (spacemouse target)
-        - camera_0:       (T, H, W, 3) - RGB images
+        - action:         (T, 6) UR5e or (T, 7) Franka -- see `arm` below
+        - camera_0:       (T, H, W, 3) - RGB images, global (scene) camera
+        - camera_1:       (T, H, W, 3) - RGB images, wrist camera (optional,
+                          only present in datasets collected with a wrist
+                          camera connected -- see `use_wrist_camera`)
         - timestamp:      (T,) - timestamps
 
     State  (tcp_dims+5 D):  robot_eef_pose[:tcp_dims] + pwm_signals (3D) + operation_mode (2D)
-    Action (tcp_dims+5 D):  target TCP[:tcp_dims] from data/action + pwm_signals (3D) + op_mode (2D)
+                             Always the Cartesian TCP pose, regardless of `arm` --
+                             only the ACTION space differs per arm (below).
 
-    tcp_dims controls how many TCP components are used:
-        tcp_dims=3  →  xyz only          (state_dim = action_dim = 8)
-        tcp_dims=6  →  xyz + rx,ry,rz   (state_dim = action_dim = 11)
+    Action, depends on `arm`:
+        UR5e   (tcp_dims+5 D): target TCP[:tcp_dims] from data/action + pwm (3D) + op_mode (2D)
+        Franka (7+5=12 D):     data/action in full (7D joint velocities, rad/s --
+                                see demo_collect.py's _servo_toward docstring and
+                                hardware/franka_robot.py's get_joint_velocities())
+                                + pwm (3D) + op_mode (2D). tcp_dims does not apply
+                                to a Franka checkpoint's action (only its state).
+
+    tcp_dims controls how many TCP *state* components are used (both arms):
+        tcp_dims=3  →  xyz only
+        tcp_dims=6  →  xyz + rx,ry,rz
     Set via config key 'tcp_dims' (default: 3).
 
     operation_mode encoding per frame:
         [0, 0] = idle / holding
-        [1, 0] = UR5 being controlled
+        [1, 0] = arm being controlled
         [0, 1] = flowbot being controlled
         [1, 1] = release phase
 
-    Using data/action (commanded target_pose) rather than data/robot_eef_pose for action
-    labels ensures action[0] != obs[-1]: the first predicted action is the command that
-    moves the robot forward, not a copy of the current position.
+    Using data/action (commanded target_pose for UR5e; executed joint velocity
+    for Franka) rather than data/robot_eef_pose for action labels ensures
+    action[0] != obs[-1]: the first predicted action is the command that moves
+    the robot forward, not a copy of the current position/velocity.
     """
 
     def __init__(
@@ -54,7 +67,9 @@ class DiffusionDataset(Dataset):
         use_images=True,
         normalize=True,
         exclude_episodes=None,  # List of episode indices to exclude
-        tcp_dims=3,         # TCP components used: 3=xyz only, 6=xyz+rotation
+        tcp_dims=3,         # TCP *state* components used: 3=xyz only, 6=xyz+rotation
+        arm='ur5',          # 'ur5' (target TCP pose action) or 'franka' (7D joint velocity action)
+        use_wrist_camera=False,  # Also load camera_1 (wrist) alongside camera_0 (global)
     ):
         self.dataset_path = Path(dataset_path)
         self.obs_horizon = obs_horizon
@@ -65,9 +80,33 @@ class DiffusionDataset(Dataset):
         self.normalize = normalize
         self.exclude_episodes = exclude_episodes if exclude_episodes is not None else []
         self.tcp_dims = tcp_dims
+        self.arm = arm.lower()
+        self.is_franka = self.arm == 'franka'
+        self.use_wrist_camera = use_wrist_camera
+        # Franka's action is always 7D joint velocities (tcp_dims doesn't apply
+        # to it); UR5e's action is the TCP pose, sliced like state is.
+        self.action_dim_raw = 7 if self.is_franka else self.tcp_dims
 
         # Load zarr dataset
         self.zarr_root = zarr.open(str(self.dataset_path), mode='r')
+
+        if self.use_wrist_camera and 'camera_1' not in self.zarr_root['data']:
+            raise ValueError(
+                f"use_wrist_camera=True but {self.dataset_path} has no data/camera_1 -- "
+                "this dataset was collected without a wrist camera (or with "
+                "--no_camera_wrist). Either recollect with the wrist camera "
+                "connected, or set use_wrist_camera=False."
+            )
+        if self.is_franka:
+            action_shape = self.zarr_root['data/action'].shape
+            if action_shape[1] != 7:
+                raise ValueError(
+                    f"arm='franka' expects data/action to be 7D (joint velocities), "
+                    f"but {self.dataset_path} has action shape {action_shape}. This "
+                    f"dataset was likely collected with an older demo_collect.py "
+                    f"that recorded Cartesian velocity (6D) as the Franka action -- "
+                    f"recollect with the current demo_collect.py."
+                )
 
         # Get episode boundaries
         self.episode_ends = self.zarr_root['meta/episode_ends'][:]
@@ -139,19 +178,21 @@ class DiffusionDataset(Dataset):
 
         robot_states  = np.array(robot_states)   # (N, 6)
         pwm_states    = np.array(pwm_states)     # (N, 3)
-        robot_actions = np.array(robot_actions)  # (N, 6)
+        robot_actions = np.array(robot_actions)  # (N, 6) UR5e / (N, 7) Franka
 
         eps = 1e-6
-        d = self.tcp_dims  # 3 or 6
+        d = self.tcp_dims        # state TCP width: 3 or 6, both arms
+        a = self.action_dim_raw  # action raw width: tcp_dims (UR5e) or 7 (Franka)
 
-        # State: robot_eef_pose[:tcp_dims] + pwm (3D)
+        # State: robot_eef_pose[:tcp_dims] + pwm (3D) -- Cartesian pose,
+        # regardless of arm/action space.
         self.state_min = np.concatenate([robot_states[:, :d].min(0), pwm_states.min(0)])
         self.state_max = np.concatenate([robot_states[:, :d].max(0), pwm_states.max(0)])
         self.state_range = self.state_max - self.state_min + eps
 
-        # Action: commanded target_pose[:tcp_dims] + pwm (3D)
-        self.action_min = np.concatenate([robot_actions[:, :d].min(0), pwm_states.min(0)])
-        self.action_max = np.concatenate([robot_actions[:, :d].max(0), pwm_states.max(0)])
+        # Action: UR5e target_pose[:tcp_dims], Franka full 7D joint velocity + pwm (3D)
+        self.action_min = np.concatenate([robot_actions[:, :a].min(0), pwm_states.min(0)])
+        self.action_max = np.concatenate([robot_actions[:, :a].max(0), pwm_states.max(0)])
         self.action_range = self.action_max - self.action_min + eps
 
         # Append hardcoded stats for operation_mode (2D): always in {0, 1}
@@ -166,18 +207,29 @@ class DiffusionDataset(Dataset):
         self.action_max   = np.concatenate([self.action_max,   op_max])
         self.action_range = np.concatenate([self.action_range, op_range])
 
-        d = self.tcp_dims
         tcp_labels = ['X', 'Y', 'Z', 'Rx', 'Ry', 'Rz'][:d]
         tcp_str = ', '.join(f"{l}=[{self.state_min[i]:.4f}, {self.state_max[i]:.4f}]"
                             for i, l in enumerate(tcp_labels))
         print(f"  State  range (TCP {d}D): {tcp_str}")
-        tcp_str_a = ', '.join(f"{l}=[{self.action_min[i]:.4f}, {self.action_max[i]:.4f}]"
-                              for i, l in enumerate(tcp_labels))
-        print(f"  Action range (TCP {d}D): {tcp_str_a}")
-        print(f"  PWM range: "
+
+        if self.is_franka:
+            joint_labels = [f'q{i+1}' for i in range(a)]
+            action_str = ', '.join(f"{l}=[{self.action_min[i]:.4f}, {self.action_max[i]:.4f}]"
+                                    for i, l in enumerate(joint_labels))
+            print(f"  Action range (joint velocity {a}D, rad/s): {action_str}")
+        else:
+            action_str = ', '.join(f"{l}=[{self.action_min[i]:.4f}, {self.action_max[i]:.4f}]"
+                                    for i, l in enumerate(tcp_labels))
+            print(f"  Action range (TCP {a}D): {action_str}")
+
+        print(f"  PWM range (state):  "
               f"[{self.state_min[d]:.1f}, {self.state_max[d]:.1f}], "
               f"[{self.state_min[d+1]:.1f}, {self.state_max[d+1]:.1f}], "
               f"[{self.state_min[d+2]:.1f}, {self.state_max[d+2]:.1f}]")
+        print(f"  PWM range (action): "
+              f"[{self.action_min[a]:.1f}, {self.action_max[a]:.1f}], "
+              f"[{self.action_min[a+1]:.1f}, {self.action_max[a+1]:.1f}], "
+              f"[{self.action_min[a+2]:.1f}, {self.action_max[a+2]:.1f}]")
         print(f"  op_mode: hardcoded [0,0]→[-1,-1], [1,1]→[+1,+1]")
 
     def _normalize_state(self, state):
@@ -230,47 +282,61 @@ class DiffusionDataset(Dataset):
 
         # Images
         if self.use_images:
-            images = self.zarr_root['data/camera_0'][obs_start:obs_end]
-
-            processed_images = []
-            for img in images:
-                h, w = img.shape[:2]
-                target_h, target_w = self.image_size
-
-                crop_h = min(h, int(target_h * 1.5))
-                crop_w = min(w, int(target_w * 1.5))
-
-                start_h = (h - crop_h) // 2
-                start_w = (w - crop_w) // 2
-                img_cropped = img[start_h:start_h + crop_h, start_w:start_w + crop_w]
-
-                img_resized = cv2.resize(img_cropped, (target_w, target_h))
-                img_normalized = (img_resized.astype(np.float32) / 127.5) - 1.0
-                processed_images.append(img_normalized)
-
-            images = np.array(processed_images)
-            images = images.transpose(0, 3, 1, 2)  # (obs_horizon, C, H, W)
+            images = self._load_and_process_images('data/camera_0', obs_start, obs_end)
         else:
             images = np.zeros((self.obs_horizon, 3, *self.image_size), dtype=np.float32)
 
-        # Future actions: target TCP[:tcp_dims] + pwm (3D) + op_mode (2D)
-        # Using data/action (commanded target_pose) instead of data/robot_eef_pose so that
-        # action[0] != obs[-1]: the spacemouse target is always ahead of the actual TCP.
+        sample = {
+            'obs_state': torch.from_numpy(states).float(),    # (obs_horizon, d+5)
+            'obs_image': torch.from_numpy(images).float(),    # (obs_horizon, 3, H, W)
+        }
+
+        if self.use_wrist_camera:
+            if self.use_images:
+                images_wrist = self._load_and_process_images('data/camera_1', obs_start, obs_end)
+            else:
+                images_wrist = np.zeros((self.obs_horizon, 3, *self.image_size), dtype=np.float32)
+            sample['obs_image_wrist'] = torch.from_numpy(images_wrist).float()
+
+        # Future actions: UR5e target TCP[:tcp_dims], Franka full 7D joint
+        # velocity, + pwm (3D) + op_mode (2D). Using data/action (commanded
+        # target_pose / executed joint velocity) instead of data/robot_eef_pose
+        # so that action[0] != obs[-1]: it's always the command that moves the
+        # robot forward, not a copy of the current position/velocity.
         action_start = sample_idx
         action_end = sample_idx + self.pred_horizon
         robot_actions  = self.zarr_root['data/action'][action_start:action_end]
         pwm_actions    = self.zarr_root['data/pwm_signals'][action_start:action_end].astype(np.float32)
         op_mode_actions = self.zarr_root['data/operation_mode'][action_start:action_end].astype(np.float32)
 
-        actions = np.concatenate([robot_actions[:, :self.tcp_dims], pwm_actions, op_mode_actions], axis=-1)
+        actions = np.concatenate([robot_actions[:, :self.action_dim_raw], pwm_actions, op_mode_actions], axis=-1)
         actions = self._normalize_action(actions)
 
-        d = self.tcp_dims
-        return {
-            'obs_state': torch.from_numpy(states).float(),    # (obs_horizon, d+5)
-            'obs_image': torch.from_numpy(images).float(),    # (obs_horizon, 3, H, W)
-            'actions':   torch.from_numpy(actions).float(),   # (pred_horizon, d+5)
-        }
+        sample['actions'] = torch.from_numpy(actions).float()   # (pred_horizon, action_dim_raw+5)
+        return sample
+
+    def _load_and_process_images(self, camera_key, obs_start, obs_end):
+        """Center-crop + resize + normalize one camera's frames to (obs_horizon, C, H, W)."""
+        images = self.zarr_root[camera_key][obs_start:obs_end]
+
+        processed_images = []
+        for img in images:
+            h, w = img.shape[:2]
+            target_h, target_w = self.image_size
+
+            crop_h = min(h, int(target_h * 1.5))
+            crop_w = min(w, int(target_w * 1.5))
+
+            start_h = (h - crop_h) // 2
+            start_w = (w - crop_w) // 2
+            img_cropped = img[start_h:start_h + crop_h, start_w:start_w + crop_w]
+
+            img_resized = cv2.resize(img_cropped, (target_w, target_h))
+            img_normalized = (img_resized.astype(np.float32) / 127.5) - 1.0
+            processed_images.append(img_normalized)
+
+        images = np.array(processed_images)
+        return images.transpose(0, 3, 1, 2)  # (obs_horizon, C, H, W)
 
     def get_normalizer(self):
         """Get action/state normalizer for inference"""

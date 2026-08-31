@@ -40,7 +40,8 @@ try:
     from franky import (
         Robot, Gripper, Affine, RobotPose, RelativeDynamicsFactor,
         CartesianMotion, CartesianVelocityMotion, CartesianVelocityStopMotion,
-        JointMotion, Twist, ReferenceType,
+        JointMotion, JointVelocityMotion, JointVelocityStopMotion,
+        Twist, ReferenceType,
     )
     _FRANKY_AVAILABLE = True
 except ImportError:
@@ -121,6 +122,7 @@ class FrankaRobot:
         dynamics_factor: float = 0.1,
         max_cart_vel: float = 0.2,
         max_ang_vel: float = 0.5,
+        max_joint_vel: float = 0.3,
     ):
         """
         Parameters
@@ -137,6 +139,9 @@ class FrankaRobot:
                            temporarily per-call (see below).
         max_cart_vel, max_ang_vel : Default set_ee_velocity() speed caps
                            (m/s, rad/s) when a call doesn't pass its own.
+        max_joint_vel   : Default set_joint_velocity() per-joint speed cap
+                           (rad/s) when a call doesn't pass its own. Conservative
+                           vs. the Panda's actual per-joint limits (~2-2.6 rad/s).
         """
         if not _FRANKY_AVAILABLE:
             raise ImportError("franky is required. Install with: pip install franky-control")
@@ -147,6 +152,7 @@ class FrankaRobot:
         self.dynamics_factor = dynamics_factor
         self.max_cart_vel = max_cart_vel
         self.max_ang_vel = max_ang_vel
+        self.max_joint_vel = max_joint_vel
 
         print(f"[FrankaRobot] Connecting to {robot_ip} ...")
         self._robot = Robot(robot_ip)
@@ -181,6 +187,22 @@ class FrankaRobot:
     def get_joint_angles(self) -> np.ndarray:
         """Return current joint angles as (7,) rad. Franka has 7 joints (UR5e has 6)."""
         return np.asarray(self._robot.current_joint_state.position, dtype=np.float32).reshape(7)
+
+    def get_joint_velocities(self) -> np.ndarray:
+        """
+        Return current joint velocities as (7,) rad/s.
+
+        Used to record the joint-space "action" during Cartesian-velocity
+        teleoperation (see demo_collect.py): the operator drives via
+        set_ee_velocity(), franky/libfranka resolves that into joint
+        velocities internally every control cycle, and this reads back
+        what was actually executed -- not a re-derivation, the real
+        measured value -- so training/deployment can work purely in joint
+        space (see set_joint_velocity()) without ever inverting the
+        Jacobian again at deploy time, when there's no operator to react
+        if a Cartesian path were to pass near a singularity.
+        """
+        return np.asarray(self._robot.current_joint_state.velocity, dtype=np.float32).reshape(7)
 
     def get_ee_wrench(self, frame: str = "base") -> np.ndarray:
         """
@@ -334,6 +356,43 @@ class FrankaRobot:
             self._robot.recover_from_errors()
             raise
 
+    def set_joint_velocity(self, joint_velocity, max_vel=None):
+        """
+        Command joint velocities directly, (7,) rad/s -- no Cartesian
+        planning or Jacobian inversion involved, so this can never trip a
+        Cartesian-singularity discontinuity reflex. Used to execute
+        policy-predicted actions at deploy time (see get_joint_velocities()
+        for why the *recorded* action is joint-space even though live
+        teleoperation itself commands Cartesian velocity).
+
+        Same call-every-tick pattern as set_ee_velocity(): issues a fresh
+        JointVelocityMotion each call, franky/Ruckig handles the
+        accel-limited retargeting reactively.
+
+        Parameters
+        ----------
+        joint_velocity : (7,) rad/s.
+        max_vel        : Per-joint speed cap (rad/s), applied elementwise
+                       (each joint clipped independently -- a per-joint
+                       physical limit, not a Euclidean-norm cap like
+                       set_ee_velocity's Cartesian speed). Every call,
+                       unlike FrankaController-style session caps.
+        """
+        dq = np.asarray(joint_velocity, dtype=float).reshape(7)
+        if not np.all(np.isfinite(dq)):
+            raise ValueError("Joint velocity command contains NaN or Inf")
+
+        cap = self.max_joint_vel if max_vel is None else max_vel
+        dq = np.clip(dq, -cap, cap)
+
+        motion = JointVelocityMotion(dq.tolist())
+        try:
+            self._robot.move(motion, asynchronous=True)
+        except Exception as e:
+            print(f"[FrankaRobot] set_joint_velocity motion error: {e}")
+            self._robot.recover_from_errors()
+            raise
+
     def move_joints(
         self,
         target_joints,
@@ -374,6 +433,26 @@ class FrankaRobot:
             self._robot.move(CartesianVelocityStopMotion(), asynchronous=False)
         except Exception as e:
             print(f"[FrankaRobot] stop() failed: {e}")
+            try:
+                self._robot.recover_from_errors()
+            except Exception:
+                pass
+
+    def stop_joint_velocity(self):
+        """
+        Stop an active set_joint_velocity() motion. Separate from stop()
+        because a JointVelocityStopMotion and a CartesianVelocityStopMotion
+        are different libfranka motion-generator types -- issuing the
+        Cartesian one doesn't reliably interrupt an active joint-velocity
+        motion (untested assumption to rely on for a safety-relevant stop),
+        so callers driving Franka in joint-velocity mode (deploy) must use
+        this instead of stop() (which callers driving it in Cartesian mode,
+        e.g. teleoperation, keep using).
+        """
+        try:
+            self._robot.move(JointVelocityStopMotion(), asynchronous=False)
+        except Exception as e:
+            print(f"[FrankaRobot] stop_joint_velocity() failed: {e}")
             try:
                 self._robot.recover_from_errors()
             except Exception:

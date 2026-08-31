@@ -39,10 +39,11 @@ def train_epoch(model, dataloader, optimizer, device, ema=None):
         obs_state = batch['obs_state'].to(device)
         obs_image = batch['obs_image'].to(device)
         actions = batch['actions'].to(device)
+        obs_image_wrist = batch['obs_image_wrist'].to(device) if 'obs_image_wrist' in batch else None
 
         # Forward pass
         optimizer.zero_grad()
-        loss = model(obs_state, obs_image, actions, train=True)
+        loss = model(obs_state, obs_image, actions, train=True, obs_image_wrist=obs_image_wrist)
 
         # Backward pass
         loss.backward()
@@ -75,8 +76,9 @@ def validate(model, dataloader, device):
             obs_state = batch['obs_state'].to(device)
             obs_image = batch['obs_image'].to(device)
             actions = batch['actions'].to(device)
+            obs_image_wrist = batch['obs_image_wrist'].to(device) if 'obs_image_wrist' in batch else None
 
-            loss = model(obs_state, obs_image, actions, train=True)
+            loss = model(obs_state, obs_image, actions, train=True, obs_image_wrist=obs_image_wrist)
 
             total_loss += loss.item()
             num_batches += 1
@@ -124,6 +126,8 @@ def main():
     if exclude_episodes:
         print(f"Excluding episodes: {exclude_episodes}")
 
+    arm = config.get('arm', 'ur5')
+    use_wrist_camera = config.get('use_wrist_camera', False)
     dataset = DiffusionDataset(
         dataset_path=args.dataset if args.dataset is not None else config['dataset_path'],
         obs_horizon=config['obs_horizon'],
@@ -132,12 +136,18 @@ def main():
         image_size=tuple(config['image_size']),
         exclude_episodes=exclude_episodes,
         tcp_dims=config.get('tcp_dims', 3),
+        arm=arm,
+        use_wrist_camera=use_wrist_camera,
     )
+    print(f"Arm: {arm}  |  wrist camera: {use_wrist_camera}")
     print(f"Total samples: {len(dataset)}")
-    print(f"State  XYZ range - min: {dataset.state_min[:3]}, max: {dataset.state_max[:3]}")
-    print(f"State  PWM range - min: {dataset.state_min[6:]}, max: {dataset.state_max[6:]}")
-    print(f"Action XYZ range - min: {dataset.action_min[:3]}, max: {dataset.action_max[:3]}")
-    print(f"Action PWM range - min: {dataset.action_min[6:]}, max: {dataset.action_max[6:]}")
+    d = dataset.tcp_dims
+    print(f"State  TCP range - min: {dataset.state_min[:d]}, max: {dataset.state_max[:d]}")
+    print(f"State  PWM range - min: {dataset.state_min[d:d+3]}, max: {dataset.state_max[d:d+3]}")
+    a = dataset.action_dim_raw
+    action_label = "joint velocity" if dataset.is_franka else "TCP"
+    print(f"Action {action_label} range - min: {dataset.action_min[:a]}, max: {dataset.action_max[:a]}")
+    print(f"Action PWM range - min: {dataset.action_min[a:a+3]}, max: {dataset.action_max[a:a+3]}")
 
     # Train/val split
     val_ratio = config.get('val_ratio', 0.1)
@@ -178,6 +188,8 @@ def main():
     pool_name = 'SpatialSoftmax' if (use_ss or (use_ss is None and use_film)) else 'AvgPool'
     print(f"UNet variant  : {'FiLM (ConditionalUNet1D)' if use_film else 'Simple (DiffusionUNet1D)'}")
     print(f"Vision pooling: {pool_name}" + (f" ({n_kp} kp → {n_kp*2}D/frame)" if 'Spatial' in pool_name else ''))
+    num_cameras = 2 if use_wrist_camera else 1
+    print(f"Cameras       : {num_cameras} ({'global + wrist' if num_cameras == 2 else 'global only'})")
     model = DiffusionPolicy(
         obs_horizon=config['obs_horizon'],
         pred_horizon=config['pred_horizon'],
@@ -190,10 +202,12 @@ def main():
         use_resnet=config.get('use_resnet', True),
         use_film_unet=use_film,
         film_step_embed_dim=config.get('film_step_embed_dim', 256),
+        film_down_dims=config.get('film_down_dims', None),
         film_kernel_size=config.get('film_kernel_size', 5),
         use_spatial_softmax=use_ss,
         num_keypoints=n_kp,
         crop_pad=config.get('random_crop_pad', 0),
+        num_cameras=num_cameras,
     ).to(device)
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
