@@ -260,7 +260,7 @@ def _servo_toward(arm, is_franka, target_pose, dt, velocity, acceleration,
 
 def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
                     velocity=0.05, acceleration=0.1, gain=200, lookahead_time=0.15,
-                    is_franka=False):
+                    is_franka=False, settle_time=0.3):
     """Move arm from start_pose to goal_pose.
 
     UR5eRobot: interpolates (position lerp + rotation slerp) over `duration`
@@ -272,7 +272,15 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
     translation+rotation trapezoidal profile (see franka_robot.py) --
     already the well-tested primitive for "go to this pose," so there's no
     need to hand-roll interpolation or open a set_ee_velocity session for a
-    one-shot move like this."""
+    one-shot move like this.
+
+    settle_time (Franka only): pause after arm.stop() before starting
+    move_tcp_pose(). arm.stop() returns once commanded velocity ramps to
+    zero, but the robot's internal state can apparently still be settling
+    for a moment after that -- starting a new control session immediately
+    against that not-quite-settled state was observed (empirically, on
+    hardware) to make move_tcp_pose plan/execute very slowly regardless of
+    the velocity/duration passed in. A short pause here fixed it."""
     start_pose = np.asarray(start_pose, dtype=float).copy()
     goal_pose  = np.asarray(goal_pose,  dtype=float).copy()
 
@@ -281,6 +289,8 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
         # spacemouse driving) before handing off to a blocking position
         # move -- no-op if nothing is running.
         arm.stop()
+        if settle_time > 0:
+            time.sleep(settle_time)
         arm.move_tcp_pose(goal_pose, velocity=velocity, acceleration=acceleration)
         return
 
