@@ -291,7 +291,13 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--no_camera', is_flag=True, help='Run without camera')
 @click.option('--camera_width', default=640, type=int, help='Camera width (both cameras)')
 @click.option('--camera_height', default=480, type=int, help='Camera height (both cameras)')
-@click.option('--camera_fps', default=10, type=int, help='Camera FPS (both cameras)')
+@click.option('--camera_fps', default=30, type=int,
+              help='Camera FPS (both cameras). Must be a rate the sensor natively supports '
+                   '(RealSense color streams typically only offer 6/15/30/60) -- pipeline.start() '
+                   'fails with "Couldn\'t resolve requests" for any other value. This does not need '
+                   'to match --frequency: get_frames() is only called once per control tick regardless '
+                   'of the sensor\'s configured rate, so the effective capture rate already follows '
+                   '--frequency. Use system_verification/test_camera.py to check what a given camera supports.')
 @click.option('--frequency', '-f', default=10.0, type=float, help='Control Hz')
 @click.option('--flowbot_freqency', '-fb_freq', default=30.0, type=float, help='Control Hz for flowbot')
 @click.option('--flowbot_speed_factor', '-fspeed', default =1.5, type=float)
@@ -349,6 +355,12 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
             image_shape = (camera_height, camera_width, 3)
         except Exception as e:
             print(f"⚠️  Camera failed: {e}")
+            if "resolve" in str(e).lower():
+                print("   \"Couldn't resolve requests\" means the requested "
+                      "--camera_width/--camera_height/--camera_fps combo isn't one this "
+                      "camera natively supports (RealSense color streams are usually only "
+                      "6/15/30/60 fps at a handful of resolutions) -- check with "
+                      "system_verification/test_camera.py.")
             print("   Continuing without camera...")
             with_camera = False
             if camera_global is not None:
