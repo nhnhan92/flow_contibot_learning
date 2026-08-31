@@ -679,7 +679,7 @@ def main():
                         help='Path to trained checkpoint (.pt). Must match --arm: a checkpoint '
                              'trained on UR5e (TCP-pose actions) is not valid for Franka '
                              '(joint-velocity actions), and vice versa.')
-    parser.add_argument('--arm',           type=str,   default='ur5', choices=['ur5', 'franka'],
+    parser.add_argument('--arm',           type=str,   default='franka', choices=['ur5', 'franka'],
                         help='Which arm to deploy on -- must match the arm the checkpoint was trained for.')
     parser.add_argument('--robot_ip',      type=str, default=None,
                         help='Robot IP (default: 150.65.146.87 for ur5, 172.16.0.2 for franka)')

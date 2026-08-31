@@ -1,0 +1,70 @@
+
+# Dataset
+dataset_path: "data/demo_data/Task3/dataset.zarr"  # Path to training dataset (Zarr format), collected with --arm franka
+obs_horizon: 2        # Number of observation frames
+pred_horizon: 16      # Number of action steps to predict
+action_horizon: 8     # Number of action steps to execute
+image_size: [216, 288]  # Center crop from 480x640
+exclude_episodes: []  # Episodes to exclude from training (e.g. incomplete)
+
+# Arm: 'franka' selects the joint-velocity action path (dataset.py, model.py,
+# deploy script all branch on this). A checkpoint trained with arm: franka
+# is only valid for --arm franka at deploy time.
+arm: franka
+
+# Cameras: demo_collect.py always records camera_0 (global); camera_1 (wrist)
+# is present only if collected with the wrist camera connected (not
+# --no_camera_wrist). Set true only if your dataset actually has camera_1 --
+# dataset.py raises a clear error at load time if it doesn't.
+use_wrist_camera: true
+
+# TCP dimensions: 3 = xyz only, 6 = xyz + rotation (rx,ry,rz)
+# Only affects STATE (robot_eef_pose[:tcp_dims]) -- Franka's ACTION is
+# always the full 7D joint velocity regardless of tcp_dims (see
+# action_dim below; tcp_dims does not gate it the way it does for UR5e).
+tcp_dims: 3           # 3 → xyz only state (8D); 6 → xyz+rotation state (11D)
+
+# Model architecture
+# action_dim = 7 (joint velocities, rad/s) + flowbot PWM (3) + operation_mode (2) = 12
+# state_dim  = tcp_dims(3) + flowbot PWM (3) + operation_mode (2) = 8
+action_dim: 12
+state_dim: 8
+vision_feature_dim: 512
+state_feature_dim: 128
+num_diffusion_iters: 100  # Number of diffusion training steps (DDPM)
+num_inference_steps: 16   # Number of inference steps (DDIM - 6x faster)
+use_resnet: true          # Use ResNet18 encoder (true) or custom CNN (false)
+random_crop_pad: 20       # Random crop padding pixels (0 = disabled); pads by 20px then crops back to original size
+
+# UNet variant (FiLM = Stanford-style, recommended)
+use_film_unet: true       # true = ConditionalUNet1D (FiLM), false = DiffusionUNet1D (simple)
+film_step_embed_dim: 256  # Timestep embedding dim for FiLM UNet (Stanford: 256)
+film_kernel_size: 5       # Conv kernel size for FiLM UNet (Stanford: 5)
+# film_down_dims: [256, 512, 1024]  # Channel widths for FiLM UNet (default if unset)
+
+# Vision pooling (auto: SpatialSoftmax when use_film_unet=true)
+use_spatial_softmax: true # null = auto (true if use_film_unet else false); or override explicitly
+num_keypoints: 32         # SpatialSoftmax keypoints → 64-D per frame (Stanford default)
+
+# Training
+num_epochs: 3000
+batch_size: 64
+learning_rate: 5.0e-5  # Peak LR reached after warmup
+weight_decay: 1.0e-5   # AdamW weight decay
+ema_max_value: 0.9999  # EMA adaptive decay upper bound (UNet-only, Stanford default)
+seed: 42
+
+# LR schedule: linear warmup → cosine decay
+warmup_epochs: 20     # Linear warmup from 0 → peak_lr over first 500 epochs (~16%)
+lr_min_factor: 0.01    # Cosine decays to peak_lr * 0.01 at the end
+
+# Data
+val_ratio: 0.1        # Validation split ratio
+num_workers: 4        # DataLoader workers
+
+# Early stopping
+early_stopping_patience: 50  # Stop if no improvement for N post-warmup epochs (0 = disabled)
+
+# Checkpointing
+output_dir: "/media/protac/Desk SSD/Nhan/trained_models_franka"
+save_every: 200        # Save checkpoint every N epochs
