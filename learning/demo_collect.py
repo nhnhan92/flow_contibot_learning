@@ -291,7 +291,7 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--robot_ip', '-ri', default=None,
               help='Arm IP. Default: 150.65.146.87 (UR5) or 172.16.0.2 (Franka).')
 @click.option('--arduino_port', default="/dev/ttyACM0")
-@click.option('--camera_serial_global', help='RealSense serial for the global (scene) camera. '
+@click.option('--camera_serial_global', default=827112072398, help='RealSense serial for the global (scene) camera. '
               'Required when both cameras are connected -- leaving this and/or '
               '--camera_serial_wrist unset makes which physical camera binds to which role '
               'unpredictable. Look up serials with system_verification/test_camera.py.')
