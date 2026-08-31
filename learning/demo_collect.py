@@ -433,12 +433,12 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
 
     # Get initial pose
     tcp_pose = ur5.get_tcp_pose()
-    init_pose = np.array([0.550, 0.045, 0.45, -3,  -0.82,  0.04])
+    init_pose = np.array([0.550, 0.045, 0.45, 3.14, 0.0, -0.05])
     target_pose = init_pose.copy()
 
     last_action = init_pose.copy() if not is_franka else np.zeros(6)
 
-    move_2_init_pos(robot, tcp_pose, init_pose, dt=dt, velocity=0.02, duration=5.0, gain=150, is_franka=is_franka)
+    move_2_init_pos(robot, tcp_pose, init_pose, dt=dt, velocity=0.02, duration=10.0, gain=150, is_franka=is_franka)
     tcp_pose = robot.get_tcp_pose()
     print(f"\nInitial pose: [{', '.join([f'{x:.3f}' for x in tcp_pose])}]")
     print("\nReady! Press 'C' to start recording.\n")
