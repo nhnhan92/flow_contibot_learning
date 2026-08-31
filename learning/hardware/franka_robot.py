@@ -258,7 +258,17 @@ class FrankaRobot:
         asynchronous : If True return immediately.
         """
         target_pose = np.asarray(target_pose, dtype=float)
-        motion = CartesianMotion(RobotPose(_pose6_to_affine(target_pose)), ReferenceType.Absolute)
+        # Preserve the arm's current elbow (redundant joint-3) configuration
+        # instead of leaving it to the planner to pick freely. This is a
+        # 7-DOF arm: an unconstrained elbow choice for the target pose can
+        # require a large, discontinuous null-space swing to reach even a
+        # modest Cartesian target, tripping joint_velocity_discontinuity
+        # (bundled with the cartesian_motion_generator_*_discontinuity
+        # reflexes) regardless of how conservatively translation/rotation
+        # dynamics are scaled.
+        current_elbow = self._robot.current_pose.elbow_state
+        target_robot_pose = RobotPose(_pose6_to_affine(target_pose), current_elbow)
+        motion = CartesianMotion(target_robot_pose, ReferenceType.Absolute)
 
         prev_dyn = self._robot.relative_dynamics_factor
         self._robot.relative_dynamics_factor = _dyn_factor(velocity, acceleration)
