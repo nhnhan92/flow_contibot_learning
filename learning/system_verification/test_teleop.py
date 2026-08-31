@@ -126,6 +126,14 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
     r1    = st.Rotation.from_rotvec(goal_pose[3:])
     slerp = st.Slerp([0, 1], st.Rotation.concatenate([r0, r1]))
 
+    # `duration` is an upper bound, not a fixed run time -- see
+    # demo_collect.py's move_2_init_pos for why (regressing this made
+    # "return to init" feel very slow: the old single-shot move_tcp_pose()
+    # finished in however long the actual distance took; this loop
+    # previously always ran the full `duration` regardless of distance).
+    POS_TOL = 0.005   # m
+    ROT_TOL = 0.02    # rad
+
     n = max(2, int(duration / dt))
     for i in range(n):
         a    = (i + 1) / n
@@ -135,6 +143,16 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
         _servo_toward(arm, is_franka, pose, dt, velocity, acceleration,
                       gain=gain, lookahead_time=lookahead_time)
         time.sleep(dt)
+
+        if is_franka:
+            current_pose = arm.get_tcp_pose()
+            pos_err = float(np.linalg.norm(current_pose[:3] - goal_pose[:3]))
+            rot_err = float(np.linalg.norm(
+                (st.Rotation.from_rotvec(goal_pose[3:])
+                 * st.Rotation.from_rotvec(current_pose[3:]).inv()).as_rotvec()
+            ))
+            if pos_err < POS_TOL and rot_err < ROT_TOL:
+                break
 
 
 @click.command()
