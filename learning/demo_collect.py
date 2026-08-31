@@ -261,44 +261,32 @@ def _servo_toward(arm, is_franka, target_pose, dt, velocity, acceleration,
 def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
                     velocity=0.05, acceleration=0.1, gain=200, lookahead_time=0.15,
                     is_franka=False):
-    """Move arm from start_pose to goal_pose, interpolating (position lerp +
-    rotation slerp) over `duration` seconds and streaming each waypoint --
-    UR5eRobot via servo_tcp_pose (RTDE servoL) at ~1/dt Hz, FrankaRobot
-    (franky) via _servo_toward's error-based feed-forward set_ee_velocity(),
-    same as live spacemouse driving.
+    """Move arm from start_pose to goal_pose.
 
-    Franka used to take a shortcut here: one direct move_tcp_pose() call
-    (a single blocking CartesianMotion covering the whole distance). That's
-    fine for a short, nearby move, but after teleoperating the arm away
-    from goal_pose to some arbitrary reached position, the straight-line
-    Cartesian path back can pass close to a kinematic singularity, where
-    joint velocities spike (J^-1 * cartesian_velocity blows up) no matter
-    how conservatively translation/rotation/elbow dynamics are scaled --
-    tripping libfranka's cartesian_motion_generator_*_discontinuity /
-    joint_velocity_discontinuity reflexes. Interpolating through many small
-    waypoints instead reuses the exact mechanism that already drives the
-    arm robustly during live teleoperation (see _servo_toward /
-    demo_collect.py's spacemouse drive branch), rather than trusting a
-    single big automatic move to navigate whatever path it computes."""
+    UR5eRobot: interpolates (position lerp + rotation slerp) over `duration`
+    seconds, streaming each waypoint via servo_tcp_pose (RTDE servoL) at
+    ~1/dt Hz.
+
+    FrankaRobot (franky): one direct move_tcp_pose() call. It's a single
+    blocking point-to-point move with its own smooth, independently-timed
+    translation+rotation trapezoidal profile (see franka_robot.py) --
+    already the well-tested primitive for "go to this pose," so there's no
+    need to hand-roll interpolation or open a set_ee_velocity session for a
+    one-shot move like this."""
     start_pose = np.asarray(start_pose, dtype=float).copy()
     goal_pose  = np.asarray(goal_pose,  dtype=float).copy()
+
+    if is_franka:
+        # Cleanly ramp down any active set_ee_velocity() session (opened by
+        # spacemouse driving) before handing off to a blocking position
+        # move -- no-op if nothing is running.
+        arm.stop()
+        arm.move_tcp_pose(goal_pose, velocity=velocity, acceleration=acceleration)
+        return
 
     r0    = st.Rotation.from_rotvec(start_pose[3:])
     r1    = st.Rotation.from_rotvec(goal_pose[3:])
     slerp = st.Slerp([0, 1], st.Rotation.concatenate([r0, r1]))
-
-    # `duration` is an upper bound, not a fixed run time: once converged,
-    # the loop exits immediately rather than idling out the rest of it.
-    # UR5e's servo_tcp_pose has no independent way to signal "arrived", so
-    # it keeps the original fixed-duration behavior -- only Franka checks
-    # convergence, since regressing this was specifically what made
-    # "return to init" feel slow after the earlier singularity fix: the old
-    # single-shot move_tcp_pose() finished in however long the actual
-    # distance took (fast when already close); this interpolation loop
-    # previously always ran the full `duration` regardless of distance,
-    # even when the arm reached goal_pose in the first couple of ticks.
-    POS_TOL = 0.005   # m
-    ROT_TOL = 0.02    # rad
 
     n = max(2, int(duration / dt))
     for i in range(n):
@@ -309,16 +297,6 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
         _servo_toward(arm, is_franka, pose, dt, velocity, acceleration,
                       gain=gain, lookahead_time=lookahead_time)
         time.sleep(dt)
-
-        if is_franka:
-            current_pose = arm.get_tcp_pose()
-            pos_err = float(np.linalg.norm(current_pose[:3] - goal_pose[:3]))
-            rot_err = float(np.linalg.norm(
-                (st.Rotation.from_rotvec(goal_pose[3:])
-                 * st.Rotation.from_rotvec(current_pose[3:]).inv()).as_rotvec()
-            ))
-            if pos_err < POS_TOL and rot_err < ROT_TOL:
-                break
 
 @click.command()
 @click.option('--output', '-o', required=True, default=None, help='Output folder name')

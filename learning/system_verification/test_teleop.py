@@ -103,36 +103,28 @@ def _servo_toward(arm, is_franka, target_pose, dt, velocity, acceleration,
 def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
                     velocity=0.1, acceleration=0.1, gain=200, lookahead_time=0.15,
                     is_franka=False):
-    """Move arm from start_pose to goal_pose, interpolating (position lerp +
-    rotation slerp) over `duration` seconds and streaming each waypoint --
-    UR5eRobot via servo_tcp_pose (RTDE servoL) at ~1/dt Hz, FrankaRobot
-    (franky) via _servo_toward's error-based feed-forward set_ee_velocity().
+    """Move arm from start_pose to goal_pose.
 
-    Franka used to take a shortcut here: one direct move_tcp_pose() call
-    (a single blocking CartesianMotion covering the whole distance). That's
-    fine for a short, nearby move, but for a larger move the straight-line
-    Cartesian path can pass close to a kinematic singularity, where joint
-    velocities spike (J^-1 * cartesian_velocity blows up) no matter how
-    conservatively translation/rotation/elbow dynamics are scaled --
-    tripping libfranka's cartesian_motion_generator_*_discontinuity /
-    joint_velocity_discontinuity reflexes (see demo_collect.py's
-    move_2_init_pos for the same fix and full explanation). Interpolating
-    through many small waypoints instead reuses the exact mechanism that
-    already drives the arm robustly during live teleoperation."""
+    UR5eRobot: interpolates (position lerp + rotation slerp) over `duration`
+    seconds, streaming each waypoint via servo_tcp_pose (RTDE servoL) at
+    ~1/dt Hz.
+
+    FrankaRobot (franky): one direct move_tcp_pose() call. It's a single
+    blocking point-to-point move with its own smooth, independently-timed
+    translation+rotation trapezoidal profile (see franka_robot.py) --
+    already the well-tested primitive for "go to this pose," so there's no
+    need to hand-roll interpolation or open a set_ee_velocity session for a
+    one-shot move like this."""
     start_pose = np.asarray(start_pose, dtype=float).copy()
     goal_pose  = np.asarray(goal_pose,  dtype=float).copy()
+
+    if is_franka:
+        arm.move_tcp_pose(goal_pose, velocity=velocity, acceleration=acceleration)
+        return
 
     r0    = st.Rotation.from_rotvec(start_pose[3:])
     r1    = st.Rotation.from_rotvec(goal_pose[3:])
     slerp = st.Slerp([0, 1], st.Rotation.concatenate([r0, r1]))
-
-    # `duration` is an upper bound, not a fixed run time -- see
-    # demo_collect.py's move_2_init_pos for why (regressing this made
-    # "return to init" feel very slow: the old single-shot move_tcp_pose()
-    # finished in however long the actual distance took; this loop
-    # previously always ran the full `duration` regardless of distance).
-    POS_TOL = 0.005   # m
-    ROT_TOL = 0.02    # rad
 
     n = max(2, int(duration / dt))
     for i in range(n):
@@ -143,16 +135,6 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
         _servo_toward(arm, is_franka, pose, dt, velocity, acceleration,
                       gain=gain, lookahead_time=lookahead_time)
         time.sleep(dt)
-
-        if is_franka:
-            current_pose = arm.get_tcp_pose()
-            pos_err = float(np.linalg.norm(current_pose[:3] - goal_pose[:3]))
-            rot_err = float(np.linalg.norm(
-                (st.Rotation.from_rotvec(goal_pose[3:])
-                 * st.Rotation.from_rotvec(current_pose[3:]).inv()).as_rotvec()
-            ))
-            if pos_err < POS_TOL and rot_err < ROT_TOL:
-                break
 
 
 @click.command()
