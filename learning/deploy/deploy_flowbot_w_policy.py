@@ -64,7 +64,7 @@ DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
 
 # Franka start pose -- matches init_pose in demo_collect.py, i.e. where
 # Franka demonstrations actually started from.
-FRANKA_START_POSE = [0.550, 0.045, 0.45, 3.14, 0.0, -0.05]
+FRANKA_START_POSE = [0.45, 0.045, 0.5, 3.14, 0.0, -0.05]
 
 # Fixed TCP rotation used when executing XYZ-only actions from the policy.
 # Rotation is not predicted by the model (action_dim=8) so we hold it constant.
@@ -440,14 +440,19 @@ class RobotDeployment:
         else:  # d == 3: append fixed rotation so the robot holds its orientation
             tcp_target = action[:3].tolist() + TCP_FIXED_ROTATION
         pwm_raw    = action[d:d+3]
+
+        # Decode predicted operation mode (denorm ~[0,1] → binary)
+        op_mode_pred = np.clip(np.round(action[d+3:d+5]), 0, 1).astype(int)
+
+        # PWM offset, flowbot-active steps only.
+        if op_mode_pred[1] == 1:
+            pwm_raw = pwm_raw + np.array([3, 0, 2])
+
         pwm_int    = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
 
         # Drop protection: if any channel decreases vs last sent PWM, hold previous value
         if np.any(pwm_int < self.current_pwm):
             pwm_int = self.current_pwm.copy()
-
-        # Decode predicted operation mode (denorm ~[0,1] → binary)
-        op_mode_pred = np.clip(np.round(action[d+3:d+5]), 0, 1).astype(int)
 
         # Gate arm command: only move when ur5_active (field name kept for both arms)
         if op_mode_pred[0] == 1:
@@ -518,7 +523,7 @@ class RobotDeployment:
 
     # ── Start position ────────────────────────────────────────────────────────
 
-    def move_to_start(self, speed: float = 0.1, accel: float = 0.1):
+    def move_to_start(self, speed: float = 0.05, accel: float = 0.05):
         """
         Move the arm to its default start pose using a point-to-point move,
         then reset flowbot.
@@ -573,6 +578,19 @@ class RobotDeployment:
         try:
             while total_steps < max_steps:
                 # ── Plan: run DDIM inference ──────────────────────────────────
+                # Stop any live joint-velocity session before this heavy,
+                # synchronous compute burst -- otherwise a JointVelocityMotion
+                # left streaming from the previous action_horizon's last step
+                # keeps running while DDIM inference (ResNet+UNet, CPU-bound
+                # if --device cpu) competes for CPU scheduling time, which can
+                # starve franky/libfranka's realtime communication thread long
+                # enough to miss its deadline -- the same
+                # communication_constraints_violation reflex already seen (and
+                # fixed the same way) for flowbot's synchronous work in
+                # demo_collect.py. UR5e's servo_tcp_pose has no persistent
+                # session to stop here, so this is Franka-only.
+                if self.is_franka:
+                    self.robot.stop_joint_velocity()
                 t_plan_start = time.time()
                 actions = self._predict_actions()   # (pred_horizon, 9)
                 t_plan = time.time() - t_plan_start
@@ -615,8 +633,8 @@ class RobotDeployment:
                     # Update obs buffer AFTER robot has moved toward target
                     state_raw = self._update_obs_buffer()
                     if self.verbose:
-                        _, image_raw, _ = self._get_raw_observation()   # second read just for display
-                        cv2.imshow("Live", cv2.cvtColor(image_raw, cv2.COLOR_RGB2BGR))
+                        _, image_raw, image_wrist = self._get_raw_observation()   # second read just for display
+                        cv2.imshow("Live", cv2.cvtColor(image_wrist, cv2.COLOR_RGB2BGR))
                         cv2.waitKey(1)
                     if logger is not None:
                         logger.log_step(state_raw, action, pwm_int)

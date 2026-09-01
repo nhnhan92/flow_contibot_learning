@@ -457,7 +457,7 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
 
     # Get initial pose
     tcp_pose = ur5.get_tcp_pose()
-    init_pose = np.array([0.550, 0.045, 0.45, 3.14, 0.0, -0.05])
+    init_pose = np.array([0.45, 0.045, 0.5, 3.14, 0.0, -0.05])
     target_pose = init_pose.copy()
 
     last_action = init_pose.copy() if not is_franka else np.zeros(7)
