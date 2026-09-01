@@ -17,8 +17,8 @@ Usage:
 Hardware:
     - UR5e (RTDE servoL) or Franka (franky joint-velocity control)
     - Flowbot soft pneumatic manipulator (3 valves via Arduino serial)
-    - Intel RealSense camera(s): one (global) or two (global + wrist) --
-      determined automatically from the checkpoint's use_wrist_camera config,
+    - Intel RealSense camera(s): determined automatically from the
+      checkpoint's camera_mode config ('global', 'wrist', or 'both'),
       matching what it was trained with.
 
 State  (tcp_dims+5 D): robot TCP pose[:tcp_dims] + flowbot pwm (3D) + operation_mode (2D)
@@ -91,10 +91,11 @@ MAX_TCP_DELTA = 0.02   # m per step -- UR5e only
 # velocity limit is inherently per-DOF.
 FRANKA_MAX_JOINT_VEL = 0.3   # rad/s
 
-# Default RealSense serials, matching demo_collect.py's -- only used when
-# the checkpoint's config says use_wrist_camera=True (dual-camera deploy),
-# so both pipelines bind to distinct physical devices instead of racing to
-# grab the same one (see demo_collect.py's camera connection comments).
+# Default RealSense serials, matching demo_collect.py's -- both are passed
+# explicitly whenever their camera is opened (regardless of camera_mode) so
+# a single-camera deploy still binds the intended physical device even if
+# both cameras happen to be connected, and 'both' mode's two pipelines never
+# race to grab the same one (see demo_collect.py's camera connection comments).
 _DEFAULT_CAMERA_SERIAL_GLOBAL = '051222061185'
 _DEFAULT_CAMERA_SERIAL_WRIST  = '827112072398'
 
@@ -222,32 +223,49 @@ class RobotDeployment:
         # Franka's action is always 7D joint velocities (tcp_dims doesn't
         # apply to it, only to state); UR5e's action is the TCP pose.
         self.action_dim_arm = 7 if self.is_franka else self.tcp_dims
-        self.num_cameras = self.policy.num_cameras   # 1 (global only) or 2 (+ wrist), from checkpoint config
+        self.camera_mode = self.config.get('camera_mode', 'global')
+        if self.camera_mode not in ('global', 'wrist', 'both'):
+            raise ValueError(
+                f"Checkpoint config has camera_mode={self.camera_mode!r} "
+                "(expected 'global', 'wrist', or 'both')"
+            )
+        self.num_cameras = self.policy.num_cameras   # 1 (single) or 2 (+ wrist), from checkpoint config
         print(f"      obs_horizon={self.obs_horizon}, action_horizon={self.action_horizon}")
         print(f"      tcp_dims={self.tcp_dims}  ({'xyz only' if self.tcp_dims == 3 else 'xyz+rotation'})")
         print(f"      action_dim_arm={self.action_dim_arm} ({'joint velocity' if self.is_franka else 'TCP pose'})")
-        print(f"      num_cameras={self.num_cameras}")
+        print(f"      camera_mode={self.camera_mode}  (num_cameras={self.num_cameras})")
         print(f"      device={device_obj}")
         if image_size is None:
             self.image_size = tuple(self.policy.config['image_size'])
         else:
             self.image_size = image_size
         # ── Camera(s) ─────────────────────────────────────────────────────────
-        print(f"\n[2/4] Opening RealSense camera(s) ...")
-        self.cam = RealSenseCamera(
-            serial_number=camera_serial_global if self.num_cameras == 2 else None,
-            width=camera_width,
-            height=camera_height,
-            enable_depth=False,
-        )
+        # self.cam is always the primary/single-encoder feed (matches
+        # dataset.py's obs_image routing): the global camera unless
+        # camera_mode=='wrist', in which case the wrist camera fills that
+        # same slot. self.cam_wrist is only opened for camera_mode=='both'
+        # (second, independent encoder -- matches obs_image_wrist).
+        print(f"\n[2/4] Opening RealSense camera(s) ({self.camera_mode}) ...")
+        self.cam = None
         self.cam_wrist = None
-        if self.num_cameras == 2:
-            self.cam_wrist = RealSenseCamera(
+        if self.camera_mode in ('global', 'both'):
+            self.cam = RealSenseCamera(
+                serial_number=camera_serial_global,
+                width=camera_width,
+                height=camera_height,
+                enable_depth=False,
+            )
+        if self.camera_mode in ('wrist', 'both'):
+            wrist_cam = RealSenseCamera(
                 serial_number=camera_serial_wrist,
                 width=camera_width,
                 height=camera_height,
                 enable_depth=False,
             )
+            if self.camera_mode == 'wrist':
+                self.cam = wrist_cam
+            else:
+                self.cam_wrist = wrist_cam
         print("      Camera(s) OK")
 
         # ── Robot arm ─────────────────────────────────────────────────────────
@@ -298,8 +316,9 @@ class RobotDeployment:
 
         Returns:
             state_raw       : np.ndarray (tcp_dims+5,) — [tcp[:tcp_dims], pwm1,pwm2,pwm3, ur5_active, flowbot_active]
-            image_raw       : np.ndarray (H,W,3) uint8 — cropped global camera frame
-            image_raw_wrist : np.ndarray (H,W,3) uint8, or None if num_cameras==1 — cropped wrist camera frame
+            image_raw       : np.ndarray (H,W,3) uint8 — cropped primary-camera frame
+                               (global, unless camera_mode=='wrist')
+            image_raw_wrist : np.ndarray (H,W,3) uint8, or None unless camera_mode=='both' — cropped wrist camera frame
         """
         # Robot TCP pose — slice to tcp_dims (3=xyz only, 6=xyz+rotation)
         tcp_pose = self.robot.get_tcp_pose()
@@ -313,11 +332,12 @@ class RobotDeployment:
         # Camera image(s)
         camera_frame, _ = self.cam.get_frames()
         if camera_frame is None:
-            raise RuntimeError("Global camera read failed")
+            cam_role = 'Wrist' if self.camera_mode == 'wrist' else 'Global'
+            raise RuntimeError(f"{cam_role} camera read failed")
         image_raw = self._crop_resize(camera_frame)
 
         image_raw_wrist = None
-        if self.num_cameras == 2:
+        if self.camera_mode == 'both':
             camera_frame_wrist, _ = self.cam_wrist.get_frames()
             if camera_frame_wrist is None:
                 raise RuntimeError("Wrist camera read failed")
@@ -703,9 +723,10 @@ def main():
                         help='Robot IP (default: 150.65.146.87 for ur5, 172.16.0.2 for franka)')
     parser.add_argument('--camera_serial_global', type=str, default=_DEFAULT_CAMERA_SERIAL_GLOBAL,
                         help='RealSense serial for the global camera. Only used when the checkpoint '
-                             'was trained with use_wrist_camera=True (two cameras connected at once).')
+                             "was trained with camera_mode 'global' or 'both'.")
     parser.add_argument('--camera_serial_wrist',  type=str, default=_DEFAULT_CAMERA_SERIAL_WRIST,
-                        help='RealSense serial for the wrist camera. See --camera_serial_global.')
+                        help="RealSense serial for the wrist camera. Only used when the checkpoint "
+                             "was trained with camera_mode 'wrist' or 'both'.")
     parser.add_argument('--flowbot_port',  type=str,   default='/dev/ttyACM0',
                         help='Arduino serial port for Flowbot')
     parser.add_argument('--flowbot_baud',  type=int,   default=115200,
