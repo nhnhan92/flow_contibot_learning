@@ -335,7 +335,7 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--flowbot_speed_factor', '-fspeed', default =1.5, type=float)
 @click.option('--max_pos_speed', default=0.05, type=float)
 @click.option('--max_rot_speed', default=0.05, type=float)
-@click.option('--deadzone', default=0.1, type=float, help='Spacemouse threshold')
+@click.option('--deadzone', default=0.3, type=float, help='Spacemouse threshold')
 @click.option('--release_frames', default=10, type=int,
               help='Frames to record after release (both-button press). '
                    'At 10 Hz the default of 10 gives 1 s of released state.')
@@ -457,7 +457,7 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
 
     # Get initial pose
     tcp_pose = ur5.get_tcp_pose()
-    init_pose = np.array([0.550, 0.045, 0.45, 3.14, 0.0, -0.05])
+    init_pose = np.array([0.45, 0.045, 0.5, 3.14, 0.0, -0.05])
     target_pose = init_pose.copy()
 
     last_action = init_pose.copy() if not is_franka else np.zeros(7)
@@ -491,7 +491,7 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                         fb.reset()  # Reset flowbot
                         fb.update_plot()
                         tcp_pose = ur5.get_tcp_pose()
-                        move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, velocity=0.1, duration=2.0, gain=150, is_franka=is_franka)
+                        move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, velocity=0.04, duration=3.0, gain=150, is_franka=is_franka)
                         print(f"✅ Robot reset to initial pose!\n")
                         target_pose = init_pose.copy()
                         last_action = init_pose.copy() if not is_franka else np.zeros(7)
@@ -523,7 +523,7 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                         time.sleep(1.0)
                         try:
                             tcp_pose = ur5.get_tcp_pose()
-                            move_2_init_pos(ur5, tcp_pose, init_pose, velocity=0.1, dt=dt, duration=2.0, gain=150, is_franka=is_franka)
+                            move_2_init_pos(ur5, tcp_pose, init_pose, velocity=0.04, dt=dt, duration=3.0, gain=150, is_franka=is_franka)
                             print(f"✅ Robot returned to start pose!\n")
                             target_pose = init_pose.copy()
                             last_action = init_pose.copy() if not is_franka else np.zeros(7)
