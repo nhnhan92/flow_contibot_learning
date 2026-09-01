@@ -446,7 +446,7 @@ class RobotDeployment:
 
         # PWM offset, flowbot-active steps only.
         if op_mode_pred[1] == 1:
-            pwm_raw = pwm_raw + np.array([3, 0, 2])
+            pwm_raw = pwm_raw + np.array([3, 0, 1])
 
         pwm_int    = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
 
@@ -634,7 +634,7 @@ class RobotDeployment:
                     state_raw = self._update_obs_buffer()
                     if self.verbose:
                         _, image_raw, image_wrist = self._get_raw_observation()   # second read just for display
-                        cv2.imshow("Live", cv2.cvtColor(image_wrist, cv2.COLOR_RGB2BGR))
+                        cv2.imshow("Live", cv2.cvtColor(image_raw, cv2.COLOR_RGB2BGR))
                         cv2.waitKey(1)
                     if logger is not None:
                         logger.log_step(state_raw, action, pwm_int)
@@ -643,6 +643,10 @@ class RobotDeployment:
 
         except _ReleaseDetected:
             print("✅ Episode ended by release phase")
+            time.sleep(1)
+            print("Resetting Flowbot ...")
+            self.fb.reset()
+            self.move_to_start()
         except KeyboardInterrupt:
             print("\n⚠️  Episode interrupted by user")
 
@@ -652,15 +656,13 @@ class RobotDeployment:
         # Stop arm servoing/velocity control and let it settle before any subsequent move.
         # Franka: joint velocity execution needs stop_joint_velocity(), not stop()
         # (Cartesian) -- see hardware/franka_robot.py's stop_joint_velocity() docstring.
+        self.fb.reset()
         if self.is_franka:
+            self.move_to_start()
             self.robot.stop_joint_velocity()
         else:
             self.robot.stop()
         time.sleep(0.5)
-
-        # Reset Flowbot
-        print("Resetting Flowbot ...")
-        self.fb.reset()
 
         # Save deployment log
         if logger is not None:
