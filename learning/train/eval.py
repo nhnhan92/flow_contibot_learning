@@ -45,7 +45,8 @@ class DiffusionPolicyInference:
         self.checkpoint = checkpoint
 
         # Create model
-        self.num_cameras = 2 if self.config.get('use_wrist_camera', False) else 1
+        self.camera_mode = self.config.get('camera_mode', 'global')
+        self.num_cameras = 2 if self.camera_mode == 'both' else 1
         self.model = DiffusionPolicy(
             obs_horizon=self.config['obs_horizon'],
             pred_horizon=self.config['pred_horizon'],
@@ -105,14 +106,14 @@ class DiffusionPolicyInference:
             obs_state: (B, obs_horizon, state_dim) or (obs_horizon, state_dim)
             obs_image: (B, obs_horizon, C, H, W) or (obs_horizon, C, H, W)
             obs_image_wrist: same shape as obs_image -- required iff this
-                checkpoint's config has use_wrist_camera=True (num_cameras=2)
+                checkpoint's config has camera_mode='both' (num_cameras=2)
 
         Returns:
             actions: (B, pred_horizon, action_dim) or (pred_horizon, action_dim)
         """
         if self.num_cameras == 2 and obs_image_wrist is None:
             raise ValueError(
-                "This checkpoint was trained with use_wrist_camera=True "
+                "This checkpoint was trained with camera_mode='both' "
                 "(num_cameras=2) -- obs_image_wrist is required."
             )
 

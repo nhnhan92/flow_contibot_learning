@@ -25,7 +25,7 @@ class DiffusionDataset(Dataset):
         - camera_0:       (T, H, W, 3) - RGB images, global (scene) camera
         - camera_1:       (T, H, W, 3) - RGB images, wrist camera (optional,
                           only present in datasets collected with a wrist
-                          camera connected -- see `use_wrist_camera`)
+                          camera connected -- see `camera_mode`)
         - timestamp:      (T,) - timestamps
 
     State  (tcp_dims+5 D):  robot_eef_pose[:tcp_dims] + pwm_signals (3D) + operation_mode (2D)
@@ -51,6 +51,16 @@ class DiffusionDataset(Dataset):
         [0, 1] = flowbot being controlled
         [1, 1] = release phase
 
+    camera_mode selects which camera(s) feed the model, matching model.py's
+    num_cameras (1 = single vision encoder, 2 = two independent encoders):
+        'global' (default): camera_0 only  -> sample['obs_image']
+        'wrist':             camera_1 only  -> sample['obs_image'] (single
+                              encoder still -- the pixels just come from the
+                              wrist camera instead of the global one)
+        'both':               camera_0      -> sample['obs_image']
+                               camera_1      -> sample['obs_image_wrist']
+    Set via config key 'camera_mode'.
+
     Using data/action (commanded target_pose for UR5e; executed joint velocity
     for Franka) rather than data/robot_eef_pose for action labels ensures
     action[0] != obs[-1]: the first predicted action is the command that moves
@@ -69,7 +79,7 @@ class DiffusionDataset(Dataset):
         exclude_episodes=None,  # List of episode indices to exclude
         tcp_dims=3,         # TCP *state* components used: 3=xyz only, 6=xyz+rotation
         arm='ur5',          # 'ur5' (target TCP pose action) or 'franka' (7D joint velocity action)
-        use_wrist_camera=False,  # Also load camera_1 (wrist) alongside camera_0 (global)
+        camera_mode='global',  # 'global' (camera_0 only), 'wrist' (camera_1 only), or 'both'
     ):
         self.dataset_path = Path(dataset_path)
         self.obs_horizon = obs_horizon
@@ -82,20 +92,38 @@ class DiffusionDataset(Dataset):
         self.tcp_dims = tcp_dims
         self.arm = arm.lower()
         self.is_franka = self.arm == 'franka'
-        self.use_wrist_camera = use_wrist_camera
         # Franka's action is always 7D joint velocities (tcp_dims doesn't apply
         # to it); UR5e's action is the TCP pose, sliced like state is.
         self.action_dim_raw = 7 if self.is_franka else self.tcp_dims
 
+        self.camera_mode = camera_mode.lower()
+        if self.camera_mode not in ('global', 'wrist', 'both'):
+            raise ValueError(f"camera_mode must be 'global', 'wrist', or 'both', got {camera_mode!r}")
+        self.use_global_camera = self.camera_mode in ('global', 'both')
+        self.use_wrist_camera  = self.camera_mode in ('wrist', 'both')
+        self.num_cameras = int(self.use_global_camera) + int(self.use_wrist_camera)
+        # Which raw camera key feeds sample['obs_image'] (the single/primary
+        # vision encoder in model.py): camera_0 unless this is wrist-only,
+        # in which case camera_1's pixels go through that same slot -- the
+        # model doesn't care which physical camera a single-encoder path's
+        # pixels came from. 'both' additionally routes camera_1 through
+        # obs_image_wrist (second, independent encoder) -- see __getitem__.
+        self._primary_camera_key = 'data/camera_0' if self.use_global_camera else 'data/camera_1'
+
         # Load zarr dataset
         self.zarr_root = zarr.open(str(self.dataset_path), mode='r')
 
+        if self.use_global_camera and 'camera_0' not in self.zarr_root['data']:
+            raise ValueError(
+                f"camera_mode={self.camera_mode!r} needs data/camera_0, but "
+                f"{self.dataset_path} has none."
+            )
         if self.use_wrist_camera and 'camera_1' not in self.zarr_root['data']:
             raise ValueError(
-                f"use_wrist_camera=True but {self.dataset_path} has no data/camera_1 -- "
-                "this dataset was collected without a wrist camera (or with "
-                "--no_camera_wrist). Either recollect with the wrist camera "
-                "connected, or set use_wrist_camera=False."
+                f"camera_mode={self.camera_mode!r} needs data/camera_1, but "
+                f"{self.dataset_path} has none -- this dataset was collected "
+                "without a wrist camera (or with --no_camera_wrist). Either "
+                "recollect with the wrist camera connected, or use camera_mode='global'."
             )
         if self.is_franka:
             action_shape = self.zarr_root['data/action'].shape
@@ -282,7 +310,7 @@ class DiffusionDataset(Dataset):
 
         # Images
         if self.use_images:
-            images = self._load_and_process_images('data/camera_0', obs_start, obs_end)
+            images = self._load_and_process_images(self._primary_camera_key, obs_start, obs_end)
         else:
             images = np.zeros((self.obs_horizon, 3, *self.image_size), dtype=np.float32)
 
@@ -291,7 +319,7 @@ class DiffusionDataset(Dataset):
             'obs_image': torch.from_numpy(images).float(),    # (obs_horizon, 3, H, W)
         }
 
-        if self.use_wrist_camera:
+        if self.camera_mode == 'both':
             if self.use_images:
                 images_wrist = self._load_and_process_images('data/camera_1', obs_start, obs_end)
             else:

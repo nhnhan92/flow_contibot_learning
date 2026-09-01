@@ -14,9 +14,10 @@ arm: franka
 
 # Cameras: demo_collect.py always records camera_0 (global); camera_1 (wrist)
 # is present only if collected with the wrist camera connected (not
-# --no_camera_wrist). Set true only if your dataset actually has camera_1 --
-# dataset.py raises a clear error at load time if it doesn't.
-use_wrist_camera: true
+# --no_camera_wrist). 'global' (camera_0 only), 'wrist' (camera_1 only), or
+# 'both' -- dataset.py raises a clear error at load time if the dataset is
+# missing a camera this setting needs.
+camera_mode: global
 
 # TCP dimensions: 3 = xyz only, 6 = xyz + rotation (rx,ry,rz)
 # Only affects STATE (robot_eef_pose[:tcp_dims]) -- Franka's ACTION is

@@ -91,7 +91,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default=None, help='Dataset path')
     parser.add_argument('--output_dir', '-o', type=str, default=None, help='Output directory for checkpoints and logs')
-    parser.add_argument('--config', type=str, default='/config/config_train_flowbot.yaml', help='Config file')
+    parser.add_argument('--config', type=str, default='/config/config_train_flowbot_franka.yaml', help='Config file')
     parser.add_argument('--resume', type=str, default=None, help='Checkpoint to resume from')
     parser.add_argument('--device', type=str, default='cuda', help='Device (cuda/cpu)')
     parser.add_argument('--wandb_project', type=str, default='pickplace-diffusion', help='W&B project name')
@@ -127,7 +127,7 @@ def main():
         print(f"Excluding episodes: {exclude_episodes}")
 
     arm = config.get('arm', 'ur5')
-    use_wrist_camera = config.get('use_wrist_camera', False)
+    camera_mode = config.get('camera_mode', 'global')
     dataset = DiffusionDataset(
         dataset_path=args.dataset if args.dataset is not None else config['dataset_path'],
         obs_horizon=config['obs_horizon'],
@@ -137,9 +137,9 @@ def main():
         exclude_episodes=exclude_episodes,
         tcp_dims=config.get('tcp_dims', 3),
         arm=arm,
-        use_wrist_camera=use_wrist_camera,
+        camera_mode=camera_mode,
     )
-    print(f"Arm: {arm}  |  wrist camera: {use_wrist_camera}")
+    print(f"Arm: {arm}  |  camera_mode: {camera_mode}")
     print(f"Total samples: {len(dataset)}")
     d = dataset.tcp_dims
     print(f"State  TCP range - min: {dataset.state_min[:d]}, max: {dataset.state_max[:d]}")
@@ -188,8 +188,9 @@ def main():
     pool_name = 'SpatialSoftmax' if (use_ss or (use_ss is None and use_film)) else 'AvgPool'
     print(f"UNet variant  : {'FiLM (ConditionalUNet1D)' if use_film else 'Simple (DiffusionUNet1D)'}")
     print(f"Vision pooling: {pool_name}" + (f" ({n_kp} kp → {n_kp*2}D/frame)" if 'Spatial' in pool_name else ''))
-    num_cameras = 2 if use_wrist_camera else 1
-    print(f"Cameras       : {num_cameras} ({'global + wrist' if num_cameras == 2 else 'global only'})")
+    num_cameras = 2 if camera_mode == 'both' else 1
+    cam_desc = {'global': 'global only', 'wrist': 'wrist only', 'both': 'global + wrist'}[camera_mode]
+    print(f"Cameras       : {num_cameras} ({cam_desc})")
     model = DiffusionPolicy(
         obs_horizon=config['obs_horizon'],
         pred_horizon=config['pred_horizon'],
