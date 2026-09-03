@@ -663,9 +663,9 @@ class RobotDeployment:
 
         except _ReleaseDetected:
             print("✅ Episode ended by release phase")
-            time.sleep(1)
-            print("Resetting Flowbot ...")
-            self.fb.reset()
+            # time.sleep(1)
+            # print("Resetting Flowbot ...")
+            # self.fb.reset()
             self.move_to_start()
         except KeyboardInterrupt:
             print("\n⚠️  Episode interrupted by user")
@@ -676,6 +676,7 @@ class RobotDeployment:
         # Stop arm servoing/velocity control and let it settle before any subsequent move.
         # Franka: joint velocity execution needs stop_joint_velocity(), not stop()
         # (Cartesian) -- see hardware/franka_robot.py's stop_joint_velocity() docstring.
+        print("Resetting Flowbot ...")
         self.fb.reset()
         if self.is_franka:
             self.move_to_start()
