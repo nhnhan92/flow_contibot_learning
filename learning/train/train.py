@@ -132,6 +132,9 @@ def main():
         image_size=tuple(config['image_size']),
         exclude_episodes=exclude_episodes,
         tcp_dims=config.get('tcp_dims', 3),
+        crop_scale=config.get('crop_scale', 1.5),
+        crop_x=config.get('crop_x', 0.5),
+        crop_y=config.get('crop_y', 0.5),
     )
     print(f"Total samples: {len(dataset)}")
     print(f"State  XYZ range - min: {dataset.state_min[:3]}, max: {dataset.state_max[:3]}")

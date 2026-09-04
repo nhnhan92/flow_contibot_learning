@@ -15,9 +15,14 @@ Usage:
     python system_verification/test_camera.py --no-display
 """
 
+import os
+import sys
 import time
 import click
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from hardware.image_utils import crop_and_resize
 
 try:
     import pyrealsense2 as rs
@@ -48,14 +53,17 @@ def get_camera_info():
 
 
 def test_streams(
-    width: int = 1280,
-    height: int = 720,
+    width: int = 640,
+    height: int = 480,
     fps: int = 30,
-    duration: int = 10,
+    duration: int = 30,
     display: bool = True,
     target_width: int = 320,
     target_height: int = 240,
     rgb_only: bool = False,
+    crop_scale: float = 1.5,
+    crop_x: float = 0.5,
+    crop_y: float = 0.5,
 ):
     """
     Test camera RGB and Depth streams
@@ -67,6 +75,8 @@ def test_streams(
         display: Show live preview
         target_width, target_height: Resize target for training (from config)
         rgb_only: Only enable RGB stream (no depth)
+        crop_scale: Crop window size as a multiple of (target_width, target_height)
+        crop_x, crop_y: Crop anchor in [0, 1] (0=left/top, 0.5=center, 1=right/bottom)
     """
     print("\n" + "="*60)
     print("         REALSENSE CAMERA STREAM TEST")
@@ -227,11 +237,15 @@ def test_streams(
                 color_bgr = cv2.cvtColor(color_image, cv2.COLOR_RGB2BGR)
 
                 # Resize to target size for preview
-                color_resized = cv2.resize(color_bgr, (target_width, target_height))
+                color_resized = crop_and_resize(
+                    color_image, (target_height, target_width),
+                    crop_scale=crop_scale, crop_x=crop_x, crop_y=crop_y,
+                )
 
                 if rgb_only:
                     # RGB only mode
                     combined = color_resized
+                    # combined = np.hstack([color_resized, color_bgr])
                     cv2.putText(combined, f"RGB {target_width}x{target_height}", (10, 20),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 else:
@@ -252,7 +266,7 @@ def test_streams(
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
                 cv2.imshow('RealSense Test (Press q to quit, s to save)', combined)
-
+                cv2.imshow('RealSense original', color_bgr)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
                     break
@@ -300,15 +314,19 @@ def test_streams(
 
 
 @click.command()
-@click.option('--width', default=1280, help='Capture width')
-@click.option('--height', default=720, help='Capture height')
+@click.option('--width', default=640, help='Capture width')
+@click.option('--height', default=480, help='Capture height')
 @click.option('--fps', default=30, help='Target FPS')
-@click.option('--duration', default=10, help='Test duration in seconds')
+@click.option('--duration', default=100, help='Test duration in seconds')
 @click.option('--display/--no-display', default=True, help='Show live preview')
-@click.option('--target-width', default=320, help='Target resize width for training')
-@click.option('--target-height', default=240, help='Target resize height for training')
+@click.option('--target-width', '-w', default=320, help='Target resize width for training')
+@click.option('--target-height', '-h', default=240, help='Target resize height for training')
 @click.option('--rgb-only', is_flag=True, help='Only test RGB stream (no depth)')
-def main(width, height, fps, duration, display, target_width, target_height, rgb_only):
+@click.option('--crop-scale', default=1.5, help='Crop window size as a multiple of target size')
+@click.option('--crop-x', default=0.5, help='Crop anchor x in [0,1]: 0=left, 0.5=center, 1=right')
+@click.option('--crop-y', default=0.5, help='Crop anchor y in [0,1]: 0=top, 0.5=center, 1=bottom')
+def main(width, height, fps, duration, display, target_width, target_height, rgb_only,
+         crop_scale, crop_x, crop_y):
     print("="*60)
     print("         REALSENSE CAMERA TEST")
     print("="*60)
@@ -344,6 +362,9 @@ def main(width, height, fps, duration, display, target_width, target_height, rgb
         target_width=target_width,
         target_height=target_height,
         rgb_only=rgb_only,
+        crop_scale=crop_scale,
+        crop_x=crop_x,
+        crop_y=crop_y,
     )
 
     print("\n" + "="*60)

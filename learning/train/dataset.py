@@ -5,12 +5,16 @@ Loads data from zarr format collected by collect_demos_with_camera.py
 Robot: UR5e + Flowbot soft manipulator (3 pneumatic valves via PWM)
 """
 
+import os
+import sys
 import numpy as np
 import zarr
 import torch
 from torch.utils.data import Dataset
 from pathlib import Path
-import cv2
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from hardware.image_utils import crop_and_resize
 
 
 class DiffusionDataset(Dataset):
@@ -55,6 +59,9 @@ class DiffusionDataset(Dataset):
         normalize=True,
         exclude_episodes=None,  # List of episode indices to exclude
         tcp_dims=3,         # TCP components used: 3=xyz only, 6=xyz+rotation
+        crop_scale=1.5,     # Crop window size as a multiple of image_size
+        crop_x=0.5,         # Crop anchor in [0,1]: 0=left, 0.5=center, 1=right
+        crop_y=0.5,         # Crop anchor in [0,1]: 0=top, 0.5=center, 1=bottom
     ):
         self.dataset_path = Path(dataset_path)
         self.obs_horizon = obs_horizon
@@ -65,6 +72,9 @@ class DiffusionDataset(Dataset):
         self.normalize = normalize
         self.exclude_episodes = exclude_episodes if exclude_episodes is not None else []
         self.tcp_dims = tcp_dims
+        self.crop_scale = crop_scale
+        self.crop_x = crop_x
+        self.crop_y = crop_y
 
         # Load zarr dataset
         self.zarr_root = zarr.open(str(self.dataset_path), mode='r')
@@ -234,17 +244,10 @@ class DiffusionDataset(Dataset):
 
             processed_images = []
             for img in images:
-                h, w = img.shape[:2]
-                target_h, target_w = self.image_size
-
-                crop_h = min(h, int(target_h * 1.5))
-                crop_w = min(w, int(target_w * 1.5))
-
-                start_h = (h - crop_h) // 2
-                start_w = (w - crop_w) // 2
-                img_cropped = img[start_h:start_h + crop_h, start_w:start_w + crop_w]
-
-                img_resized = cv2.resize(img_cropped, (target_w, target_h))
+                img_resized = crop_and_resize(
+                    img, self.image_size,
+                    crop_scale=self.crop_scale, crop_x=self.crop_x, crop_y=self.crop_y,
+                )
                 img_normalized = (img_resized.astype(np.float32) / 127.5) - 1.0
                 processed_images.append(img_normalized)
 

@@ -37,6 +37,7 @@ from hardware.ur5e_rtde import UR5eRobot
 from hardware.flowbot import flowbot
 from hardware.realsense_camera import RealSenseCamera
 from train.eval import DiffusionPolicyInference
+from hardware.image_utils import crop_and_resize
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 PWM_MIN = 0   # 0 = fully deflated (release); model must be able to command this
@@ -183,6 +184,10 @@ class RobotDeployment:
             self.image_size = tuple(self.policy.config['image_size'])
         else:
             self.image_size = image_size
+        # Crop anchor must match training exactly (see image_utils.crop_and_resize)
+        self.crop_scale = self.config.get('crop_scale', 1.5)
+        self.crop_x = self.config.get('crop_x', 0.5)
+        self.crop_y = self.config.get('crop_y', 0.5)
         # ── Camera ────────────────────────────────────────────────────────────
         print(f"\n[2/4] Opening RealSense camera ...")
         self.cam = RealSenseCamera(
@@ -241,16 +246,12 @@ class RobotDeployment:
         if camera_frame is None:
             raise RuntimeError("Camera read failed")
         
-        # Centre-crop and resize (same as dataset.py)
-        h, w = camera_frame.shape[:2]
-        target_h, target_w = self.image_size
-        crop_h = min(h, int(target_h * 1.5))
-        crop_w = min(w, int(target_w * 1.5))
-        sh = (h - crop_h) // 2
-        sw = (w - crop_w) // 2
-        image_raw = camera_frame[sh:sh + crop_h, sw:sw + crop_w]
-        image_raw = cv2.resize(image_raw, (target_w, target_h))
-        
+        # Crop + resize — same transform (and same crop anchor) as dataset.py
+        image_raw = crop_and_resize(
+            camera_frame, self.image_size,
+            crop_scale=self.crop_scale, crop_x=self.crop_x, crop_y=self.crop_y,
+        )
+
         return state_raw, image_raw
 
     # ── Preprocessing (matching dataset.py) ──────────────────────────────────

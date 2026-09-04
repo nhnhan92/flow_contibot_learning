@@ -72,7 +72,7 @@ int pwm1_cur = 0, pwm2_cur = 0, pwm3_cur = 0;
 int pwm1_target = 0, pwm2_target = 0, pwm3_target = 0;
 int pwm_init_extra = 0;
 int base1 = 149;
-int base2 = 151;
+int base2 = 149;
 int base3 = 149;
 int pww_init1 = base1 + pwm_init_extra;
 int pww_init2 = base2 + pwm_init_extra;
