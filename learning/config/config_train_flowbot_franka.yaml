@@ -1,6 +1,6 @@
 
 # Dataset
-dataset_path: "data/demo_data/Task3/dataset.zarr"  # Path to training dataset (Zarr format), collected with --arm franka
+# dataset_path: "data/demo_data/Task3/dataset.zarr"  # Path to training dataset (Zarr format), collected with --arm franka
 obs_horizon: 2        # Number of observation frames
 pred_horizon: 16      # Number of action steps to predict
 action_horizon: 8     # Number of action steps to execute
