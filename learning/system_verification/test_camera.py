@@ -2,13 +2,6 @@
 """
 Test RealSense Camera for Diffusion Policy Data Collection
 
-Kiểm tra:
-1. RGB stream - ảnh màu (bắt buộc cho training)
-2. Depth stream - ảnh độ sâu (optional)
-3. Camera intrinsics - thông số nội tại
-4. FPS thực tế - đảm bảo đủ tốc độ
-5. Latency - độ trễ
-
 Usage:
     cd ~/Desktop/flow_contibot_learning/learning
     python system_verification/test_camera.py
@@ -464,7 +457,7 @@ def test_dual_streams(
 @click.option('--rgb-only', is_flag=True, help='Only test RGB stream (no depth)')
 @click.option('--dual', is_flag=True, help='Test the global + wrist cameras together '
               '(same connection path as demo_collect.py) instead of the default single-camera test.')
-@click.option('--camera_serial_global', default='051222061185', help='Serial for the global camera (--dual only).')
+@click.option('--camera_serial_global', default='841512070635', help='Serial for the global camera (--dual only).')
 @click.option('--camera_serial_wrist', default='827112072398', help='Serial for the wrist camera (--dual only).')
 @click.pass_context
 def main(ctx, width, height, fps, duration, display, target_width, target_height, rgb_only,
