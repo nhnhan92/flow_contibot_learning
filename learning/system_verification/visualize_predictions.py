@@ -30,22 +30,15 @@ PROJECT_DIR = os.path.dirname(DEPLOY_DIR)
 sys.path.insert(0, PROJECT_DIR)
 
 from train.eval import DiffusionPolicyInference
+from hardware.image_utils import crop_and_resize
 
 
 def _preprocess_state(state_raw, state_min, state_range):
     return (2.0 * (state_raw - state_min) / state_range - 1.0).astype(np.float32)
 
 
-def _preprocess_image(image_rgb, image_size):
-    import cv2
-    h, w = image_rgb.shape[:2]
-    target_h, target_w = image_size
-    crop_h = min(h, int(target_h * 1.5))
-    crop_w = min(w, int(target_w * 1.5))
-    sh = (h - crop_h) // 2
-    sw = (w - crop_w) // 2
-    img = image_rgb[sh:sh + crop_h, sw:sw + crop_w]
-    img = cv2.resize(img, (target_w, target_h))
+def _preprocess_image(image_rgb, image_size, crop_scale=1.5, crop_x=0.5, crop_y=0.5):
+    img = crop_and_resize(image_rgb, image_size, crop_scale=crop_scale, crop_x=crop_x, crop_y=crop_y)
     img = (img.astype(np.float32) / 127.5) - 1.0
     return img.transpose(2, 0, 1)   # (3,H,W)
 
@@ -71,6 +64,9 @@ def run_episode_inference(policy, dataset_path, episode_idx):
     pred_horizon   = config['pred_horizon']
     action_horizon = config['action_horizon']
     image_size     = tuple(config['image_size'])
+    crop_scale     = config.get('crop_scale', 1.5)
+    crop_x         = config.get('crop_x', 0.5)
+    crop_y         = config.get('crop_y', 0.5)
     state_min      = policy.checkpoint['state_min']
     state_range    = policy.checkpoint['state_range']
     action_min     = policy.checkpoint['action_min']
@@ -104,9 +100,10 @@ def run_episode_inference(policy, dataset_path, episode_idx):
                                 for s in states_raw])                  # (T,9)
 
         # Image observation window
-        import cv2
         imgs_raw = root['data/camera_0'][obs_start:abs_idx + 1]       # (T,H,W,3)
-        imgs_norm = np.stack([_preprocess_image(img, image_size) for img in imgs_raw])
+        imgs_norm = np.stack([
+            _preprocess_image(img, image_size, crop_scale, crop_x, crop_y) for img in imgs_raw
+        ])
 
         obs_state = torch.from_numpy(states_norm).unsqueeze(0)  # (1,T,9)
         obs_image = torch.from_numpy(imgs_norm).unsqueeze(0)    # (1,T,3,H,W)

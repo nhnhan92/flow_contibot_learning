@@ -5,12 +5,16 @@ Loads data from zarr format collected by collect_demos_with_camera.py
 Robot: UR5e + Flowbot soft manipulator (3 pneumatic valves via PWM)
 """
 
+import os
+import sys
 import numpy as np
 import zarr
 import torch
 from torch.utils.data import Dataset
 from pathlib import Path
-import cv2
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from hardware.image_utils import crop_and_resize
 
 
 class DiffusionDataset(Dataset):
@@ -25,7 +29,7 @@ class DiffusionDataset(Dataset):
         - camera_0:       (T, H, W, 3) - RGB images, global (scene) camera
         - camera_1:       (T, H, W, 3) - RGB images, wrist camera (optional,
                           only present in datasets collected with a wrist
-                          camera connected -- see `use_wrist_camera`)
+                          camera connected -- see `camera_mode`)
         - timestamp:      (T,) - timestamps
 
     State  (tcp_dims+5 D):  robot_eef_pose[:tcp_dims] + pwm_signals (3D) + operation_mode (2D)
@@ -51,6 +55,16 @@ class DiffusionDataset(Dataset):
         [0, 1] = flowbot being controlled
         [1, 1] = release phase
 
+    camera_mode selects which camera(s) feed the model, matching model.py's
+    num_cameras (1 = single vision encoder, 2 = two independent encoders):
+        'global' (default): camera_0 only  -> sample['obs_image']
+        'wrist':             camera_1 only  -> sample['obs_image'] (single
+                              encoder still -- the pixels just come from the
+                              wrist camera instead of the global one)
+        'both':               camera_0      -> sample['obs_image']
+                               camera_1      -> sample['obs_image_wrist']
+    Set via config key 'camera_mode'.
+
     Using data/action (commanded target_pose for UR5e; executed joint velocity
     for Franka) rather than data/robot_eef_pose for action labels ensures
     action[0] != obs[-1]: the first predicted action is the command that moves
@@ -67,9 +81,16 @@ class DiffusionDataset(Dataset):
         use_images=True,
         normalize=True,
         exclude_episodes=None,  # List of episode indices to exclude
-        tcp_dims=3,         # TCP *state* components used: 3=xyz only, 6=xyz+rotation
+        tcp_dims=3,         # TCP components used: 3=xyz only, 6=xyz+rotation
+        crop_scale=1.5,     # Crop window size as a multiple of image_size
+        crop_x=0.5,         # Crop anchor in [0,1]: 0=left, 0.5=center, 1=right
+        crop_y=0.5,         # Crop anchor in [0,1]: 0=top, 0.5=center, 1=bottom
+        wrist_image_size=None,  # Wrist camera override; None -> same as image_size
+        wrist_crop_scale=None,  # Wrist camera override; None -> same as crop_scale
+        wrist_crop_x=None,      # Wrist camera override; None -> same as crop_x
+        wrist_crop_y=None,      # Wrist camera override; None -> same as crop_y
         arm='ur5',          # 'ur5' (target TCP pose action) or 'franka' (7D joint velocity action)
-        use_wrist_camera=False,  # Also load camera_1 (wrist) alongside camera_0 (global)
+        camera_mode='global',  # 'global' (camera_0 only), 'wrist' (camera_1 only), or 'both'
     ):
         self.dataset_path = Path(dataset_path)
         self.obs_horizon = obs_horizon
@@ -80,22 +101,63 @@ class DiffusionDataset(Dataset):
         self.normalize = normalize
         self.exclude_episodes = exclude_episodes if exclude_episodes is not None else []
         self.tcp_dims = tcp_dims
+        self.crop_scale = crop_scale
+        self.crop_x = crop_x
+        self.crop_y = crop_y
+        # Wrist camera can have its own image_size/crop settings (independent
+        # vision encoder in model.py -- see SpatialSoftmax/AvgPool, both
+        # resolution-agnostic, so the two cameras need not match). Any
+        # wrist_* left as None falls back to the global-camera value above.
+        self.wrist_image_size = tuple(wrist_image_size) if wrist_image_size is not None else self.image_size
+        self.wrist_crop_scale = wrist_crop_scale if wrist_crop_scale is not None else self.crop_scale
+        self.wrist_crop_x     = wrist_crop_x     if wrist_crop_x     is not None else self.crop_x
+        self.wrist_crop_y     = wrist_crop_y     if wrist_crop_y     is not None else self.crop_y
         self.arm = arm.lower()
         self.is_franka = self.arm == 'franka'
-        self.use_wrist_camera = use_wrist_camera
         # Franka's action is always 7D joint velocities (tcp_dims doesn't apply
         # to it); UR5e's action is the TCP pose, sliced like state is.
         self.action_dim_raw = 7 if self.is_franka else self.tcp_dims
 
+        self.camera_mode = camera_mode.lower()
+        if self.camera_mode not in ('global', 'wrist', 'both'):
+            raise ValueError(f"camera_mode must be 'global', 'wrist', or 'both', got {camera_mode!r}")
+        self.use_global_camera = self.camera_mode in ('global', 'both')
+        self.use_wrist_camera  = self.camera_mode in ('wrist', 'both')
+        self.num_cameras = int(self.use_global_camera) + int(self.use_wrist_camera)
+        # Which raw camera key feeds sample['obs_image'] (the single/primary
+        # vision encoder in model.py): camera_0 unless this is wrist-only,
+        # in which case camera_1's pixels go through that same slot -- the
+        # model doesn't care which physical camera a single-encoder path's
+        # pixels came from. 'both' additionally routes camera_1 through
+        # obs_image_wrist (second, independent encoder) -- see __getitem__.
+        self._primary_camera_key = 'data/camera_0' if self.use_global_camera else 'data/camera_1'
+        # Crop/resize settings for the primary slot: global's when the primary
+        # is camera_0, wrist's when this is wrist-only (primary is camera_1).
+        if self.use_global_camera:
+            self._primary_image_size = self.image_size
+            self._primary_crop_scale = self.crop_scale
+            self._primary_crop_x     = self.crop_x
+            self._primary_crop_y     = self.crop_y
+        else:
+            self._primary_image_size = self.wrist_image_size
+            self._primary_crop_scale = self.wrist_crop_scale
+            self._primary_crop_x     = self.wrist_crop_x
+            self._primary_crop_y     = self.wrist_crop_y
+
         # Load zarr dataset
         self.zarr_root = zarr.open(str(self.dataset_path), mode='r')
 
+        if self.use_global_camera and 'camera_0' not in self.zarr_root['data']:
+            raise ValueError(
+                f"camera_mode={self.camera_mode!r} needs data/camera_0, but "
+                f"{self.dataset_path} has none."
+            )
         if self.use_wrist_camera and 'camera_1' not in self.zarr_root['data']:
             raise ValueError(
-                f"use_wrist_camera=True but {self.dataset_path} has no data/camera_1 -- "
-                "this dataset was collected without a wrist camera (or with "
-                "--no_camera_wrist). Either recollect with the wrist camera "
-                "connected, or set use_wrist_camera=False."
+                f"camera_mode={self.camera_mode!r} needs data/camera_1, but "
+                f"{self.dataset_path} has none -- this dataset was collected "
+                "without a wrist camera (or with --no_camera_wrist). Either "
+                "recollect with the wrist camera connected, or use camera_mode='global'."
             )
         if self.is_franka:
             action_shape = self.zarr_root['data/action'].shape
@@ -282,20 +344,28 @@ class DiffusionDataset(Dataset):
 
         # Images
         if self.use_images:
-            images = self._load_and_process_images('data/camera_0', obs_start, obs_end)
+            images = self._load_and_process_images(
+                self._primary_camera_key, obs_start, obs_end,
+                self._primary_image_size, self._primary_crop_scale,
+                self._primary_crop_x, self._primary_crop_y,
+            )
         else:
-            images = np.zeros((self.obs_horizon, 3, *self.image_size), dtype=np.float32)
+            images = np.zeros((self.obs_horizon, 3, *self._primary_image_size), dtype=np.float32)
 
         sample = {
             'obs_state': torch.from_numpy(states).float(),    # (obs_horizon, d+5)
             'obs_image': torch.from_numpy(images).float(),    # (obs_horizon, 3, H, W)
         }
 
-        if self.use_wrist_camera:
+        if self.camera_mode == 'both':
             if self.use_images:
-                images_wrist = self._load_and_process_images('data/camera_1', obs_start, obs_end)
+                images_wrist = self._load_and_process_images(
+                    'data/camera_1', obs_start, obs_end,
+                    self.wrist_image_size, self.wrist_crop_scale,
+                    self.wrist_crop_x, self.wrist_crop_y,
+                )
             else:
-                images_wrist = np.zeros((self.obs_horizon, 3, *self.image_size), dtype=np.float32)
+                images_wrist = np.zeros((self.obs_horizon, 3, *self.wrist_image_size), dtype=np.float32)
             sample['obs_image_wrist'] = torch.from_numpy(images_wrist).float()
 
         # Future actions: UR5e target TCP[:tcp_dims], Franka full 7D joint
@@ -315,23 +385,17 @@ class DiffusionDataset(Dataset):
         sample['actions'] = torch.from_numpy(actions).float()   # (pred_horizon, action_dim_raw+5)
         return sample
 
-    def _load_and_process_images(self, camera_key, obs_start, obs_end):
-        """Center-crop + resize + normalize one camera's frames to (obs_horizon, C, H, W)."""
+    def _load_and_process_images(self, camera_key, obs_start, obs_end,
+                                  image_size, crop_scale, crop_x, crop_y):
+        """Crop + resize + normalize one camera's frames to (obs_horizon, C, H, W)."""
         images = self.zarr_root[camera_key][obs_start:obs_end]
 
         processed_images = []
         for img in images:
-            h, w = img.shape[:2]
-            target_h, target_w = self.image_size
-
-            crop_h = min(h, int(target_h * 1.5))
-            crop_w = min(w, int(target_w * 1.5))
-
-            start_h = (h - crop_h) // 2
-            start_w = (w - crop_w) // 2
-            img_cropped = img[start_h:start_h + crop_h, start_w:start_w + crop_w]
-
-            img_resized = cv2.resize(img_cropped, (target_w, target_h))
+            img_resized = crop_and_resize(
+                img, image_size,
+                crop_scale=crop_scale, crop_x=crop_x, crop_y=crop_y,
+            )
             img_normalized = (img_resized.astype(np.float32) / 127.5) - 1.0
             processed_images.append(img_normalized)
 

@@ -4,7 +4,19 @@ dataset_path: "data/demo_data/Task3/dataset.zarr"  # Path to training dataset (Z
 obs_horizon: 2        # Number of observation frames
 pred_horizon: 16      # Number of action steps to predict
 action_horizon: 8     # Number of action steps to execute
-image_size: [216, 288]  # Center crop from 480x640
+image_size: [216, 288]  # Crop + resize target (see crop_scale/crop_x/crop_y below)
+crop_scale: 1.5        # Crop window size as a multiple of image_size
+crop_x: 0.5            # Crop anchor in [0,1]: 0=left, 0.5=center, 1=right
+crop_y: 0.5            # Crop anchor in [0,1]: 0=top, 0.5=center, 1=bottom
+camera_mode: global    # 'global' (camera_0 only), 'wrist' (camera_1 only), or 'both'
+
+# Wrist camera overrides (only used when camera_mode is 'wrist' or 'both').
+# Leave unset (or delete) to reuse the global image_size/crop_scale/crop_x/crop_y above.
+# wrist_image_size: [216, 288]
+# wrist_crop_scale: 1.5
+# wrist_crop_x: 0.5
+# wrist_crop_y: 0.5
+
 exclude_episodes: []  # Episodes to exclude from training (e.g. incomplete)
 
 # TCP dimensions: 3 = xyz only, 6 = xyz + rotation (rx,ry,rz)

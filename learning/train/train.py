@@ -127,7 +127,7 @@ def main():
         print(f"Excluding episodes: {exclude_episodes}")
 
     arm = config.get('arm', 'ur5')
-    use_wrist_camera = config.get('use_wrist_camera', False)
+    camera_mode = config.get('camera_mode', 'global')
     dataset = DiffusionDataset(
         dataset_path=args.dataset if args.dataset is not None else config['dataset_path'],
         obs_horizon=config['obs_horizon'],
@@ -136,10 +136,17 @@ def main():
         image_size=tuple(config['image_size']),
         exclude_episodes=exclude_episodes,
         tcp_dims=config.get('tcp_dims', 3),
+        crop_scale=config.get('crop_scale', 1.5),
+        crop_x=config.get('crop_x', 0.5),
+        crop_y=config.get('crop_y', 0.5),
+        wrist_image_size=config.get('wrist_image_size', None),
+        wrist_crop_scale=config.get('wrist_crop_scale', None),
+        wrist_crop_x=config.get('wrist_crop_x', None),
+        wrist_crop_y=config.get('wrist_crop_y', None),
         arm=arm,
-        use_wrist_camera=use_wrist_camera,
+        camera_mode=camera_mode,
     )
-    print(f"Arm: {arm}  |  wrist camera: {use_wrist_camera}")
+    print(f"Arm: {arm}  |  camera_mode: {camera_mode}")
     print(f"Total samples: {len(dataset)}")
     d = dataset.tcp_dims
     print(f"State  TCP range - min: {dataset.state_min[:d]}, max: {dataset.state_max[:d]}")
@@ -188,8 +195,9 @@ def main():
     pool_name = 'SpatialSoftmax' if (use_ss or (use_ss is None and use_film)) else 'AvgPool'
     print(f"UNet variant  : {'FiLM (ConditionalUNet1D)' if use_film else 'Simple (DiffusionUNet1D)'}")
     print(f"Vision pooling: {pool_name}" + (f" ({n_kp} kp → {n_kp*2}D/frame)" if 'Spatial' in pool_name else ''))
-    num_cameras = 2 if use_wrist_camera else 1
-    print(f"Cameras       : {num_cameras} ({'global + wrist' if num_cameras == 2 else 'global only'})")
+    num_cameras = 2 if camera_mode == 'both' else 1
+    cam_desc = {'global': 'global only', 'wrist': 'wrist only', 'both': 'global + wrist'}[camera_mode]
+    print(f"Cameras       : {num_cameras} ({cam_desc})")
     model = DiffusionPolicy(
         obs_horizon=config['obs_horizon'],
         pred_horizon=config['pred_horizon'],

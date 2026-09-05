@@ -178,6 +178,7 @@ def main():
                          help="Also exercise move_tcp_pose/servo_tcp_pose/move_joints "
                               "(moves the real arm a small amount and back). "
                               "Requires interactive confirmation unless --yes is given.")
+    parser.add_argument("--tracking_tcp", '-tcp', action="store_true")
     parser.add_argument("--yes", action="store_true",
                          help="Skip the interactive confirmation before moving (use with care).")
     parser.add_argument("--delta", type=float, default=0.04,
@@ -234,10 +235,13 @@ def main():
             args.velocity, args.acceleration)
         results["move_joints"] = check_move_joints(
             robot, args.joint_delta, args.velocity, args.acceleration)
+    elif args.tracking_tcp:
+        while True:
+            print(f"TCP pose = {robot.get_tcp_pose()}")
     else:
         print("\n[5/6] Skipping motion tests (pass --move to exercise "
               "move_tcp_pose/set_ee_velocity/move_joints).")
-
+        
     results["recovery"] = check_error_recovery(robot)
 
     robot.disconnect()

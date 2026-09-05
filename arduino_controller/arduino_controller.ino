@@ -131,6 +131,12 @@ void parsePwmCommand(const String &line) {
   // Expect "A B C"
   int a, b, c;
   if (sscanf(line.c_str(), "%d %d %d", &a, &b, &c) == 3) {
+    // Clamp incoming command to the flowbot's valid PWM range (0-26,
+    // see hardware/flowbot.py's pwm_max) before applying the init offset below.
+    if (a > 26) a = 26;
+    if (b > 26) b = 26;
+    if (c > 26) c = 26;
+
     if (a + pww_init1 < 0)   a = 0;
     if (a + pww_init1> 255) a = 255;
     if (b + pww_init2 < 0)   b = 0;

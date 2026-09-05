@@ -28,7 +28,6 @@ import sys
 import time
 import argparse
 import numpy as np
-import cv2
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from collections import deque
@@ -41,6 +40,7 @@ from train.eval import DiffusionPolicyInference
 from hardware.ur5e_rtde import UR5eRobot
 from hardware.flowbot import flowbot
 from hardware.realsense_camera import RealSenseCamera
+from hardware.image_utils import crop_and_resize
 
 # ── Constants (must match deploy_flowbot_w_policy.py) ─────────────────────────
 CONTROL_FREQ = 10.0
@@ -55,17 +55,9 @@ def _preprocess_state(state_raw, state_min, state_range):
     return (2.0 * (state_raw - state_min) / state_range - 1.0).astype(np.float32)
 
 
-def _preprocess_image(image_rgb, image_size):
-    """uint8 (H,W,3) → float32 (3,H,W) in [-1,1], with centre crop."""
-    import cv2
-    h, w = image_rgb.shape[:2]
-    target_h, target_w = image_size
-    crop_h = min(h, int(target_h * 1.5))
-    crop_w = min(w, int(target_w * 1.5))
-    sh = (h - crop_h) // 2
-    sw = (w - crop_w) // 2
-    img = image_rgb[sh:sh + crop_h, sw:sw + crop_w]
-    img = cv2.resize(img, (target_w, target_h))
+def _preprocess_image(image_rgb, image_size, crop_scale=1.5, crop_x=0.5, crop_y=0.5):
+    """uint8 (H,W,3) → float32 (3,H,W) in [-1,1], with anchored crop."""
+    img = crop_and_resize(image_rgb, image_size, crop_scale=crop_scale, crop_x=crop_x, crop_y=crop_y)
     img = (img.astype(np.float32) / 127.5) - 1.0
     return img.transpose(2, 0, 1)   # (3,H,W)
 
@@ -79,7 +71,7 @@ def _denormalize_actions(actions_norm, action_min, action_range):
 
 def debug_live(policy, robot_ip, flowbot_port=None,
                num_steps=100, camera_width=640, camera_height=480,
-               image_size=(216, 288)):
+               image_size=(216, 288), crop_scale=1.5, crop_x=0.5, crop_y=0.5):
     """
     Continuously read live robot state + RealSense camera and print model predictions.
     Matches the hardware setup and observation pipeline of deploy_flowbot_w_policy.py.
@@ -94,6 +86,8 @@ def debug_live(policy, robot_ip, flowbot_port=None,
         camera_width : RealSense capture width
         camera_height: RealSense capture height
         image_size   : (H, W) to resize/crop images to (must match training)
+        crop_scale, crop_x, crop_y : crop window params (must match training
+                       to get sensible predictions — see image_utils.crop_and_resize)
     """
     import torch
 
@@ -147,15 +141,11 @@ def debug_live(policy, robot_ip, flowbot_port=None,
         if camera_frame is None:
             raise RuntimeError("Camera read failed")
 
-        # Centre-crop + resize (identical to dataset.py & deploy_flowbot_w_policy.py)
-        h, w          = camera_frame.shape[:2]
-        target_h, target_w = image_size_tup
-        crop_h = min(h, int(target_h * 1.5))
-        crop_w = min(w, int(target_w * 1.5))
-        sh = (h - crop_h) // 2
-        sw = (w - crop_w) // 2
-        img = camera_frame[sh:sh + crop_h, sw:sw + crop_w]
-        img = cv2.resize(img, (target_w, target_h))
+        # Crop + resize — identical transform (and crop anchor) to dataset.py & deploy_flowbot_w_policy.py
+        img = crop_and_resize(
+            camera_frame, image_size_tup,
+            crop_scale=crop_scale, crop_x=crop_x, crop_y=crop_y,
+        )
         return state_raw, img
 
     def preprocess_state(s):
@@ -268,6 +258,9 @@ def debug_offline(policy, dataset_path, episode_idx=0):
     action_horizon = config['action_horizon']
     tcp_dims     = config.get('tcp_dims', 3)
     image_size   = tuple(config['image_size'])
+    crop_scale   = config.get('crop_scale', 1.5)
+    crop_x       = config.get('crop_x', 0.5)
+    crop_y       = config.get('crop_y', 0.5)
     state_min    = policy.checkpoint['state_min']
     state_range  = policy.checkpoint['state_range']
     action_min   = policy.checkpoint['action_min']
@@ -307,11 +300,10 @@ def debug_offline(policy, dataset_path, episode_idx=0):
         # Use tcp_dims components from robot_eef_pose (mirrors dataset.py slicing)
         state_raw_seq = np.concatenate([robot_obs[:, :tcp_dims], pwm_obs, op_mode_obs], axis=-1)  # (T, tcp_dims+5)
 
-        import cv2
         images = root['data/camera_0'][obs_start:abs_idx + 1]           # (T, H, W, 3)
         proc_images = []
         for img in images:
-            proc_images.append(_preprocess_image(img, image_size))
+            proc_images.append(_preprocess_image(img, image_size, crop_scale, crop_x, crop_y))
 
         obs_state = torch.from_numpy(
             np.stack([_preprocess_state(s, state_min, state_range) for s in state_raw_seq])
@@ -436,6 +428,12 @@ def main():
     parser.add_argument('--image_size',    type=int,   nargs=2, default=[216, 288],
                         metavar=('H', 'W'),
                         help='Image crop/resize size fed to the policy (default: 216 288)')
+    parser.add_argument('--crop_scale',    type=float, default=1.5,
+                        help='Crop window size as a multiple of image_size (live mode only)')
+    parser.add_argument('--crop_x',        type=float, default=0.5,
+                        help='Crop anchor x in [0,1]: 0=left, 0.5=center, 1=right (live mode only)')
+    parser.add_argument('--crop_y',        type=float, default=0.5,
+                        help='Crop anchor y in [0,1]: 0=top, 0.5=center, 1=bottom (live mode only)')
 
     # Offline mode
     parser.add_argument('--dataset_path', type=str, default=None,
@@ -467,6 +465,9 @@ def main():
             camera_width=args.camera_width,
             camera_height=args.camera_height,
             image_size=tuple(args.image_size),
+            crop_scale=args.crop_scale,
+            crop_x=args.crop_x,
+            crop_y=args.crop_y,
         )
     else:
         print("❌ Provide either --robot_ip (live) or --dataset_path (offline)")
