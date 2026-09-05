@@ -35,34 +35,25 @@ SYSVER_DIR = os.path.dirname(os.path.abspath(__file__))
 LEARNING_DIR = os.path.dirname(SYSVER_DIR)
 sys.path.insert(0, LEARNING_DIR)
 
+from hardware.image_utils import crop_and_resize
 
-def preprocess_image(img_rgb: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+
+def preprocess_image(img_rgb: np.ndarray, target_h: int, target_w: int,
+                      crop_scale: float = 1.5, crop_x: float = 0.5, crop_y: float = 0.5) -> np.ndarray:
     """
-    Apply the same center-crop + resize pipeline as dataset.py.
-
-    Matches PickPlaceDataset.__getitem__ exactly:
-        1. Center-crop to (min(H, target_h*1.5), min(W, target_w*1.5))
-        2. Resize to (target_h, target_w)
+    Apply the same crop + resize pipeline as dataset.py (see image_utils.crop_and_resize).
 
     Args:
         img_rgb  : (H, W, 3) uint8 RGB image
         target_h : target height in pixels
         target_w : target width  in pixels
+        crop_scale, crop_x, crop_y : crop window params (must match training config)
 
     Returns:
         (target_h, target_w, 3) uint8 RGB — ready to save
     """
-    import cv2
-    h, w = img_rgb.shape[:2]
-
-    crop_h = min(h, int(target_h * 1.5))
-    crop_w = min(w, int(target_w * 1.5))
-    start_h = (h - crop_h) // 2
-    start_w = (w - crop_w) // 2
-    img_cropped = img_rgb[start_h:start_h + crop_h, start_w:start_w + crop_w]
-
-    img_resized = cv2.resize(img_cropped, (target_w, target_h))
-    return img_resized                  # still uint8 RGB, no normalisation
+    return crop_and_resize(img_rgb, (target_h, target_w),
+                            crop_scale=crop_scale, crop_x=crop_x, crop_y=crop_y)
 
 
 def extract_images(
@@ -74,6 +65,9 @@ def extract_images(
     fps=10,
     preprocessed=True,
     image_size=(216, 288),
+    crop_scale=1.5,
+    crop_x=0.5,
+    crop_y=0.5,
 ):
     import zarr
     import cv2
@@ -120,7 +114,7 @@ def extract_images(
             for i, fi in enumerate(frame_indices):
                 img_rgb = z['data/camera_0'][fi]           # uint8 RGB
                 if preprocessed:
-                    img_rgb = preprocess_image(img_rgb, target_h, target_w)
+                    img_rgb = preprocess_image(img_rgb, target_h, target_w, crop_scale, crop_x, crop_y)
                 img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
                 writer.write(img_bgr)
                 if (i + 1) % 50 == 0 or i == len(frame_indices) - 1:
@@ -136,7 +130,7 @@ def extract_images(
             for i, fi in enumerate(frame_indices):
                 img_rgb = z['data/camera_0'][fi]           # uint8 RGB
                 if preprocessed:
-                    img_rgb = preprocess_image(img_rgb, target_h, target_w)
+                    img_rgb = preprocess_image(img_rgb, target_h, target_w, crop_scale, crop_x, crop_y)
                 img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
                 img_path = ep_dir / f"frame_{i:05d}_global{fi:06d}.jpg"
                 cv2.imwrite(str(img_path), img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -168,6 +162,15 @@ def main():
                         metavar=('H', 'W'),
                         help='Target image size after preprocessing (default: 216 288). '
                              'Must match config image_size used during training.')
+    parser.add_argument('--crop_scale', type=float, default=1.5,
+                        help='Crop window size as a multiple of image_size (default: 1.5). '
+                             'Must match config crop_scale used during training.')
+    parser.add_argument('--crop_x', type=float, default=0.5,
+                        help='Crop anchor x in [0,1]: 0=left, 0.5=center, 1=right. '
+                             'Must match config crop_x used during training.')
+    parser.add_argument('--crop_y', type=float, default=0.5,
+                        help='Crop anchor y in [0,1]: 0=top, 0.5=center, 1=bottom. '
+                             'Must match config crop_y used during training.')
     args = parser.parse_args()
     if args.dataset is None:
         
@@ -187,6 +190,9 @@ def main():
         fps=args.fps,
         preprocessed=args.preprocessed,
         image_size=tuple(args.image_size),
+        crop_scale=args.crop_scale,
+        crop_x=args.crop_x,
+        crop_y=args.crop_y,
     )
 
 

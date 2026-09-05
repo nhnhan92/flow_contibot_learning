@@ -136,6 +136,13 @@ def main():
         image_size=tuple(config['image_size']),
         exclude_episodes=exclude_episodes,
         tcp_dims=config.get('tcp_dims', 3),
+        crop_scale=config.get('crop_scale', 1.5),
+        crop_x=config.get('crop_x', 0.5),
+        crop_y=config.get('crop_y', 0.5),
+        wrist_image_size=config.get('wrist_image_size', None),
+        wrist_crop_scale=config.get('wrist_crop_scale', None),
+        wrist_crop_x=config.get('wrist_crop_x', None),
+        wrist_crop_y=config.get('wrist_crop_y', None),
         arm=arm,
         camera_mode=camera_mode,
     )

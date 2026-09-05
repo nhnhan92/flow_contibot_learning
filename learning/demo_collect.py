@@ -315,9 +315,9 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--robot_ip', '-ri', default=None,
               help='Arm IP. Default: 150.65.146.87 (UR5) or 172.16.0.2 (Franka).')
 @click.option('--arduino_port', default="/dev/ttyACM0")
-@click.option('--camera_serial_global', default='051222061185',
+@click.option('--camera_serial_global', default='827112072398',
               help='RealSense serial for the global (scene) camera.')
-@click.option('--camera_serial_wrist', default='827112072398',
+@click.option('--camera_serial_wrist', default='841512070635',
               help='RealSense serial for the wrist camera.')
 @click.option('--no_camera_wrist', is_flag=True, help='Run without wrist_camera')
 @click.option('--no_camera_global', is_flag=True, help='Run without global_camera')
@@ -457,7 +457,7 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
 
     # Get initial pose
     tcp_pose = ur5.get_tcp_pose()
-    init_pose = np.array([0.45, 0.045, 0.5, 3.14, 0.0, -0.05])
+    init_pose = np.array([0.45, 0.15, 0.5, 3.14, 0.0, -0.05])
     target_pose = init_pose.copy()
 
     last_action = init_pose.copy() if not is_franka else np.zeros(7)

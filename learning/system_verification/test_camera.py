@@ -14,6 +14,15 @@ Usage:
     # trusting demo_collect.py's two-camera recording on new hardware.
     python system_verification/test_camera.py --dual \
         --camera_serial_global <serial> --camera_serial_wrist <serial>
+
+    # Dual-camera mode also previews each camera's crop/resize independently
+    # -- tune these visually, then copy the values into
+    # config_train_flowbot.yaml (image_size/crop_scale/crop_x/crop_y for the
+    # global camera, wrist_image_size/wrist_crop_scale/wrist_crop_x/wrist_crop_y
+    # for the wrist camera).
+    python system_verification/test_camera.py --dual \
+        --target-width 288 --target-height 216 --crop-scale 1.5 --crop-x 0.5 --crop-y 0.5 \
+        --wrist-target-width 288 --wrist-target-height 216 --wrist-crop-x 0.7 --wrist-crop-y 0.3
 """
 
 import os
@@ -21,6 +30,9 @@ import sys
 import time
 import click
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from hardware.image_utils import crop_and_resize
 
 try:
     import pyrealsense2 as rs
@@ -55,14 +67,17 @@ def get_camera_info():
 
 
 def test_streams(
-    width: int = 1280,
-    height: int = 720,
+    width: int = 640,
+    height: int = 480,
     fps: int = 30,
-    duration: int = 10,
+    duration: int = 30,
     display: bool = True,
     target_width: int = 320,
     target_height: int = 240,
     rgb_only: bool = False,
+    crop_scale: float = 1.5,
+    crop_x: float = 0.5,
+    crop_y: float = 0.5,
 ):
     """
     Test camera RGB and Depth streams
@@ -74,6 +89,8 @@ def test_streams(
         display: Show live preview
         target_width, target_height: Resize target for training (from config)
         rgb_only: Only enable RGB stream (no depth)
+        crop_scale: Crop window size as a multiple of (target_width, target_height)
+        crop_x, crop_y: Crop anchor in [0, 1] (0=left/top, 0.5=center, 1=right/bottom)
     """
     print("\n" + "="*60)
     print("         REALSENSE CAMERA STREAM TEST")
@@ -234,11 +251,15 @@ def test_streams(
                 color_bgr = cv2.cvtColor(color_image, cv2.COLOR_RGB2BGR)
 
                 # Resize to target size for preview
-                color_resized = cv2.resize(color_bgr, (target_width, target_height))
+                color_resized = crop_and_resize(
+                    color_image, (target_height, target_width),
+                    crop_scale=crop_scale, crop_x=crop_x, crop_y=crop_y,
+                )
 
                 if rgb_only:
                     # RGB only mode
                     combined = color_resized
+                    # combined = np.hstack([color_resized, color_bgr])
                     cv2.putText(combined, f"RGB {target_width}x{target_height}", (10, 20),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 else:
@@ -259,7 +280,7 @@ def test_streams(
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
                 cv2.imshow('RealSense Test (Press q to quit, s to save)', combined)
-
+                cv2.imshow('RealSense original', color_bgr)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
                     break
@@ -314,20 +335,18 @@ def test_dual_streams(
     fps: int = 30,
     duration: int = 10,
     display: bool = True,
+    global_target_width: int = 320,
+    global_target_height: int = 240,
+    global_crop_scale: float = 1.5,
+    global_crop_x: float = 0.5,
+    global_crop_y: float = 0.5,
+    wrist_target_width: int = 320,
+    wrist_target_height: int = 240,
+    wrist_crop_scale: float = 1.5,
+    wrist_crop_x: float = 0.5,
+    wrist_crop_y: float = 0.5,
 ):
-    """
-    Verify the global and wrist RealSense cameras can both be opened and
-    read from at the same time, using the exact connection path
-    demo_collect.py uses (hardware/realsense_camera.py's RealSenseCamera,
-    same width/height/fps, one get_frames() call per camera per tick) --
-    not a reimplementation with raw pyrealsense2 like test_streams() above.
 
-    Catches problems specific to running two RealSense devices in one
-    process that a single-camera test can't: USB bandwidth contention
-    (starves one or both cameras' FPS), ambiguous serial_number=None
-    binding when both cameras are left unspecified, and outright failure
-    to open two pipelines concurrently.
-    """
     from hardware.realsense_camera import RealSenseCamera
 
     print("\n" + "="*60)
@@ -408,7 +427,31 @@ def test_dual_streams(
                 cv2.putText(g_bgr, "GLOBAL", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                 cv2.putText(w_bgr, "WRIST", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                 combined = np.hstack([g_bgr, w_bgr])
-                cv2.imshow("Dual Camera Test (press q to quit)", combined)
+                cv2.imshow("Dual Camera Test - raw (press q to quit)", combined)
+
+                # Cropped preview, each camera with its own independent settings
+                g_crop = crop_and_resize(
+                    frame_global, (global_target_height, global_target_width),
+                    crop_scale=global_crop_scale, crop_x=global_crop_x, crop_y=global_crop_y,
+                )
+                w_crop = crop_and_resize(
+                    frame_wrist, (wrist_target_height, wrist_target_width),
+                    crop_scale=wrist_crop_scale, crop_x=wrist_crop_x, crop_y=wrist_crop_y,
+                )
+                g_crop_bgr = cv2.cvtColor(g_crop, cv2.COLOR_RGB2BGR)
+                w_crop_bgr = cv2.cvtColor(w_crop, cv2.COLOR_RGB2BGR)
+                # Pad to matching height so the two crops can sit side by side
+                # even when global_target_height != wrist_target_height.
+                pad_h = max(g_crop_bgr.shape[0], w_crop_bgr.shape[0])
+                g_pad = cv2.copyMakeBorder(g_crop_bgr, 0, pad_h - g_crop_bgr.shape[0], 0, 0, cv2.BORDER_CONSTANT)
+                w_pad = cv2.copyMakeBorder(w_crop_bgr, 0, pad_h - w_crop_bgr.shape[0], 0, 0, cv2.BORDER_CONSTANT)
+                cv2.putText(g_pad, f"GLOBAL {global_target_width}x{global_target_height}", (10, 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(w_pad, f"WRIST {wrist_target_width}x{wrist_target_height}", (10, 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                combined_crop = np.hstack([g_pad, w_pad])
+                cv2.imshow("Dual Camera Test - cropped preview (press q to quit)", combined_crop)
+
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
     except KeyboardInterrupt:
@@ -450,17 +493,32 @@ def test_dual_streams(
 @click.option('--height', default=480, help='Capture height (single-camera mode). '
               'Dual mode (--dual) defaults to 480 instead, matching demo_collect.py, unless overridden.')
 @click.option('--fps', default=30, help='Target FPS')
-@click.option('--duration', default=10, help='Test duration in seconds')
+@click.option('--duration', default=100, help='Test duration in seconds')
 @click.option('--display/--no-display', default=True, help='Show live preview')
-@click.option('--target-width', default=320, help='Target resize width for training')
-@click.option('--target-height', default=240, help='Target resize height for training')
+@click.option('--target-width', '-w', default=320, help='Target resize width for training '
+              '(single-camera mode; global camera in --dual mode)')
+@click.option('--target-height', '-h', default=240, help='Target resize height for training '
+              '(single-camera mode; global camera in --dual mode)')
 @click.option('--rgb-only', is_flag=True, help='Only test RGB stream (no depth)')
+@click.option('--crop-scale', default=1.5, help='Crop window size as a multiple of target size '
+              '(single-camera mode; global camera in --dual mode)')
+@click.option('--crop-x', default=0.5, help='Crop anchor x in [0,1]: 0=left, 0.5=center, 1=right '
+              '(single-camera mode; global camera in --dual mode)')
+@click.option('--crop-y', default=0.5, help='Crop anchor y in [0,1]: 0=top, 0.5=center, 1=bottom '
+              '(single-camera mode; global camera in --dual mode)')
+@click.option('--wrist-target-width', default=320, help='Wrist camera target resize width (--dual mode only)')
+@click.option('--wrist-target-height', default=240, help='Wrist camera target resize height (--dual mode only)')
+@click.option('--wrist-crop-scale', default=2.5, help='Wrist camera crop window size as a multiple of target size (--dual mode only)')
+@click.option('--wrist-crop-x', default=1, help='Wrist camera crop anchor x in [0,1] (--dual mode only)')
+@click.option('--wrist-crop-y', default=1, help='Wrist camera crop anchor y in [0,1] (--dual mode only)')
 @click.option('--dual', is_flag=True, help='Test the global + wrist cameras together '
               '(same connection path as demo_collect.py) instead of the default single-camera test.')
-@click.option('--camera_serial_global', default='841512070635', help='Serial for the global camera (--dual only).')
-@click.option('--camera_serial_wrist', default='827112072398', help='Serial for the wrist camera (--dual only).')
+@click.option('--camera_serial_global', default='827112072398', help='Serial for the global camera (--dual only).')
+@click.option('--camera_serial_wrist', default='841512070635', help='Serial for the wrist camera (--dual only).')
 @click.pass_context
 def main(ctx, width, height, fps, duration, display, target_width, target_height, rgb_only,
+         crop_scale, crop_x, crop_y,
+         wrist_target_width, wrist_target_height, wrist_crop_scale, wrist_crop_x, wrist_crop_y,
          dual, camera_serial_global, camera_serial_wrist):
     print("="*60)
     print("         REALSENSE CAMERA TEST")
@@ -495,9 +553,9 @@ def main(ctx, width, height, fps, duration, display, target_width, target_height
         # explicitly overrode --width/--height for this run.
         src = click.core.ParameterSource
         if ctx.get_parameter_source('width') == src.DEFAULT:
-            width = 640
+            width = width
         if ctx.get_parameter_source('height') == src.DEFAULT:
-            height = 480
+            height = height
 
         success = test_dual_streams(
             serial_global=camera_serial_global,
@@ -507,6 +565,16 @@ def main(ctx, width, height, fps, duration, display, target_width, target_height
             fps=fps,
             duration=duration,
             display=display,
+            global_target_width=target_width,
+            global_target_height=target_height,
+            global_crop_scale=crop_scale,
+            global_crop_x=crop_x,
+            global_crop_y=crop_y,
+            wrist_target_width=wrist_target_width,
+            wrist_target_height=wrist_target_height,
+            wrist_crop_scale=wrist_crop_scale,
+            wrist_crop_x=wrist_crop_x,
+            wrist_crop_y=wrist_crop_y,
         )
         print("\n" + "="*60)
         print("✅ DUAL-CAMERA TEST PASSED" if success else "⚠️  DUAL-CAMERA TEST WARNING - Check issues above")
@@ -523,6 +591,9 @@ def main(ctx, width, height, fps, duration, display, target_width, target_height
         target_width=target_width,
         target_height=target_height,
         rgb_only=rgb_only,
+        crop_scale=crop_scale,
+        crop_x=crop_x,
+        crop_y=crop_y,
     )
 
     print("\n" + "="*60)

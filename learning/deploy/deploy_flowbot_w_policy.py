@@ -52,6 +52,7 @@ from hardware.franka_robot import FrankaRobot
 from hardware.flowbot import flowbot
 from hardware.realsense_camera import RealSenseCamera
 from train.eval import DiffusionPolicyInference
+from hardware.image_utils import crop_and_resize
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 PWM_MIN = 0   # 0 = fully deflated (release); model must be able to command this
@@ -239,6 +240,29 @@ class RobotDeployment:
             self.image_size = tuple(self.policy.config['image_size'])
         else:
             self.image_size = image_size
+        # Crop anchor must match training exactly (see image_utils.crop_and_resize).
+        # Wrist camera can have its own image_size/crop settings -- see dataset.py's
+        # identical global/wrist split; falls back to the global values when unset.
+        self.crop_scale = self.config.get('crop_scale', 1.5)
+        self.crop_x = self.config.get('crop_x', 0.5)
+        self.crop_y = self.config.get('crop_y', 0.5)
+        wrist_image_size = self.config.get('wrist_image_size', None)
+        self.wrist_image_size = tuple(wrist_image_size) if wrist_image_size is not None else self.image_size
+        self.wrist_crop_scale = self.config.get('wrist_crop_scale', self.crop_scale)
+        self.wrist_crop_x = self.config.get('wrist_crop_x', self.crop_x)
+        self.wrist_crop_y = self.config.get('wrist_crop_y', self.crop_y)
+        # Settings for the primary/single-encoder slot (self.cam): global's,
+        # unless this is wrist-only (self.cam IS the wrist camera in that case).
+        if self.camera_mode == 'wrist':
+            self._primary_image_size = self.wrist_image_size
+            self._primary_crop_scale = self.wrist_crop_scale
+            self._primary_crop_x = self.wrist_crop_x
+            self._primary_crop_y = self.wrist_crop_y
+        else:
+            self._primary_image_size = self.image_size
+            self._primary_crop_scale = self.crop_scale
+            self._primary_crop_x = self.crop_x
+            self._primary_crop_y = self.crop_y
         # ── Camera(s) ─────────────────────────────────────────────────────────
         # self.cam is always the primary/single-encoder feed (matches
         # dataset.py's obs_image routing): the global camera unless
@@ -299,16 +323,19 @@ class RobotDeployment:
 
     # ── Low-level observation ─────────────────────────────────────────────────
 
-    def _crop_resize(self, camera_frame: np.ndarray) -> np.ndarray:
-        """Centre-crop and resize one camera frame (same as dataset.py)."""
-        h, w = camera_frame.shape[:2]
-        target_h, target_w = self.image_size
-        crop_h = min(h, int(target_h * 1.5))
-        crop_w = min(w, int(target_w * 1.5))
-        sh = (h - crop_h) // 2
-        sw = (w - crop_w) // 2
-        image_raw = camera_frame[sh:sh + crop_h, sw:sw + crop_w]
-        return cv2.resize(image_raw, (target_w, target_h))
+    def _crop_resize_primary(self, camera_frame: np.ndarray) -> np.ndarray:
+        """Crop + resize the primary-slot (self.cam) frame — matches dataset.py's primary settings."""
+        return crop_and_resize(
+            camera_frame, self._primary_image_size,
+            crop_scale=self._primary_crop_scale, crop_x=self._primary_crop_x, crop_y=self._primary_crop_y,
+        )
+
+    def _crop_resize_wrist(self, camera_frame: np.ndarray) -> np.ndarray:
+        """Crop + resize the wrist-slot (self.cam_wrist, 'both' mode only) frame — matches dataset.py's wrist settings."""
+        return crop_and_resize(
+            camera_frame, self.wrist_image_size,
+            crop_scale=self.wrist_crop_scale, crop_x=self.wrist_crop_x, crop_y=self.wrist_crop_y,
+        )
 
     def _get_raw_observation(self):
         """
@@ -334,14 +361,14 @@ class RobotDeployment:
         if camera_frame is None:
             cam_role = 'Wrist' if self.camera_mode == 'wrist' else 'Global'
             raise RuntimeError(f"{cam_role} camera read failed")
-        image_raw = self._crop_resize(camera_frame)
+        image_raw = self._crop_resize_primary(camera_frame)
 
         image_raw_wrist = None
         if self.camera_mode == 'both':
             camera_frame_wrist, _ = self.cam_wrist.get_frames()
             if camera_frame_wrist is None:
                 raise RuntimeError("Wrist camera read failed")
-            image_raw_wrist = self._crop_resize(camera_frame_wrist)
+            image_raw_wrist = self._crop_resize_wrist(camera_frame_wrist)
 
         return state_raw, image_raw, image_raw_wrist
 
