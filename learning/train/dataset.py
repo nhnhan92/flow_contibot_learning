@@ -77,7 +77,7 @@ class DiffusionDataset(Dataset):
         obs_horizon=2,      # Number of observation frames
         pred_horizon=16,    # Number of action predictions
         action_horizon=8,   # Number of actions to execute
-        image_size=(96, 96),  # Resize images to this size
+        image_size=(240, 320),  # Resize images to this size
         use_images=True,
         normalize=True,
         exclude_episodes=None,  # List of episode indices to exclude
