@@ -25,7 +25,7 @@ def main():
     # franka.gripper_move(pos, speed)
     # franka.gripper_grasp(pos, speed, force)
     # franka.move_tcp_pose(target_pose, velocity, acceleration, asynchronous)   # (6,) target
-    # franka.servo_tcp_pose(target_pose, velocity, acceleration)                # (6,) target, call every tick
+    # franka.set_ee_velocity(linear_velocity, angular_velocity, max_vel, max_ang_vel)  # real-time, e.g. spacemouse
     # franka.move_joints(target_joints, velocity, acceleration, asynchronous)   # (7,) target
     # franka.stop()        # stop motion/servo, keep connection alive
     # franka.recover()     # automatic error recovery
@@ -34,7 +34,7 @@ def main():
 
 
     # Historical 16-value O_T_EE targets (pre-refactor). The public API now
-    # takes 6D [x,y,z,rx,ry,rz] poses via move_tcp_pose()/servo_tcp_pose();
+    # takes 6D [x,y,z,rx,ry,rz] poses via move_tcp_pose();
     # convert with FrankaController._O_T_EE_to_pose6(target) before reusing.
 
     #left pose

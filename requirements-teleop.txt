@@ -1,0 +1,37 @@
+# Minimal dependency set for running the teleoperation system only:
+#   learning/demo_collect.py
+#   learning/system_verification/test_teleop.py
+# and the hardware modules they import (hardware/ur5e_rtde.py, franka_robot.py,
+# spacemouse.py, flowbot.py, realsense_camera.py, plus the flowbot/ package).
+#
+# Franka is driven via franky (FrankaRobot) only -- pylibfranka is not
+# required for teleop (FrankaController / franka_control.py is kept in the
+# main project for reference, not used here).
+#
+# Versions pinned to match the tested environment in requirements.txt.
+# Install into the project's pyenv env (see .python-version -> flow_bot):
+#   pip install -r requirements-teleop.txt
+
+click==8.3.1
+numpy==2.4.2
+scipy==1.17.0
+zarr==3.1.5
+numcodecs==0.16.5          # zarr's Blosc codec, imported directly by demo_collect.py
+
+# Arms
+ur_rtde==1.6.2              # UR5e (RTDE)
+franky-control==1.1.4       # Franka (franky backend, hardware/franka_robot.py)
+
+# Flowbot (soft pneumatic manipulator)
+pyserial==3.5
+matplotlib==3.10.8          # flowbot's live plot
+natnet==0.2.0                # OptiTrack motion capture, imported unconditionally by flowbot.py
+
+# Camera
+pyrealsense2==2.56.5.9235
+opencv-contrib-python==4.13.0.92
+
+# SpaceMouse: hardware/spacemouse.py talks to libspnav directly via ctypes
+# (Linux) -- no pip package needed, but requires the libspnav system library
+# and a running spacenavd daemon (apt install libspnav-dev spacenavd).
+# Windows path (untested/unused on Linux) needs pyspacemouse instead.

@@ -27,23 +27,6 @@ except ImportError:
     _OPTI_AVAILABLE   = False
 
 BAUD_RATE = 115200
-
-
-def _default_port():
-    """Auto-detect the first available Arduino-like serial port."""
-    ports = list(serial.tools.list_ports.comports())
-    # Prefer ports with Arduino/CH340/CP210x in the description
-    for p in ports:
-        desc = (p.description or "").lower()
-        if any(k in desc for k in ("arduino", "ch340", "cp210", "usb serial")):
-            return p.device
-    # Fall back: first available port, or OS-specific guess
-    if ports:
-        return ports[0].device
-    return "COM9" if sys.platform == "win32" else "/dev/ttyACM0"
-
-
-SERIAL_PORT = _default_port()
 OUTPUT_CSV  = f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
 MAX_POINTS = 1000
@@ -208,9 +191,8 @@ def run_live_plot(buffers, stop_flag, save_fig, name,
 def main():
     import random
     import argparse
+    import platform
     parser = argparse.ArgumentParser()
-    parser.add_argument('--port', '-p', type=str, default=SERIAL_PORT,
-                        help='Serial port (e.g. COM3 on Windows, /dev/ttyACM0 on Linux)')
     parser.add_argument('--mode', '-m', type=str, help='Choose object type',required=False)
     parser.add_argument('--module_no', '-n', type=int, help='Choose object type',default=1,required=False)
     parser.add_argument('--record', action='store_true',
@@ -243,10 +225,14 @@ def main():
     mode = args.mode
     module_no = args.module_no
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    print(f"[serial] Auto-detected port: {SERIAL_PORT}  (override with --port)")
-    ser = serial.Serial(args.port, BAUD_RATE, timeout=1)
+    os_name = platform.system().lower()
+    if "linux" in os_name:
+        serial_port = "/dev/ttyACM0"
+    elif "windows" in os_name:
+        serial_port = "COM9"
+    ser = serial.Serial(serial_port, BAUD_RATE, timeout=1)
     time.sleep(1)
-    print(f"[serial] Opened {args.port}")
+    print(f"[serial] Opened {serial_port}")
 
     folder_path = f"data/{mode}"
     os.makedirs(folder_path, exist_ok=True)

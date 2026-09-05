@@ -45,6 +45,8 @@ class DiffusionPolicyInference:
         self.checkpoint = checkpoint
 
         # Create model
+        self.camera_mode = self.config.get('camera_mode', 'global')
+        self.num_cameras = 2 if self.camera_mode == 'both' else 1
         self.model = DiffusionPolicy(
             obs_horizon=self.config['obs_horizon'],
             pred_horizon=self.config['pred_horizon'],
@@ -57,10 +59,12 @@ class DiffusionPolicyInference:
             use_resnet=self.config.get('use_resnet', True),
             use_film_unet=self.config.get('use_film_unet', True),
             film_step_embed_dim=self.config.get('film_step_embed_dim', 256),
+            film_down_dims=self.config.get('film_down_dims', None),
             film_kernel_size=self.config.get('film_kernel_size', 5),
             use_spatial_softmax=self.config.get('use_spatial_softmax', None),
             num_keypoints=self.config.get('num_keypoints', 32),
             crop_pad=self.config.get('random_crop_pad', 0),  # disabled at eval time automatically
+            num_cameras=self.num_cameras,
         ).to(self.device)
 
         # Load weights — prefer EMA shadow weights for the UNet denoiser
@@ -94,30 +98,42 @@ class DiffusionPolicyInference:
             print(f"Validation Loss (EMA): {checkpoint['val_loss_ema']:.4f}")
 
     @torch.no_grad()
-    def predict(self, obs_state, obs_image):
+    def predict(self, obs_state, obs_image, obs_image_wrist=None):
         """
         Generate action predictions
 
         Args:
             obs_state: (B, obs_horizon, state_dim) or (obs_horizon, state_dim)
             obs_image: (B, obs_horizon, C, H, W) or (obs_horizon, C, H, W)
+            obs_image_wrist: same shape as obs_image -- required iff this
+                checkpoint's config has camera_mode='both' (num_cameras=2)
 
         Returns:
             actions: (B, pred_horizon, action_dim) or (pred_horizon, action_dim)
         """
+        if self.num_cameras == 2 and obs_image_wrist is None:
+            raise ValueError(
+                "This checkpoint was trained with camera_mode='both' "
+                "(num_cameras=2) -- obs_image_wrist is required."
+            )
+
         # Add batch dimension if needed
         single_sample = False
         if obs_state.ndim == 2:
             obs_state = obs_state.unsqueeze(0)
             obs_image = obs_image.unsqueeze(0)
+            if obs_image_wrist is not None:
+                obs_image_wrist = obs_image_wrist.unsqueeze(0)
             single_sample = True
 
         # Move to device
         obs_state = obs_state.to(self.device)
         obs_image = obs_image.to(self.device)
+        if obs_image_wrist is not None:
+            obs_image_wrist = obs_image_wrist.to(self.device)
 
         # Predict
-        actions = self.model(obs_state, obs_image, train=False)
+        actions = self.model(obs_state, obs_image, train=False, obs_image_wrist=obs_image_wrist)
 
         # Remove batch dimension if single sample
         if single_sample:

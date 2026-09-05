@@ -9,17 +9,36 @@ Synchronized data collection:
 - All with SAME timestamp
 
 Usage:
-     python scripts/collect_demos_with_camera.py     -o data/real_data     --robot_ip 192.168.11.20     --camera_width 640     --camera_height 480     --camera_fps 30
+     python demo_collect.py -o data/real_data --arm ur5 --robot_ip 150.65.146.87
+     python demo_collect.py -o data/real_data --arm franka --robot_ip 172.16.0.2
 
+Franka: driven via FrankaRobot (franky -- see learning/hardware/franka_robot.py).
+    FrankaController (pylibfranka, learning/hardware/franka_control.py) was
+    evaluated as an alternative backend and is kept in the tree for
+    reference, but is no longer wired up here.
+
+    Recorded "action" differs per arm -- a checkpoint trained on one arm is
+    not valid for the other:
+        UR5e:   (6,) the arm's absolute target TCP pose.
+        Franka: (7,) joint velocities (rad/s), even though the live control
+                input stays Cartesian (spacemouse -> set_ee_velocity()).
+                franky/libfranka resolve that Cartesian command into joint
+                velocities internally every control cycle; get_joint_velocities()
+                reads back what was actually executed. Training/deployment
+                then work purely in joint space (set_joint_velocity()),
+                never inverting the Jacobian again at deploy time -- see
+                hardware/franka_robot.py's get_joint_velocities() docstring.
 
 Controls:
     SpaceMouse:
         - Move: Robot XYZ
-        - Left button: Toggle gripper
-        - Right button: Rotation mode
+        - Left button: Move robot (UR5e/Franka)
+        - Right button: Move Flowbot
+        - Both buttons: Release (Flowbot depressurizes; robot holds position)
     Keyboard:
         - 'C': Start recording
-        - 'S': Stop recording
+        - 'S': Stop recording (also saves the episode and returns to init_pose)
+        - 'R': Reset robot + Flowbot to init_pose without saving
         - 'Q': Quit
 """
 
@@ -31,7 +50,6 @@ import numpy as np
 import zarr
 import scipy.spatial.transform as st
 from pathlib import Path
-import cv2
 from zarr.codecs.numcodecs import Blosc
 from hardware.ur5e_rtde import UR5eRobot
 from hardware.franka_robot import FrankaRobot
@@ -45,10 +63,21 @@ import tty
 import platform
 
 class DataBuffer:
-    """Buffer for collecting episode data with camera"""
+    """Buffer for collecting episode data with camera(s).
 
-    def __init__(self, with_camera=False):
-        self.with_camera = with_camera
+    Global and wrist cameras are independently optional -- either, both, or
+    neither can be active for a given run (see --no_camera_global/
+    --no_camera_wrist). camera_0 = global camera (matches the existing
+    single-camera dataset schema every downstream training/analysis script
+    hardcodes -- see learning/train/dataset.py etc.). camera_1 = wrist
+    camera, a new, additive stream: it's recorded alongside camera_0 but the
+    training pipeline doesn't consume it yet -- that's a separate follow-up
+    if/when the model is updated to take both views.
+    """
+
+    def __init__(self, with_camera_global=False, with_camera_wrist=False):
+        self.with_camera_global = with_camera_global
+        self.with_camera_wrist = with_camera_wrist
         self.reset()
 
     def reset(self):
@@ -58,11 +87,13 @@ class DataBuffer:
         self.actions = []
         self.pwm_signals = []
         self.operation_modes = []
-        if self.with_camera:
-            self.camera_frames = []  # RGB images
+        if self.with_camera_global:
+            self.camera_frames = []        # RGB images, global camera (camera_0)
+        if self.with_camera_wrist:
+            self.camera_frames_wrist = []  # RGB images, wrist camera (camera_1)
 
     def add(self, timestamp, robot_state, joint_state, pwm_signals, action,
-            operation_mode=None, camera_frame=None):
+            operation_mode=None, camera_frame=None, camera_frame_wrist=None):
         self.timestamps.append(timestamp)
         self.robot_states.append(robot_state.copy())
         self.joint_states.append(joint_state.copy())
@@ -72,11 +103,14 @@ class DataBuffer:
             self.operation_modes.append(np.array(operation_mode, dtype=np.uint8))
         else:
             self.operation_modes.append(np.array([0, 0], dtype=np.uint8))
-        if self.with_camera:
-            if camera_frame is not None:
-                self.camera_frames.append(camera_frame.copy())
-            else:
-                raise ValueError("Camera frame required when with_camera=True")
+        if self.with_camera_global:
+            if camera_frame is None:
+                raise ValueError("Global camera frame required when with_camera_global=True")
+            self.camera_frames.append(camera_frame.copy())
+        if self.with_camera_wrist:
+            if camera_frame_wrist is None:
+                raise ValueError("Wrist camera frame required when with_camera_wrist=True")
+            self.camera_frames_wrist.append(camera_frame_wrist.copy())
 
     def __len__(self):
         return len(self.timestamps)
@@ -92,9 +126,11 @@ class DataBuffer:
             'operation_mode': np.array(self.operation_modes, dtype=np.uint8),  # (T, 2)
         }
 
-        if self.with_camera:
+        if self.with_camera_global:
             # Stack frames: (T, H, W, 3)
             data['camera_0'] = np.array(self.camera_frames)
+        if self.with_camera_wrist:
+            data['camera_1'] = np.array(self.camera_frames_wrist)
 
         return data
 
@@ -138,7 +174,7 @@ def save_episode(zarr_root, episode_data):
     for key, value in episode_data.items():
         if key not in data_group:
             # Create dataset
-            if key == 'camera_0':
+            if key in ('camera_0', 'camera_1'):
                 # Images: use compression
                 data_group.create_array(
                     key,
@@ -170,12 +206,93 @@ def save_episode(zarr_root, episode_data):
 
     return n_eps
 
+def _servo_toward(arm, is_franka, target_pose, dt, velocity, acceleration,
+                   gain=300, lookahead_time=0.1):
+    """
+    Command `arm` one tick toward an absolute 6D target_pose.
+
+    UR5eRobot: servo_tcp_pose(target_pose, ...) -- RTDE servoL tracks the
+    absolute target directly.
+
+    FrankaRobot (franky): has no absolute-position streaming primitive,
+    only set_ee_velocity(). So the absolute target gets translated into an
+    error-based feed-forward linear velocity, (target - current)/dt,
+    clipped to `velocity` m/s. Angular velocity is left at zero, matching
+    how rotation-via-spacemouse is already disabled on the UR5e path here.
+    Control input stays Cartesian -- but see Returns below, the recorded
+    action is not.
+
+    Returns
+    -------
+    np.ndarray -- the command actually sent this tick, meant to be
+    recorded as the dataset "action" so training/deployment stay
+    consistent with what the robot really executes (not what was merely
+    intended/interpolated):
+        UR5e:   (6,) the absolute target_pose itself (servo_tcp_pose tracks
+                an absolute target, so that *is* the executed command).
+        Franka: (7,) joint velocities (rad/s) -- get_joint_velocities()
+                read back immediately after commanding the Cartesian
+                velocity above, i.e. what franky/libfranka's internal
+                Cartesian-to-joint resolution actually executed this tick,
+                not the Cartesian command itself. Deploy time then drives
+                Franka purely in joint space via set_joint_velocity(),
+                never inverting the Jacobian again -- see
+                hardware/franka_robot.py's get_joint_velocities() docstring
+                for why. Franka-only: UR5e keeps a Cartesian action.
+    """
+    if is_franka:
+        current_pose = arm.get_tcp_pose()
+        lin_vel = (np.asarray(target_pose[:3], dtype=float) - current_pose[:3]) / dt
+        speed = float(np.linalg.norm(lin_vel))
+        if speed > velocity and speed > 1e-9:
+            lin_vel = lin_vel / speed * velocity
+        ang_vel = np.zeros(3)
+        arm.set_ee_velocity(lin_vel, angular_velocity=ang_vel,
+                             max_vel=velocity, max_ang_vel=acceleration)
+        return arm.get_joint_velocities()
+    else:
+        arm.servo_tcp_pose(
+            target_pose=target_pose, velocity=velocity, acceleration=acceleration,
+            dt=dt, lookahead_time=lookahead_time, gain=gain,
+        )
+        return np.asarray(target_pose, dtype=float).copy()
+
+
 def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
-                    velocity=0.1, acceleration=0.1, gain=200, lookahead_time=0.15):
-    """Interpolate arm from start_pose to goal_pose over `duration` seconds.
-    Works with both UR5eRobot and FrankaRobot (same servo_tcp_pose interface)."""
+                    velocity=0.05, acceleration=0.1, gain=200, lookahead_time=0.15,
+                    is_franka=False, settle_time=0.3):
+    """Move arm from start_pose to goal_pose.
+
+    UR5eRobot: interpolates (position lerp + rotation slerp) over `duration`
+    seconds, streaming each waypoint via servo_tcp_pose (RTDE servoL) at
+    ~1/dt Hz.
+
+    FrankaRobot (franky): one direct move_tcp_pose() call. It's a single
+    blocking point-to-point move with its own smooth, independently-timed
+    translation+rotation trapezoidal profile (see franka_robot.py) --
+    already the well-tested primitive for "go to this pose," so there's no
+    need to hand-roll interpolation or open a set_ee_velocity session for a
+    one-shot move like this.
+
+    settle_time (Franka only): pause after arm.stop() before starting
+    move_tcp_pose(). arm.stop() returns once commanded velocity ramps to
+    zero, but the robot's internal state can apparently still be settling
+    for a moment after that -- starting a new control session immediately
+    against that not-quite-settled state was observed (empirically, on
+    hardware) to make move_tcp_pose plan/execute very slowly regardless of
+    the velocity/duration passed in. A short pause here fixed it."""
     start_pose = np.asarray(start_pose, dtype=float).copy()
     goal_pose  = np.asarray(goal_pose,  dtype=float).copy()
+
+    if is_franka:
+        # Cleanly ramp down any active set_ee_velocity() session (opened by
+        # spacemouse driving) before handing off to a blocking position
+        # move -- no-op if nothing is running.
+        arm.stop()
+        if settle_time > 0:
+            time.sleep(settle_time)
+        arm.move_tcp_pose(goal_pose, velocity=velocity, acceleration=acceleration)
+        return
 
     r0    = st.Rotation.from_rotvec(start_pose[3:])
     r1    = st.Rotation.from_rotvec(goal_pose[3:])
@@ -187,43 +304,52 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
         pose = start_pose.copy()
         pose[:3] = (1 - a) * start_pose[:3] + a * goal_pose[:3]
         pose[3:] = slerp([a])[0].as_rotvec()
-        arm.servo_tcp_pose(
-            target_pose=pose, velocity=velocity, acceleration=acceleration,
-            dt=dt, lookahead_time=lookahead_time, gain=gain,
-        )
+        _servo_toward(arm, is_franka, pose, dt, velocity, acceleration,
+                      gain=gain, lookahead_time=lookahead_time)
         time.sleep(dt)
 
 @click.command()
 @click.option('--output', '-o', required=True, default=None, help='Output folder name')
-@click.option('--arm', default='ur5', type=click.Choice(['ur5', 'franka'], case_sensitive=False),
+@click.option('--arm', default='franka', type=click.Choice(['ur5', 'franka'], case_sensitive=False),
               help='Which robotic arm to use: "ur5" (default) or "franka".')
 @click.option('--robot_ip', '-ri', default=None,
               help='Arm IP. Default: 150.65.146.87 (UR5) or 172.16.0.2 (Franka).')
 @click.option('--arduino_port', default="/dev/ttyACM0")
-@click.option('--camera_serial', help='RealSense serial (auto-detect if None)')
-@click.option('--no_camera', is_flag=True, help='Run without camera')
-@click.option('--camera_width', default=640, type=int, help='Camera width')
-@click.option('--camera_height', default=480, type=int, help='Camera height')
-@click.option('--camera_fps', default=30, type=int, help='Camera FPS')
+@click.option('--camera_serial_global', default='051222061185',
+              help='RealSense serial for the global (scene) camera.')
+@click.option('--camera_serial_wrist', default='827112072398',
+              help='RealSense serial for the wrist camera.')
+@click.option('--no_camera_wrist', is_flag=True, help='Run without wrist_camera')
+@click.option('--no_camera_global', is_flag=True, help='Run without global_camera')
+@click.option('--camera_width', default=640, type=int, help='Camera width (both cameras)')
+@click.option('--camera_height', default=480, type=int, help='Camera height (both cameras)')
+@click.option('--camera_fps', default=30, type=int,
+              help='Camera FPS (both cameras). Must be a rate the sensor natively supports '
+                   '(RealSense color streams typically only offer 6/15/30/60) -- pipeline.start() '
+                   'fails with "Couldn\'t resolve requests" for any other value. This does not need '
+                   'to match --frequency: get_frames() is only called once per control tick regardless '
+                   'of the sensor\'s configured rate, so the effective capture rate already follows '
+                   '--frequency. Use system_verification/test_camera.py to check what a given camera supports.')
 @click.option('--frequency', '-f', default=10.0, type=float, help='Control Hz')
-@click.option('--flowbot_freqency', '-fb_freq', default=10.0, type=float, help='Control Hz for flowbot')
-@click.option('--max_pos_speed', default=0.07, type=float)
+@click.option('--flowbot_freqency', '-fb_freq', default=30.0, type=float, help='Control Hz for flowbot')
+@click.option('--flowbot_speed_factor', '-fspeed', default =1.5, type=float)
+@click.option('--max_pos_speed', default=0.05, type=float)
 @click.option('--max_rot_speed', default=0.05, type=float)
-@click.option('--deadzone', default=0.2, type=float, help='Spacemouse threshold')
+@click.option('--deadzone', default=0.3, type=float, help='Spacemouse threshold')
 @click.option('--release_frames', default=10, type=int,
               help='Frames to record after release (both-button press). '
                    'At 10 Hz the default of 10 gives 1 s of released state.')
-def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_height,
-         camera_fps, arduino_port, flowbot_freqency, frequency, max_pos_speed,
-         max_rot_speed, deadzone, release_frames):
+def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_camera_wrist,no_camera_global,
+         camera_width, camera_height, camera_fps, arduino_port, flowbot_freqency,
+         flowbot_speed_factor, frequency, max_pos_speed, max_rot_speed, deadzone, release_frames):
 
     print("="*60)
     print("   PICK-PLACE DATA COLLECTION WITH CAMERA")
     print("="*60)
-
+    parent_dir = Path(__file__).parent.parent
     # Create output
     if output is None:
-        parent_dir = Path(__file__).parent.parent
+        
         output_dir = Path(parent_dir / "data" / "demo_data")
         output_dir.mkdir(parents=True, exist_ok=True)
         print(f"\nOutput: {output_dir}")
@@ -231,42 +357,59 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
         output_dir = Path(output)
         output_dir.mkdir(parents=True, exist_ok=True)
         print(f"\nOutput: {output_dir}")
-    # Initialize camera
-    camera = None
-    with_camera = not no_camera
-
-    if with_camera:
+    # Initialize cameras (global + wrist). Each is independently optional
+    # (--no_camera_global / --no_camera_wrist) -- either, both, or neither
+    # can be active. Connected/failed independently too: the wrist camera
+    # failing to start doesn't take the global camera down, and vice versa.
+    def _connect_camera(role, serial):
+        print(f"\nInitializing {role} camera...")
         try:
-            print("\nInitializing camera...")
-            camera = RealSenseCamera(
-                serial_number=camera_serial,
+            return RealSenseCamera(
+                serial_number=serial,
                 width=camera_width,
                 height=camera_height,
                 fps=camera_fps,
                 enable_depth=False,
             )
-            image_shape = (camera_height, camera_width, 3)
         except Exception as e:
-            print(f"⚠️  Camera failed: {e}")
-            print("   Continuing without camera...")
-            with_camera = False
-            camera = None
-    else:
-        print("\nSkipping camera (--no_camera or not available)")
+            print(f"⚠️  {role.capitalize()} camera failed: {e}")
+            if "resolve" in str(e).lower():
+                print("   \"Couldn't resolve requests\" means the requested "
+                      "--camera_width/--camera_height/--camera_fps combo isn't one this "
+                      "camera natively supports (RealSense color streams are usually only "
+                      "6/15/30/60 fps at a handful of resolutions) -- check with "
+                      "system_verification/test_camera.py.")
+            print(f"   Continuing without the {role} camera...")
+            return None
+
+    with_camera_global = not no_camera_global
+    with_camera_wrist = not no_camera_wrist
+
+    camera_global = _connect_camera("global", camera_serial_global) if with_camera_global else None
+    with_camera_global = camera_global is not None
+
+    camera_wrist = _connect_camera("wrist", camera_serial_wrist) if with_camera_wrist else None
+    with_camera_wrist = camera_wrist is not None
+
+    with_camera = with_camera_global or with_camera_wrist
+    image_shape = (camera_height, camera_width, 3) if with_camera else None
+    if not with_camera:
+        print("\nSkipping camera (--no_camera_global and --no_camera_wrist, or neither connected)")
 
     # Initialize zarr
     zarr_root = create_zarr_dataset(
         output_dir,
         with_camera=with_camera,
-        image_shape=image_shape if with_camera else None
+        image_shape=image_shape
     )
 
     # Connect to arm
     _default_ip = {"ur5": "150.65.146.87", "franka": "172.16.0.2"}
     ip = robot_ip or _default_ip[arm.lower()]
+    is_franka = arm.lower() == "franka"
     print(f"\nConnecting to {arm.upper()} at {ip} ...")
-    if arm.lower() == "franka":
-        robot = FrankaRobot(robot_ip=ip, frequency=frequency)
+    if is_franka:
+        robot = FrankaRobot(robot_ip=ip, frequency=frequency, use_gripper=False)
     else:
         robot = UR5eRobot(robot_ip=ip, frequency=frequency)
     # keep `ur5` as alias so the rest of the code works unchanged
@@ -285,7 +428,8 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
                  pwm_max= 26,
                  enable_plot = True,
                 frequency = flowbot_freqency,
-                max_pos_speed = 30)
+                max_pos_speed = 40,
+                draw_hull = True)
     fb.start()
 
     # Connect SpaceMouse
@@ -307,23 +451,24 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
     # Control loop
     dt = 1.0 / frequency
     is_recording = False
-    episode_buffer = DataBuffer(with_camera=with_camera)
+    episode_buffer = DataBuffer(with_camera_global=with_camera_global, with_camera_wrist=with_camera_wrist)
     episode_count = 0
     iter_count = 0
 
     # Get initial pose
     tcp_pose = ur5.get_tcp_pose()
-    init_pose = [0.20636, -0.46706,  0.44268,3.14, -0.14 ,0.0]
+    init_pose = np.array([0.45, 0.045, 0.5, 3.14, 0.0, -0.05])
     target_pose = init_pose.copy()
-    
-    move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, duration=5.0,gain=150)
-    tcp_pose = ur5.get_tcp_pose()
+
+    last_action = init_pose.copy() if not is_franka else np.zeros(7)
+
+    move_2_init_pos(robot, tcp_pose, init_pose, dt=dt, velocity=0.03, duration=2.0, gain=150, is_franka=is_franka)
+    tcp_pose = robot.get_tcp_pose()
     print(f"\nInitial pose: [{', '.join([f'{x:.3f}' for x in tcp_pose])}]")
     print("\nReady! Press 'C' to start recording.\n")
 
     # Terminal setup
     old_settings = termios.tcgetattr(sys.stdin)
-    cam_obs = cv2.VideoCapture(0)
     try:
         tty.setcbreak(sys.stdin.fileno())
 
@@ -346,9 +491,10 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
                         fb.reset()  # Reset flowbot
                         fb.update_plot()
                         tcp_pose = ur5.get_tcp_pose()
-                        move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, duration=3.0, gain=150)
+                        move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, velocity=0.04, duration=3.0, gain=150, is_franka=is_franka)
                         print(f"✅ Robot reset to initial pose!\n")
                         target_pose = init_pose.copy()
+                        last_action = init_pose.copy() if not is_franka else np.zeros(7)
 
                         
                     except Exception as e:
@@ -366,17 +512,21 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
                         episode_count += 1
                         is_recording = False
                         print(f"\n>>> Episode {ep_id} SAVED ({len(episode_buffer)} steps)")
-                        if with_camera:
-                            print(f"    Camera: {ep_data['camera_0'].shape}")
+                        if with_camera_global:
+                            print(f"    Camera global: {ep_data['camera_0'].shape}")
+                        if with_camera_wrist:
+                            print(f"    Camera wrist:  {ep_data['camera_1'].shape}")
                         print(f"    Total episodes: {episode_count}")
 
                         # Auto-return to start pose
                         print(f"\n🔄 Moving robot back to start pose...")
+                        time.sleep(1.0)
                         try:
                             tcp_pose = ur5.get_tcp_pose()
-                            move_2_init_pos(ur5, tcp_pose, init_pose, dt=dt, duration=3.0, gain=150)
+                            move_2_init_pos(ur5, tcp_pose, init_pose, velocity=0.04, dt=dt, duration=3.0, gain=150, is_franka=is_franka)
                             print(f"✅ Robot returned to start pose!\n")
                             target_pose = init_pose.copy()
+                            last_action = init_pose.copy() if not is_franka else np.zeros(7)
 
                             fb.reset()  # Reset flowbot
                             fb.update_plot()
@@ -398,52 +548,136 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
             else:
                 op_mode = np.array([0, 0], dtype=np.uint8)         # idle
 
+            # Arm button (left) not held this tick (idle or flowbot-only) --
+            # for Franka, fully close the Cartesian-velocity background
+            # thread (robot.stop(), not just zeroing the velocity) rather
+            # than relying on set_ee_velocity's ~0.5s staleness watchdog.
+            # Two reasons this needs to be a full stop():
+            #  1) Left unhandled, the arm coasts at the last commanded
+            #     speed for up to 0.5s after button release -- a real,
+            #     physically significant overshoot.
+            #  2) That background thread has to service libfranka's
+            #     real-time FCI loop on a strict cadence. It shares the GIL
+            #     with the flowbot branch below, which does synchronous IK
+            #     + serial I/O + a matplotlib redraw (slow, tens of ms).
+            #     Leaving the servo thread merely "parked at zero velocity"
+            #     (still running, still needing GIL time every cycle) while
+            #     flowbot's slow work holds the GIL is exactly what was
+            #     tripping "communication_constraints_violation" reflexes
+            #     and serial write timeouts every time flowbot control
+            #     started. Fully stopping tears the background thread down
+            #     (blocking briefly while it ramps to zero and exits), so it
+            #     isn't competing for the GIL at all while flowbot runs.
+            #     stop() is a cheap no-op if the session's already closed.
+            # Also resync target_pose to the arm's actual measured pose:
+            # target_pose is an ideal accumulator that can run ahead of the
+            # real (velocity-capped) position while driving, and if left
+            # stale it causes a sudden lurch the next time the button is
+            # pressed. UR5e doesn't need any of this -- servo_tcp_pose has
+            # no persistent background thread and already holds its last
+            # target when not called.
+            if is_franka and not button_status[0]:
+                try:
+                    robot.stop()
+                except Exception:
+                    pass
+                target_pose = robot.get_tcp_pose()
+
             if button_status[1] and not button_status[0]:          # right btn: flowbot
-                xyz_fb = sm.get_latest_xyz()
+                cmd_sm = sm.get_latest_xyz()
+                xyz_fb = cmd_sm * flowbot_speed_factor
                 xyz_fb[2] = -xyz_fb[2]
-                copied_xyz = xyz_fb.copy()
-                xyz_fb[1] = -copied_xyz[0]  # for better visualization during teleop
-                xyz_fb[0] = -copied_xyz[1]
+                xyz_fb[1] = -xyz_fb[1]
+                # copied_xyz = xyz_fb.copy()
+                # xyz_fb[1] = -copied_xyz[0]  # for better visualization during teleop
+                # xyz_fb[0] = -copied_xyz[1]
                 xyz_fb = np.where(np.abs(xyz_fb) < deadzone, 0.0, xyz_fb)
                 fb.step(xyz_fb)
                 fb.update_plot()
 
-            elif button_status[0] and not button_status[1]:        # left btn: UR5e
-                xyz_ur5 = sm.get_latest_xyz()
-                vel_linear  = xyz_ur5[:3] * max_pos_speed * dt
-                vel_angular = xyz_ur5[3:] * max_rot_speed * dt
-                vel_angular[:] = 0
+            elif button_status[0] and not button_status[1]:        # left btn: UR5e/Franka
+                cmd_arm = sm.get_latest_xyz()
+                cpied_cmd = cmd_arm.copy()
+                cmd_arm[0] = -cmd_arm[1]  # X
+                cmd_arm[1] = cpied_cmd[0] # Y
+                if is_franka:
+                    # Command velocity directly from stick deflection instead
+                    # of routing through a target_pose/position-error
+                    # round-trip (_servo_toward): that indirection exists for
+                    # UR5e's absolute-position tracker, but for Franka's
+                    # native velocity primitive it creates a P-loop that
+                    # fights the backend's own accel-limited ramp --
+                    # target_pose keeps advancing every tick faster than the
+                    # accel cap lets the arm follow, the commanded velocity
+                    # saturates and overshoots, error goes negative, and the
+                    # next tick commands a reversal -- a limit cycle that
+                    # looks like jerky/non-smooth motion even at a constant
+                    # max stick push. Feeding velocity straight in removes
+                    # the feedback loop entirely: held at max deflection, the
+                    # commanded velocity is constant and only the ramp (not
+                    # a position error) shapes the acceleration.
+                    lin_vel = cmd_arm[:3] * max_pos_speed
+                    # Each axis is independently bounded to max_pos_speed
+                    # above, but the combined vector's norm can still reach
+                    # up to max_pos_speed*sqrt(3) on a diagonal push --
+                    # set_ee_velocity clips that norm to max_vel internally
+                    # before sending, so replicate the same clip here first.
+                    # Otherwise last_action (the raw, pre-clip vector) would
+                    # disagree with what the robot actually executed on any
+                    # near-max diagonal push, breaking the train/deploy
+                    # action-consistency this recording scheme relies on.
+                    lin_speed = float(np.linalg.norm(lin_vel))
+                    if lin_speed > max_pos_speed and lin_speed > 1e-9:
+                        lin_vel = lin_vel / lin_speed * max_pos_speed
+                    try:
+                        robot.set_ee_velocity(lin_vel, angular_velocity=np.zeros(3),
+                                               max_vel=max_pos_speed, max_ang_vel=max_rot_speed)
+                        # Recorded action is joint velocity (7,), not the
+                        # Cartesian command above -- see get_joint_velocities()'s
+                        # docstring for why. Control input stays Cartesian;
+                        # only what gets *recorded* changes.
+                        last_action = robot.get_joint_velocities()
+                        target_pose = robot.get_tcp_pose()  # keep in sync for release/idle-hold
+                        # print(f"Commanded velocity: [{', '.join([f'{x:.3f}' for x in lin_vel])}]")
+                        print(f"Current TCP pos: [{np.array_str(target_pose, precision=3, suppress_small=True)}]")
+                    except Exception as e:
+                        print(f"\nControl error: {e}")
+                        target_pose = robot.get_tcp_pose()
+                else:
+                    vel_linear  = cmd_arm[:3] * max_pos_speed * dt
+                    vel_angular = cmd_arm[3:] * max_rot_speed * dt
+                    vel_angular[:] = 0
 
-                target_pose[:3] += vel_linear
-                if np.any(vel_angular != 0):
-                    drot = st.Rotation.from_euler('xyz', vel_angular)
-                    current_rot = st.Rotation.from_rotvec(target_pose[3:])
-                    target_pose[3:] = (drot * current_rot).as_rotvec()
-                    
+                    target_pose[:3] += vel_linear
+                    if np.any(vel_angular != 0):
+                        drot = st.Rotation.from_euler('xyz', vel_angular)
+                        current_rot = st.Rotation.from_rotvec(target_pose[3:])
+                        target_pose[3:] = (drot * current_rot).as_rotvec()
 
-                try:
-                    ur5.servo_tcp_pose(target_pose=target_pose, velocity=0.1,
-                                       acceleration=0.1, dt=dt, lookahead_time=0.1, gain=300)
-                    print(f"Target pose updated: [{', '.join([f'{x:.3f}' for x in target_pose[:3]])}]")
-                except Exception as e:
-                    print(f"\nControl error: {e}")
-                    tcp_pose = ur5.get_tcp_pose()
-                    target_pose = tcp_pose.copy()
+                    try:
+                        last_action = _servo_toward(ur5, is_franka, target_pose, dt, velocity=0.1,
+                                                     acceleration=0.1, lookahead_time=0.1, gain=300)
+                        print(f"Target pose updated: [{', '.join([f'{x:.3f}' for x in target_pose[:3]])}]")
+                    except Exception as e:
+                        print(f"\nControl error: {e}")
+                        tcp_pose = ur5.get_tcp_pose()
+                        target_pose = tcp_pose.copy()
 
             elif button_status[0] and button_status[1]:            # both btns: release
                 print("======== RELEASING =========")
+                fb.release()      # sends 'r' hardware command
+                time.sleep(0.5)
                 fb.reset()        # sets last_pwm = [0,0,0] and sends "0 0 0"
                 fb.update_plot()
-                fb.release()      # sends 'r' hardware command
+                
  
                 if is_recording:
                     print(f"  Recording {release_frames} release frames ...")
                     for _ in range(release_frames):
                         # Hold robot at current target during release
                         try:
-                            ur5.servo_tcp_pose(target_pose=target_pose, velocity=0.1,
-                                               acceleration=0.1, dt=dt,
-                                               lookahead_time=0.1, gain=300)
+                            last_action = _servo_toward(ur5, is_franka, target_pose, dt, velocity=0.1,
+                                                         acceleration=0.1, lookahead_time=0.1, gain=300)
                         except Exception:
                             pass
 
@@ -451,13 +685,20 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
                         time.sleep(dt)
 
                         rel_frame = None
-                        if with_camera and camera:
+                        rel_frame_wrist = None
+                        if with_camera_global:
                             try:
-                                rel_frame, _ = camera.get_frames()
+                                rel_frame, _ = camera_global.get_frames()
+                            except Exception:
+                                pass
+                        if with_camera_wrist:
+                            try:
+                                rel_frame_wrist, _ = camera_wrist.get_frames()
                             except Exception:
                                 pass
 
-                        if with_camera and rel_frame is None:
+                        if (with_camera_global and rel_frame is None) or \
+                           (with_camera_wrist and rel_frame_wrist is None):
                             continue
 
                         rel_tcp    = ur5.get_tcp_pose()
@@ -466,10 +707,11 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
                             timestamp=time.time(),
                             robot_state=rel_tcp,
                             joint_state=rel_joints,
-                            action=target_pose,      # robot not moving
+                            action=last_action,       # robot not moving (~0 velocity for Franka)
                             pwm_signals=fb.last_pwm, # = [0,0,0] after reset
                             operation_mode=np.array([1, 1], dtype=np.uint8),
                             camera_frame=rel_frame,
+                            camera_frame_wrist=rel_frame_wrist,
                         )
                     print(f"  Release recorded ({release_frames} steps, PWM={fb.last_pwm.tolist()})")
 
@@ -481,21 +723,25 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
 
             # ── 4. Read ALL observations after robot has settled ──────────────
             camera_frame = None
-            if with_camera and camera:
+            camera_frame_wrist = None
+            if with_camera_global:
                 try:
-                    camera_frame, _ = camera.get_frames()
-                    ret, frame = cam_obs.read()
-                    cv2.imshow("Camera", frame)
-                    cv2.waitKey(1)
+                    camera_frame, _ = camera_global.get_frames()
                 except Exception as e:
-                    print(f"\n⚠️  Camera error: {e}\n")
+                    print(f"\n⚠️  Global camera error: {e}\n")
+            if with_camera_wrist:
+                try:
+                    camera_frame_wrist, _ = camera_wrist.get_frames()
+                except Exception as e:
+                    print(f"\n⚠️  Wrist camera error: {e}\n")
 
             # ── 5. Save to buffer (camera, TCP, PWM all at same settled pose) ─
             # Skip idle frames (no button pressed) — they represent operator hesitation,
             # not intentional actions, and would teach the model to stall mid-task.
             if is_recording and np.any(op_mode):
-                if with_camera and camera_frame is None:
-                    print("\n⚠️  Warning: No camera frame!\n")
+                if (with_camera_global and camera_frame is None) or \
+                   (with_camera_wrist and camera_frame_wrist is None):
+                    print("\n⚠️  Warning: Missing a camera frame!\n")
                     continue
 
                 current_tcp = ur5.get_tcp_pose()
@@ -504,10 +750,11 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
                     timestamp=time.time(),
                     robot_state=current_tcp,
                     joint_state=current_joints,
-                    action=target_pose,
+                    action=last_action,
                     pwm_signals=prev_pwm,   # command from previous step (matches current image/tcp)
                     operation_mode=op_mode,
-                    camera_frame=camera_frame
+                    camera_frame=camera_frame,
+                    camera_frame_wrist=camera_frame_wrist,
                 )
 
             # ── 6. Status ─────────────────────────────────────────────────────
@@ -515,7 +762,10 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
             if iter_count % (frequency * 2) == 0:
                 status  = "REC" if is_recording else "---"
                 n_steps = len(episode_buffer) if is_recording else 0
-                cam_str = "CAM" if (with_camera and camera_frame is not None) else "---"
+                cam_str = (
+                    ("G" if with_camera_global and camera_frame is not None else "-")
+                    + ("W" if with_camera_wrist and camera_frame_wrist is not None else "-")
+                )
                 print(f"[{status}][{cam_str}] iter={iter_count:4d} eps={episode_count} steps={n_steps:3d}")
 
     except KeyboardInterrupt:
@@ -531,8 +781,10 @@ def main(output, arm, robot_ip, camera_serial, no_camera, camera_width, camera_h
         time.sleep(0.2)
         sm.stop()
         
-        if camera:
-            camera.stop()
+        if camera_global:
+            camera_global.stop()
+        if camera_wrist:
+            camera_wrist.stop()
 
         print(f"\n✅ Done! Collected {episode_count} episodes")
         print(f"Data: {output_dir / 'dataset.zarr'}\n")

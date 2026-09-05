@@ -35,6 +35,7 @@ unsigned long lastSampleMs = 0;
 unsigned long lastRampMs   = 0;
 
 const float PWM_STEP = 1; 
+const float PWM_STEP_FAST = 2; 
 
 // ADC averaging: take N samples and return the mean raw count
 const int ADC_AVG_N = 10;
@@ -84,22 +85,29 @@ void applyPwm() {
   analogWrite(VALVE2_PIN, pwm2_cur);
   analogWrite(VALVE3_PIN, pwm3_cur);
 }
-// Ramp one PWM value toward its target
+// Ramp one PWM value toward its target. Steps by PWM_STEP_FAST while the
+// target is still more than one count away ("far"); once within one count,
+// snaps straight to it (equivalent to a final PWM_STEP=1 step).
 float rampPwm(int current, int target, int init) {
-  if (current < target && target > init) {
-    if (current < init_min){
-      current = init_min;
+  if (target <= init) {
+    return 0;
+  }
+  if (current < target) {
+    if (current < init_min) {
+      return init_min;  // jump past the pre-open deadband in one step
     }
-    else {      
-      current += PWM_STEP;
-        }
-  } else if (current > target && target > init) {
-    current -= PWM_STEP;
+    if (target - current > 1) {
+      return current + PWM_STEP_FAST;  // still far -- fast step
+    }
+    return target;  // within one step -- close the gap directly
   }
-  else if (target <= init){
-    current = 0;
+  if (current > target) {
+    if (current - target > 1) {
+      return current - PWM_STEP_FAST;  // still far -- fast step
+    }
+    return target;  // within one step -- close the gap directly
   }
-  return current;
+  return current;  // already at target
 }
 
 void updatePwmRamps() {

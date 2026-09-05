@@ -41,7 +41,24 @@
       "Bash(/tmp/pylibfranka_venv/bin/pip install *)",
       "Bash(/tmp/pylibfranka_venv/bin/python *)",
       "Bash(python3 -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/learning/hardware/franka_control.py)",
-      "Bash(python3 -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/learning/system_verification/test_franka_control.py)"
+      "Bash(python3 -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/learning/system_verification/test_franka_control.py)",
+      "Bash(python3 -c ' *)",
+      "Bash(~/.pyenv/versions/flow_bot/bin/python -c \"import hardware; print\\(hardware.__file__\\)\")",
+      "Bash(~/.pyenv/versions/flow_bot/bin/pip show *)",
+      "Bash(python3 -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/suction_force_test.py)",
+      "Bash(~/.pyenv/versions/flow_bot/bin/python -c ' *)",
+      "Bash(~/.pyenv/versions/flow_bot/bin/python *)",
+      "Bash(python3 -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/learning/hardware/use_franka.py /home/nhnhan/Desktop/flow_contibot_learning/suction_force_test.py)",
+      "Bash(python3 -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/learning/system_verification/test_spacemouse_velocity.py)",
+      "Bash(python3 -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/learning/demo_collect.py)",
+      "Bash(python3 -)",
+      "Bash(cd *)",
+      "Bash(awk '/^class GripperState/{flag=1} flag; /^class /{if\\(flag && NR>1 && $0 !~ /GripperState/\\) exit}' _franky.pyi)",
+      "Bash(/home/nhnhan/.pyenv/versions/flow_bot/bin/python -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/learning/demo_collect.py /home/nhnhan/Desktop/flow_contibot_learning/learning/hardware/franka_robot.py && echo OK)",
+      "Bash(/home/nhnhan/.pyenv/versions/flow_bot/bin/python -)",
+      "Bash(/home/nhnhan/.pyenv/versions/flow_bot/bin/python -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/learning/system_verification/test_franka.py /home/nhnhan/Desktop/flow_contibot_learning/learning/demo_collect.py /home/nhnhan/Desktop/flow_contibot_learning/learning/hardware/franka_robot.py && echo OK)",
+      "Bash(/home/nhnhan/.pyenv/versions/flow_bot/bin/python -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/learning/hardware/franka_robot.py)",
+      "Bash(/home/nhnhan/.pyenv/versions/flow_bot/bin/python -m py_compile /home/nhnhan/Desktop/flow_contibot_learning/learning/system_verification/test_teleop.py)"
     ]
   }
 }
