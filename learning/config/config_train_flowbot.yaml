@@ -4,18 +4,18 @@ dataset_path: "data/demo_data/Task3/dataset.zarr"  # Path to training dataset (Z
 obs_horizon: 2        # Number of observation frames
 pred_horizon: 16      # Number of action steps to predict
 action_horizon: 8     # Number of action steps to execute
-image_size: [216, 288]  # Crop + resize target (see crop_scale/crop_x/crop_y below)
+image_size: [240, 320]  # Crop + resize target (see crop_scale/crop_x/crop_y below)
 crop_scale: 1.5        # Crop window size as a multiple of image_size
 crop_x: 0.5            # Crop anchor in [0,1]: 0=left, 0.5=center, 1=right
 crop_y: 0.5            # Crop anchor in [0,1]: 0=top, 0.5=center, 1=bottom
-camera_mode: global    # 'global' (camera_0 only), 'wrist' (camera_1 only), or 'both'
+camera_mode: both    # 'global' (camera_0 only), 'wrist' (camera_1 only), or 'both'
 
 # Wrist camera overrides (only used when camera_mode is 'wrist' or 'both').
 # Leave unset (or delete) to reuse the global image_size/crop_scale/crop_x/crop_y above.
-# wrist_image_size: [216, 288]
-# wrist_crop_scale: 1.5
-# wrist_crop_x: 0.5
-# wrist_crop_y: 0.5
+wrist_image_size: [240, 320]
+wrist_crop_scale: 2
+wrist_crop_x: 1
+wrist_crop_y: 1
 
 exclude_episodes: []  # Episodes to exclude from training (e.g. incomplete)
 
@@ -59,9 +59,9 @@ val_ratio: 0.1        # Validation split ratio
 num_workers: 4        # DataLoader workers
 
 # Early stopping
-early_stopping_patience: 200  # Stop if no improvement for N post-warmup epochs (0 = disabled)
+early_stopping_patience: 50  # Stop if no improvement for N post-warmup epochs (0 = disabled)
 
 # Checkpointing
 output_dir: "/media/protac/Desk SSD/Nhan/trained_models"
-save_every: 200        # Save checkpoint every N epochs
+save_every: 50        # Save checkpoint every N epochs
 

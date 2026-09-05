@@ -17,22 +17,22 @@ arm: franka
 # --no_camera_wrist). 'global' (camera_0 only), 'wrist' (camera_1 only), or
 # 'both' -- dataset.py raises a clear error at load time if the dataset is
 # missing a camera this setting needs.
-camera_mode: global
+camera_mode: both
 
 # Crop + resize (global camera): crop_scale is the crop window size as a
 # multiple of image_size; crop_x/crop_y anchor it in [0,1] (0=left/top,
 # 0.5=center, 1=right/bottom). Defaults below match dataset.py's own.
-# image_size: [216, 288]
-# crop_scale: 1.5
-# crop_x: 0.5
-# crop_y: 0.5
+image_size: [240, 320]
+crop_scale: 1.5
+crop_x: 0.5
+crop_y: 0.5
 
 # Wrist camera overrides (only used when camera_mode is 'wrist' or 'both').
 # Leave unset (or delete) to reuse the global image_size/crop_scale/crop_x/crop_y above.
-# wrist_image_size: [216, 288]
-# wrist_crop_scale: 1.5
-# wrist_crop_x: 0.5
-# wrist_crop_y: 0.5
+wrist_image_size: [240, 320]
+wrist_crop_scale: 2
+wrist_crop_x: 1
+wrist_crop_y: 1
 
 # TCP dimensions: 3 = xyz only, 6 = xyz + rotation (rx,ry,rz)
 # Only affects STATE (robot_eef_pose[:tcp_dims]) -- Franka's ACTION is
