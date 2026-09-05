@@ -65,7 +65,7 @@ DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
 
 # Franka start pose -- matches init_pose in demo_collect.py, i.e. where
 # Franka demonstrations actually started from.
-FRANKA_START_POSE = [0.45, 0.045, 0.5, 3.14, 0.0, -0.05]
+FRANKA_START_POSE = [0.45, 0.15, 0.5, 3.14, 0.0, -0.05]
 
 # Fixed TCP rotation used when executing XYZ-only actions from the policy.
 # Rotation is not predicted by the model (action_dim=8) so we hold it constant.
@@ -97,8 +97,8 @@ FRANKA_MAX_JOINT_VEL = 0.3   # rad/s
 # a single-camera deploy still binds the intended physical device even if
 # both cameras happen to be connected, and 'both' mode's two pipelines never
 # race to grab the same one (see demo_collect.py's camera connection comments).
-_DEFAULT_CAMERA_SERIAL_GLOBAL = '051222061185'
-_DEFAULT_CAMERA_SERIAL_WRIST  = '827112072398'
+_DEFAULT_CAMERA_SERIAL_GLOBAL = '827112072398'
+_DEFAULT_CAMERA_SERIAL_WRIST  = '841512070635'
 
 SERVO_LOOKAHEAD = 0.1   # s
 SERVO_GAIN = 300
@@ -492,8 +492,8 @@ class RobotDeployment:
         op_mode_pred = np.clip(np.round(action[d+3:d+5]), 0, 1).astype(int)
 
         # PWM offset, flowbot-active steps only.
-        if op_mode_pred[1] == 1:
-            pwm_raw = pwm_raw + np.array([3, 0, 1])
+        # if op_mode_pred[1] == 1:
+        #     pwm_raw = pwm_raw + np.array([3, 0, 1])
 
         pwm_int    = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
 
