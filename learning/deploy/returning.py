@@ -30,7 +30,9 @@ PWM_MAX = 26
 CONTROL_FREQ = 10.0
 FLOWBOT_FREQ = 10
 
-DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
+# Matches demo_collect.py's current init_pose -- see deploy_flowbot_w_policy.py's
+# DEFAULT_START_POSE comment for why this was stale until 2026-09.
+DEFAULT_START_POSE = [0.45, 0.15, 0.5, 3.14, 0.0, -0.05]
 
 
 def return_to_start(

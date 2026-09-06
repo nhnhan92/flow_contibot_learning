@@ -65,11 +65,20 @@ PWM_MAX = 26
 
 _DEFAULT_ROBOT_IP = {"ur5": "150.65.146.87", "franka": "172.16.0.2"}
 
-# Default start pose (from collect_demos_with_camera.py)
-DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
+# UR5e start pose -- matches init_pose in demo_collect.py, i.e. where UR5e
+# demonstrations actually started from. (Was stale until 2026-09 -- an old
+# value left over from a since-renamed predecessor script,
+# collect_demos_with_camera.py, that didn't match demo_collect.py's current
+# init_pose in either position or rotation. That mismatch fed both
+# move_to_start() -- UR5e episodes were starting from the wrong physical
+# pose -- and self.tcp_fixed_rotation below -- see the Franka rotation bug
+# this was found alongside.)
+DEFAULT_START_POSE = [0.45, 0.15, 0.5, 3.14, 0.0, -0.05]
 
 # Franka start pose -- matches init_pose in demo_collect.py, i.e. where
-# Franka demonstrations actually started from.
+# Franka demonstrations actually started from. (Currently identical to
+# DEFAULT_START_POSE above -- demo_collect.py's init_pose isn't arm-specific
+# -- but kept separate in case that ever changes.)
 FRANKA_START_POSE = [0.45, 0.15, 0.5, 3.14, 0.0, -0.05]
 
 # Fixed TCP rotation used when executing XYZ-only (tcp_dims=3) position
@@ -87,9 +96,22 @@ DT = 1.0 / CONTROL_FREQ
 DT_FLOWBOT = 0.3     # Step time (s) when flowbot is actively actuating
 FLOWBOT_FREQ = 10.0  # Flowbot command frequency — must match CONTROL_FREQ
 
-# servo_l speed/acceleration (lower = smoother) -- UR5e only
+# servo_l speed/acceleration (lower = smoother) -- UR5e only, literal m/s / m/s^2
 SERVO_SPEED = 0.05     # m/s
 SERVO_ACCEL = 0.05     # m/s^2
+
+# Franka position mode (set_tcp_pose) defaults -- relative_dynamics_factor
+# fractions (0-1) of Franka's own hardware limits, NOT literal m/s (see
+# FrankaRobot.move_tcp_pose's docstring). Separate from UR5e's SERVO_SPEED/
+# SERVO_ACCEL above -- overridable per-instance via RobotDeployment's
+# franka_position_velocity/franka_position_acceleration (CLI:
+# --franka_position_speed/--franka_position_accel). Lower = slower and
+# gentler; also lowers jerk, since _dyn_factor ties jerk to the acceleration
+# factor -- so this is also the first thing to try if set_tcp_pose keeps
+# tripping the "Motion finished commanded, but the robot is still moving!"
+# discontinuity reflex.
+FRANKA_POSITION_VELOCITY = 0.05
+FRANKA_POSITION_ACCEL = 0.05
 
 MAX_TCP_DELTA = 0.02   # m per step -- position control (UR5e, or Franka franka_action_space='position')
 MAX_TCP_ROT_DELTA = 0.05   # rad per step, same scope as MAX_TCP_DELTA -- see
@@ -220,6 +242,8 @@ class RobotDeployment:
         camera_serial_global: str = _DEFAULT_CAMERA_SERIAL_GLOBAL,
         camera_serial_wrist: str = _DEFAULT_CAMERA_SERIAL_WRIST,
         position_command_stride: int = 1,
+        franka_position_velocity: float = FRANKA_POSITION_VELOCITY,
+        franka_position_acceleration: float = FRANKA_POSITION_ACCEL,
     ):
         self.verbose = verbose
         self.arm = arm.lower()
@@ -230,6 +254,10 @@ class RobotDeployment:
         # actions -- arm-specific, since UR5e's and Franka's start
         # orientations differ (ry, rz). See FRANKA_START_POSE/DEFAULT_START_POSE.
         self.tcp_fixed_rotation = FRANKA_START_POSE[3:] if self.is_franka else DEFAULT_START_POSE[3:]
+        # Franka position mode only -- relative_dynamics_factor fractions
+        # (0-1), see FRANKA_POSITION_VELOCITY/FRANKA_POSITION_ACCEL above.
+        self.franka_position_velocity = franka_position_velocity
+        self.franka_position_acceleration = franka_position_acceleration
 
         # ── Load policy ───────────────────────────────────────────────────────
         print(f"\n[1/4] Loading policy from: {checkpoint_path}")
@@ -278,6 +306,10 @@ class RobotDeployment:
         if self.uses_position_action and self.position_command_stride > 1:
             print(f"      position_command_stride={self.position_command_stride} "
                   f"(executing 1 of every {self.position_command_stride} predicted waypoints)")
+        if self.is_franka and self.uses_position_action:
+            print(f"      franka_position_velocity={self.franka_position_velocity}, "
+                  f"franka_position_acceleration={self.franka_position_acceleration} "
+                  f"(relative_dynamics_factor fractions, 0-1)")
         print(f"      camera_mode={self.camera_mode}  (num_cameras={self.num_cameras})")
         print(f"      device={device_obj}")
         if image_size is None:
@@ -617,9 +649,11 @@ class RobotDeployment:
                     # set_tcp_pose (franky CartesianMotion) -- see
                     # hardware/franka_robot.py's docstring. velocity/acceleration
                     # are relative_dynamics_factor fractions (0-1), not m/s --
-                    # reusing SERVO_SPEED/SERVO_ACCEL's small values by the same
-                    # convention already documented on FrankaRobot.move_tcp_pose.
-                    self.robot.set_tcp_pose(tcp_target, velocity=SERVO_SPEED, acceleration=SERVO_ACCEL)
+                    # self.franka_position_velocity/acceleration, independently
+                    # tunable from UR5e's SERVO_SPEED/SERVO_ACCEL (see
+                    # FRANKA_POSITION_VELOCITY/FRANKA_POSITION_ACCEL above).
+                    self.robot.set_tcp_pose(tcp_target, velocity=self.franka_position_velocity,
+                                           acceleration=self.franka_position_acceleration)
                 else:
                     self.robot.servo_tcp_pose(target_pose=tcp_target, velocity=SERVO_SPEED,
                                             acceleration=SERVO_ACCEL, dt=DT,
@@ -920,6 +954,19 @@ def main():
                              'tick at stride 1). No-op (1) for UR5e/joint_velocity, which have no '
                              'arrive-and-stop semantics to begin with. Tune empirically on '
                              'hardware -- start at 2, increase if jiggle persists.')
+    parser.add_argument('--franka_position_speed', type=float, default=FRANKA_POSITION_VELOCITY,
+                        help='Franka position mode only (franka_action_space=\'position\'): '
+                             'relative_dynamics_factor velocity fraction (0-1) for set_tcp_pose, '
+                             'independent of UR5e\'s SERVO_SPEED. NOT literal m/s -- a fraction of '
+                             "Franka's own max velocity. Lower = slower. Also the first thing to "
+                             'try if set_tcp_pose keeps tripping the "Motion finished commanded, '
+                             'but the robot is still moving!" discontinuity reflex, since lowering '
+                             'it lowers jerk too (see FRANKA_POSITION_VELOCITY/FRANKA_POSITION_ACCEL '
+                             'above).')
+    parser.add_argument('--franka_position_accel', type=float, default=FRANKA_POSITION_ACCEL,
+                        help='Franka position mode only: relative_dynamics_factor acceleration '
+                             'fraction (0-1) for set_tcp_pose. Same caveats as '
+                             '--franka_position_speed.')
     args = parser.parse_args()
 
     if not os.path.exists(args.checkpoint):
@@ -941,6 +988,8 @@ def main():
             camera_serial_global=args.camera_serial_global,
             camera_serial_wrist=args.camera_serial_wrist,
             position_command_stride=args.position_command_stride,
+            franka_position_velocity=args.franka_position_speed,
+            franka_position_acceleration=args.franka_position_accel,
         )
         if args.log_dir:
             log_dir = Path(args.log_dir)
