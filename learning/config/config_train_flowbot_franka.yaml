@@ -21,7 +21,7 @@ arm: franka
 #       velocity-control teleop). Same action shape as UR5e's, so a checkpoint
 #       trained this way can reuse UR5e's TCP-position execution at deploy time.
 #       action_dim = tcp_dims + 3 (pwm) + 2 (op_mode) -- see action_dim below.
-franka_action_space: joint_velocity
+franka_action_space: position
 
 # Cameras: demo_collect.py always records camera_0 (global); camera_1 (wrist)
 # is present only if collected with the wrist camera connected (not
@@ -59,7 +59,7 @@ tcp_dims: 3           # 3 → xyz only state (8D); 6 → xyz+rotation state (11D
 # the dataset and errors out on a mismatch):
 #   joint_velocity: 7 (joint velocities, rad/s) + pwm (3) + op_mode (2) = 12
 #   position:       tcp_dims(3) + pwm (3) + op_mode (2) = 8   (or 11 if tcp_dims: 6)
-action_dim: 12
+action_dim: 8
 state_dim: 8
 vision_feature_dim: 512
 state_feature_dim: 128
