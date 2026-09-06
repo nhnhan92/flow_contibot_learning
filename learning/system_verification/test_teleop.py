@@ -173,7 +173,16 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
               help='Franka only: drive via set_ee_velocity() ("velocity", default) or '
                    'set_tcp_pose() ("position"). UR5e always streams absolute position '
                    '(servo_tcp_pose) regardless of this flag.')
-def main(arm, robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale, control_mode):
+@click.option('--lookahead', default=0.3,
+              help='Franka position mode only (seconds): set_tcp_pose() is fed a target '
+                   'extrapolated this far ahead of target_pose, so franky/Ruckig always has '
+                   'somewhere-still-moving-toward to aim at instead of a near, about-to-stop '
+                   'waypoint every tick (franky has no native lookahead/blending like RTDE '
+                   'servoL). Execution-only -- target_pose itself (what gets recorded as the '
+                   'action / status display) is NOT extrapolated, so this cannot bias '
+                   'training data. Must stay 0 (or unused) unless you also apply the exact '
+                   'same extrapolation at deploy time.')
+def main(arm, robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale, control_mode, lookahead):
     is_franka = arm.lower() == 'franka'
     control_mode = control_mode.lower()
     _default_ip = {'ur5': '192.168.11.20', 'franka': '172.16.0.2'}
@@ -342,10 +351,13 @@ def main(arm, robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale, co
                 current_rot = st.Rotation.from_rotvec(target_pose[3:])
                 target_pose[3:] = (drot * current_rot).as_rotvec()
 
-            # Apply workspace limits (UR5e and Franka position mode: gates
-            # the absolute target that gets streamed directly. Franka
-            # velocity mode: only cosmetic here -- see the real-position-based
-            # clamp below -- since target_pose isn't what gets sent in that mode.)
+            # Apply workspace limits to target_pose -- the recorded/intended
+            # waypoint (UR5e streams this directly; Franka position mode
+            # extrapolates a separate, also-clamped primitive_target from it
+            # below, purely for execution -- see the --lookahead help text).
+            # Franka velocity mode: only cosmetic here -- see the
+            # real-position-based clamp further down -- since target_pose
+            # isn't what gets sent in that mode.
             target_pose[0] = np.clip(target_pose[0], WORKSPACE['x_min'], WORKSPACE['x_max'])
             target_pose[1] = np.clip(target_pose[1], WORKSPACE['y_min'], WORKSPACE['y_max'])
             target_pose[2] = np.clip(target_pose[2], WORKSPACE['z_min'], WORKSPACE['z_max'])
@@ -354,11 +366,34 @@ def main(arm, robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale, co
             # Send command to robot.
             try:
                 if is_franka and control_mode == 'position':
-                    # Stream the integrated target_pose directly, same
-                    # pattern as UR5e's servo_tcp_pose below -- franky/Ruckig
-                    # plans a fresh trajectory toward it every call. Already
-                    # workspace-clamped above.
-                    robot.set_tcp_pose(target_pose, velocity=max_pos_speed * speed_scale,
+                    # franky's CartesianMotion has no native lookahead/blending
+                    # (unlike RTDE servoL's lookahead_time) -- it plans to
+                    # arrive AND STOP at whatever target it's given. Streaming
+                    # target_pose directly (one tiny step per tick) means each
+                    # call interrupts the previous one just as it's braking
+                    # into that near point, which is the jiggle/stutter this
+                    # is fixing.
+                    #
+                    # Fix: extrapolate a SEPARATE primitive_target further
+                    # ahead in time and send *that* to set_tcp_pose(), so
+                    # Ruckig always has somewhere still-moving-toward to aim
+                    # at. target_pose itself -- what's recorded as the
+                    # action/shown in status -- is left untouched, so this is
+                    # purely an execution-layer smoothing trick, not something
+                    # that can bias training data. (If this teleop mode is
+                    # ever used to collect training data and later deployed,
+                    # the exact same extrapolation must be applied to the
+                    # model's predicted action at deploy time too, or the
+                    # learned observation->target_pose mapping will no longer
+                    # match how it's executed.)
+                    extra = max(0.0, lookahead - dt)
+                    primitive_target = target_pose.copy()
+                    primitive_target[:3] += vel_linear * extra
+                    primitive_target[3:] += vel_angular * extra
+                    primitive_target[0] = np.clip(primitive_target[0], WORKSPACE['x_min'], WORKSPACE['x_max'])
+                    primitive_target[1] = np.clip(primitive_target[1], WORKSPACE['y_min'], WORKSPACE['y_max'])
+                    primitive_target[2] = np.clip(primitive_target[2], WORKSPACE['z_min'], WORKSPACE['z_max'])
+                    robot.set_tcp_pose(primitive_target, velocity=max_pos_speed * speed_scale,
                                        acceleration=max_pos_speed * speed_scale)
                 elif is_franka:
                     # Command velocity directly from the SpaceMouse reading
