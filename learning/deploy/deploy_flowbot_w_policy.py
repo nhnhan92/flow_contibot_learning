@@ -91,7 +91,12 @@ FLOWBOT_FREQ = 10.0  # Flowbot command frequency — must match CONTROL_FREQ
 SERVO_SPEED = 0.05     # m/s
 SERVO_ACCEL = 0.05     # m/s^2
 
-MAX_TCP_DELTA = 0.02   # m per step -- UR5e only
+MAX_TCP_DELTA = 0.02   # m per step -- position control (UR5e, or Franka franka_action_space='position')
+MAX_TCP_ROT_DELTA = 0.05   # rad per step, same scope as MAX_TCP_DELTA -- see
+                            # the "Fixed TCP rotation" note above: this bounds
+                            # accidental large rotation commands (e.g. a wrong
+                            # or mismatched fixed rotation) the way MAX_TCP_DELTA
+                            # already bounds accidental large position commands.
 
 # Franka set_joint_velocity cap -- runtime safety limit on the per-joint
 # speed a policy-predicted action is allowed to command, independent of
@@ -511,8 +516,8 @@ class RobotDeployment:
                      Position control (UR5e always; Franka when
                              franka_action_space=='position'): action[:tcp_dims]
                              is an absolute TCP target (fixed rotation
-                             TCP_FIXED_ROTATION is appended when tcp_dims=3 to
-                             form a 6D target).
+                             self.tcp_fixed_rotation is appended when tcp_dims=3
+                             to form a 6D target -- arm-specific, see __init__).
                      Franka joint_velocity: action[:7] is joint velocities
                              (rad/s) -- see hardware/franka_robot.py's
                              get_joint_velocities() docstring for why this is
@@ -593,9 +598,21 @@ class RobotDeployment:
                 max_delta = steps_covered * MAX_TCP_DELTA
                 if dist > max_delta:
                     tcp_arr[:3] = current_tcp[:3] + delta_xyz * (max_delta / dist)
-                    tcp_target = tcp_arr.tolist()
                     if self.verbose:
                         print(f"  ⚠️  TCP delta {dist*1000:.1f}mm clamped to {max_delta*1000:.0f}mm")
+                # Safety clamp: same idea, for rotation -- bounds an
+                # accidental large rotation command (e.g. self.tcp_fixed_rotation
+                # not actually matching the arm's current orientation) the way
+                # the XYZ clamp above bounds an accidental large position jump.
+                delta_rot = tcp_arr[3:] - current_tcp[3:]
+                rot_dist = np.linalg.norm(delta_rot)
+                max_rot_delta = steps_covered * MAX_TCP_ROT_DELTA
+                if rot_dist > max_rot_delta:
+                    tcp_arr[3:] = current_tcp[3:] + delta_rot * (max_rot_delta / rot_dist)
+                    if self.verbose:
+                        print(f"  ⚠️  TCP rotation delta {np.degrees(rot_dist):.1f}° "
+                              f"clamped to {np.degrees(max_rot_delta):.1f}°")
+                tcp_target = tcp_arr.tolist()
                 if self.is_franka:
                     # set_tcp_pose (franky CartesianMotion) -- see
                     # hardware/franka_robot.py's docstring. velocity/acceleration
@@ -760,9 +777,26 @@ class RobotDeployment:
                     stride = self.position_command_stride
                     execute_arm = ((step_i + 1) % stride == 0) or (step_i == self.action_horizon - 1)
                     steps_covered = (step_i % stride) + 1
-                    pwm_int, op_mode_pred = self._execute_action(
-                        action, execute_arm=execute_arm, steps_covered=steps_covered
-                    )
+                    try:
+                        pwm_int, op_mode_pred = self._execute_action(
+                            action, execute_arm=execute_arm, steps_covered=steps_covered
+                        )
+                    except Exception as e:
+                        # A transient motion fault (e.g. Franka's
+                        # cartesian_motion_generator_*_discontinuity reflex --
+                        # "Motion finished commanded, but the robot is still
+                        # moving!", see _dyn_factor's docstring in
+                        # hardware/franka_robot.py) is already recovered on
+                        # the robot side inside set_tcp_pose/set_joint_velocity
+                        # (recover_from_errors()) before this re-raises --
+                        # without this catch that recovery was wasted, since
+                        # the exception would otherwise crash the whole
+                        # episode/deployment even though the arm is fine.
+                        # Treat this tick as idle (safest default) and continue.
+                        print(f"\n⚠️  Action execution error (arm recovered, continuing): {e}")
+                        pwm_int = self.current_pwm.copy()
+                        op_mode_pred = np.zeros(2, dtype=int)
+                        self.current_op_mode = op_mode_pred.astype(np.float32)
 
                     # Release phase detected: hold 1 s then end episode immediately
                     if op_mode_pred[0] == 1 and op_mode_pred[1] == 1:
