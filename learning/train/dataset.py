@@ -36,13 +36,29 @@ class DiffusionDataset(Dataset):
                              Always the Cartesian TCP pose, regardless of `arm` --
                              only the ACTION space differs per arm (below).
 
-    Action, depends on `arm`:
-        UR5e   (tcp_dims+5 D): target TCP[:tcp_dims] from data/action + pwm (3D) + op_mode (2D)
-        Franka (7+5=12 D):     data/action in full (7D joint velocities, rad/s --
-                                see demo_collect.py's _servo_toward docstring and
-                                hardware/franka_robot.py's get_joint_velocities())
-                                + pwm (3D) + op_mode (2D). tcp_dims does not apply
-                                to a Franka checkpoint's action (only its state).
+    Action, depends on `arm` and (Franka only) `franka_action_space`:
+        UR5e             (tcp_dims+5 D): target TCP[:tcp_dims] from data/action
+                                + pwm (3D) + op_mode (2D)
+        Franka
+          'joint_velocity' (7+5=12 D):   data/action in full (7D joint velocities,
+                                rad/s -- see demo_collect.py's _servo_toward
+                                docstring and hardware/franka_robot.py's
+                                get_joint_velocities()) + pwm (3D) + op_mode (2D).
+                                tcp_dims does not apply to this action (only state).
+          'position'      (tcp_dims+5 D): TCP[:tcp_dims] one step ahead, read
+                                from data/robot_eef_pose (NOT data/action --
+                                demo_collect.py drives Franka via velocity control,
+                                so there is no commanded position target to record;
+                                this uses the actual measured next position
+                                instead) + pwm (3D) + op_mode (2D). Same action
+                                shape/meaning as UR5e's -- lets a Franka checkpoint
+                                reuse UR5e's TCP-position execution path at deploy
+                                time (see deploy_flowbot_w_policy.py).
+        Set via config key 'franka_action_space' (default 'joint_velocity').
+        A checkpoint's action space is fixed at training time -- it doesn't
+        change what demo_collect.py needs to record; both are always available
+        in any Franka dataset, so you can retrain with the other choice later
+        without recollecting.
 
     tcp_dims controls how many TCP *state* components are used (both arms):
         tcp_dims=3  →  xyz only
@@ -89,8 +105,10 @@ class DiffusionDataset(Dataset):
         wrist_crop_scale=None,  # Wrist camera override; None -> same as crop_scale
         wrist_crop_x=None,      # Wrist camera override; None -> same as crop_x
         wrist_crop_y=None,      # Wrist camera override; None -> same as crop_y
-        arm='ur5',          # 'ur5' (target TCP pose action) or 'franka' (7D joint velocity action)
+        arm='ur5',          # 'ur5' (target TCP pose action) or 'franka' (see franka_action_space)
         camera_mode='global',  # 'global' (camera_0 only), 'wrist' (camera_1 only), or 'both'
+        franka_action_space='joint_velocity',  # Franka only: 'joint_velocity' (7D, data/action) or
+                                                # 'position' (TCP[:tcp_dims], data/robot_eef_pose)
     ):
         self.dataset_path = Path(dataset_path)
         self.obs_horizon = obs_horizon
@@ -114,9 +132,32 @@ class DiffusionDataset(Dataset):
         self.wrist_crop_y     = wrist_crop_y     if wrist_crop_y     is not None else self.crop_y
         self.arm = arm.lower()
         self.is_franka = self.arm == 'franka'
-        # Franka's action is always 7D joint velocities (tcp_dims doesn't apply
-        # to it); UR5e's action is the TCP pose, sliced like state is.
-        self.action_dim_raw = 7 if self.is_franka else self.tcp_dims
+        self.franka_action_space = franka_action_space.lower() if self.is_franka else None
+        if self.is_franka and self.franka_action_space not in ('joint_velocity', 'position'):
+            raise ValueError(
+                f"franka_action_space must be 'joint_velocity' or 'position', "
+                f"got {franka_action_space!r}"
+            )
+        # True iff this checkpoint's action is TCP position -- true for UR5e
+        # always, and for Franka only when explicitly selected. Determines
+        # both the action width/source below and how deploy executes it.
+        self.uses_position_action = (not self.is_franka) or self.franka_action_space == 'position'
+        # Franka joint_velocity: always 7D (tcp_dims doesn't apply to it, only
+        # to state). Otherwise (UR5e, or Franka position mode): TCP[:tcp_dims],
+        # sliced the same as state.
+        self.action_dim_raw = self.tcp_dims if self.uses_position_action else 7
+        # data/action for joint_velocity (a genuine commanded/executed value,
+        # see demo_collect.py); data/robot_eef_pose for Franka position mode --
+        # there's no commanded position target to record under velocity-control
+        # teleop, so this uses the actual measured next position instead (see
+        # class docstring). __getitem__ applies an extra +1 shift for this
+        # source specifically, since (unlike data/action) it's recorded at the
+        # SAME index as the state it would otherwise trivially duplicate.
+        self._action_source_key = (
+            'data/robot_eef_pose' if (self.is_franka and self.franka_action_space == 'position')
+            else 'data/action'
+        )
+        self._action_index_shift = 1 if self._action_source_key == 'data/robot_eef_pose' else 0
 
         self.camera_mode = camera_mode.lower()
         if self.camera_mode not in ('global', 'wrist', 'both'):
@@ -159,15 +200,15 @@ class DiffusionDataset(Dataset):
                 "without a wrist camera (or with --no_camera_wrist). Either "
                 "recollect with the wrist camera connected, or use camera_mode='global'."
             )
-        if self.is_franka:
+        if self.is_franka and self.franka_action_space == 'joint_velocity':
             action_shape = self.zarr_root['data/action'].shape
             if action_shape[1] != 7:
                 raise ValueError(
-                    f"arm='franka' expects data/action to be 7D (joint velocities), "
-                    f"but {self.dataset_path} has action shape {action_shape}. This "
-                    f"dataset was likely collected with an older demo_collect.py "
-                    f"that recorded Cartesian velocity (6D) as the Franka action -- "
-                    f"recollect with the current demo_collect.py."
+                    f"arm='franka', franka_action_space='joint_velocity' expects data/action "
+                    f"to be 7D (joint velocities), but {self.dataset_path} has action shape "
+                    f"{action_shape}. This dataset was likely collected with an older "
+                    f"demo_collect.py that recorded Cartesian velocity (6D) as the Franka "
+                    f"action -- recollect with the current demo_collect.py."
                 )
 
         # Get episode boundaries
@@ -188,10 +229,13 @@ class DiffusionDataset(Dataset):
             episode_length = end_idx - start_idx
 
             # Each sample needs obs_horizon past frames + pred_horizon future actions
+            # (+ one more frame when the action source is index-shifted, i.e.
+            # Franka position mode reading data/robot_eef_pose -- see
+            # self._action_index_shift).
             for i in range(episode_length):
                 if i < obs_horizon - 1:
                     continue
-                if i + pred_horizon > episode_length:
+                if i + pred_horizon + self._action_index_shift > episode_length:
                     continue
                 self.samples.append({
                     'episode_idx': ep_idx,
@@ -227,7 +271,7 @@ class DiffusionDataset(Dataset):
             # Load everything — guaranteed correct min/max
             robot_states  = self.zarr_root['data/robot_eef_pose'][:]  # (T, 6)
             pwm_states    = self.zarr_root['data/pwm_signals'][:]     # (T, 3)
-            robot_actions = self.zarr_root['data/action'][:]          # (T, 6) target_pose
+            robot_actions = self.zarr_root[self._action_source_key][:]  # (T, 6 or 7)
             print(f"  Using all {total_len} frames for stats")
         else:
             # Seeded random sample — reproducible across runs
@@ -235,12 +279,12 @@ class DiffusionDataset(Dataset):
             sample_indices = sorted(rng.choice(total_len, 5000, replace=False))
             robot_states  = self.zarr_root['data/robot_eef_pose'].oindex[sample_indices]
             pwm_states    = self.zarr_root['data/pwm_signals'].oindex[sample_indices]
-            robot_actions = self.zarr_root['data/action'].oindex[sample_indices]
+            robot_actions = self.zarr_root[self._action_source_key].oindex[sample_indices]
             print(f"  Using 5000/{total_len} seeded-random frames for stats")
 
         robot_states  = np.array(robot_states)   # (N, 6)
         pwm_states    = np.array(pwm_states)     # (N, 3)
-        robot_actions = np.array(robot_actions)  # (N, 6) UR5e / (N, 7) Franka
+        robot_actions = np.array(robot_actions)  # (N, tcp_dims-compatible 6) or (N, 7) joint velocity
 
         eps = 1e-6
         d = self.tcp_dims        # state TCP width: 3 or 6, both arms
@@ -274,7 +318,7 @@ class DiffusionDataset(Dataset):
                             for i, l in enumerate(tcp_labels))
         print(f"  State  range (TCP {d}D): {tcp_str}")
 
-        if self.is_franka:
+        if self.is_franka and self.franka_action_space == 'joint_velocity':
             joint_labels = [f'q{i+1}' for i in range(a)]
             action_str = ', '.join(f"{l}=[{self.action_min[i]:.4f}, {self.action_max[i]:.4f}]"
                                     for i, l in enumerate(joint_labels))
@@ -368,14 +412,18 @@ class DiffusionDataset(Dataset):
                 images_wrist = np.zeros((self.obs_horizon, 3, *self.wrist_image_size), dtype=np.float32)
             sample['obs_image_wrist'] = torch.from_numpy(images_wrist).float()
 
-        # Future actions: UR5e target TCP[:tcp_dims], Franka full 7D joint
-        # velocity, + pwm (3D) + op_mode (2D). Using data/action (commanded
-        # target_pose / executed joint velocity) instead of data/robot_eef_pose
-        # so that action[0] != obs[-1]: it's always the command that moves the
-        # robot forward, not a copy of the current position/velocity.
+        # Future actions: TCP[:tcp_dims] (UR5e, or Franka position mode) or
+        # 7D joint velocity (Franka joint_velocity mode), + pwm (3D) +
+        # op_mode (2D). self._action_source_key is data/action (a genuine
+        # commanded/executed value) unless this is Franka position mode, in
+        # which case it's data/robot_eef_pose shifted one extra step ahead
+        # (self._action_index_shift) so action[0] != obs[-1] -- see
+        # self._action_source_key's assignment above and the class docstring.
         action_start = sample_idx
         action_end = sample_idx + self.pred_horizon
-        robot_actions  = self.zarr_root['data/action'][action_start:action_end]
+        arm_action_start = action_start + self._action_index_shift
+        arm_action_end = action_end + self._action_index_shift
+        robot_actions  = self.zarr_root[self._action_source_key][arm_action_start:arm_action_end]
         pwm_actions    = self.zarr_root['data/pwm_signals'][action_start:action_end].astype(np.float32)
         op_mode_actions = self.zarr_root['data/operation_mode'][action_start:action_end].astype(np.float32)
 

@@ -145,14 +145,16 @@ def main():
         wrist_crop_y=config.get('wrist_crop_y', None),
         arm=arm,
         camera_mode=camera_mode,
+        franka_action_space=config.get('franka_action_space', 'joint_velocity'),
     )
-    print(f"Arm: {arm}  |  camera_mode: {camera_mode}")
+    action_space_str = f", franka_action_space: {dataset.franka_action_space}" if dataset.is_franka else ""
+    print(f"Arm: {arm}  |  camera_mode: {camera_mode}{action_space_str}")
     print(f"Total samples: {len(dataset)}")
     d = dataset.tcp_dims
     print(f"State  TCP range - min: {dataset.state_min[:d]}, max: {dataset.state_max[:d]}")
     print(f"State  PWM range - min: {dataset.state_min[d:d+3]}, max: {dataset.state_max[d:d+3]}")
     a = dataset.action_dim_raw
-    action_label = "joint velocity" if dataset.is_franka else "TCP"
+    action_label = "TCP" if dataset.uses_position_action else "joint velocity"
     print(f"Action {action_label} range - min: {dataset.action_min[:a]}, max: {dataset.action_max[:a]}")
     print(f"Action PWM range - min: {dataset.action_min[a:a+3]}, max: {dataset.action_max[a:a+3]}")
 
@@ -188,6 +190,26 @@ def main():
     )
 
     # Model
+    # action_dim/state_dim are fixed values in the yaml, not derived from the
+    # dataset -- catch a mismatch here (e.g. switching franka_action_space
+    # without updating action_dim) with a clear message instead of a cryptic
+    # shape error deep in the first training step.
+    expected_action_dim = dataset.action_dim_raw + 5
+    expected_state_dim = dataset.tcp_dims + 5
+    if config['action_dim'] != expected_action_dim:
+        raise ValueError(
+            f"config action_dim={config['action_dim']} but this dataset "
+            f"(arm={arm}, franka_action_space={dataset.franka_action_space}, "
+            f"tcp_dims={dataset.tcp_dims}) produces {expected_action_dim}D actions. "
+            f"Set action_dim: {expected_action_dim} in the config."
+        )
+    if config['state_dim'] != expected_state_dim:
+        raise ValueError(
+            f"config state_dim={config['state_dim']} but tcp_dims={dataset.tcp_dims} "
+            f"produces {expected_state_dim}D states. Set state_dim: {expected_state_dim} "
+            f"in the config."
+        )
+
     print("\nInitializing model...")
     use_film = config.get('use_film_unet', True)
     use_ss   = config.get('use_spatial_softmax', None)   # None → auto

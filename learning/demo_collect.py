@@ -548,34 +548,6 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
             else:
                 op_mode = np.array([0, 0], dtype=np.uint8)         # idle
 
-            # Arm button (left) not held this tick (idle or flowbot-only) --
-            # for Franka, fully close the Cartesian-velocity background
-            # thread (robot.stop(), not just zeroing the velocity) rather
-            # than relying on set_ee_velocity's ~0.5s staleness watchdog.
-            # Two reasons this needs to be a full stop():
-            #  1) Left unhandled, the arm coasts at the last commanded
-            #     speed for up to 0.5s after button release -- a real,
-            #     physically significant overshoot.
-            #  2) That background thread has to service libfranka's
-            #     real-time FCI loop on a strict cadence. It shares the GIL
-            #     with the flowbot branch below, which does synchronous IK
-            #     + serial I/O + a matplotlib redraw (slow, tens of ms).
-            #     Leaving the servo thread merely "parked at zero velocity"
-            #     (still running, still needing GIL time every cycle) while
-            #     flowbot's slow work holds the GIL is exactly what was
-            #     tripping "communication_constraints_violation" reflexes
-            #     and serial write timeouts every time flowbot control
-            #     started. Fully stopping tears the background thread down
-            #     (blocking briefly while it ramps to zero and exits), so it
-            #     isn't competing for the GIL at all while flowbot runs.
-            #     stop() is a cheap no-op if the session's already closed.
-            # Also resync target_pose to the arm's actual measured pose:
-            # target_pose is an ideal accumulator that can run ahead of the
-            # real (velocity-capped) position while driving, and if left
-            # stale it causes a sudden lurch the next time the button is
-            # pressed. UR5e doesn't need any of this -- servo_tcp_pose has
-            # no persistent background thread and already holds its last
-            # target when not called.
             if is_franka and not button_status[0]:
                 try:
                     robot.stop()
@@ -602,31 +574,9 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                 cmd_arm[0] = -cmd_arm[1]  # X
                 cmd_arm[1] = cpied_cmd[0] # Y
                 if is_franka:
-                    # Command velocity directly from stick deflection instead
-                    # of routing through a target_pose/position-error
-                    # round-trip (_servo_toward): that indirection exists for
-                    # UR5e's absolute-position tracker, but for Franka's
-                    # native velocity primitive it creates a P-loop that
-                    # fights the backend's own accel-limited ramp --
-                    # target_pose keeps advancing every tick faster than the
-                    # accel cap lets the arm follow, the commanded velocity
-                    # saturates and overshoots, error goes negative, and the
-                    # next tick commands a reversal -- a limit cycle that
-                    # looks like jerky/non-smooth motion even at a constant
-                    # max stick push. Feeding velocity straight in removes
-                    # the feedback loop entirely: held at max deflection, the
-                    # commanded velocity is constant and only the ramp (not
-                    # a position error) shapes the acceleration.
+
                     lin_vel = cmd_arm[:3] * max_pos_speed
-                    # Each axis is independently bounded to max_pos_speed
-                    # above, but the combined vector's norm can still reach
-                    # up to max_pos_speed*sqrt(3) on a diagonal push --
-                    # set_ee_velocity clips that norm to max_vel internally
-                    # before sending, so replicate the same clip here first.
-                    # Otherwise last_action (the raw, pre-clip vector) would
-                    # disagree with what the robot actually executed on any
-                    # near-max diagonal push, breaking the train/deploy
-                    # action-consistency this recording scheme relies on.
+
                     lin_speed = float(np.linalg.norm(lin_vel))
                     if lin_speed > max_pos_speed and lin_speed > 1e-9:
                         lin_vel = lin_vel / lin_speed * max_pos_speed

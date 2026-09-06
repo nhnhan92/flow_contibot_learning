@@ -297,6 +297,48 @@ class FrankaRobot:
         finally:
             self._robot.relative_dynamics_factor = prev_dyn
 
+    def set_tcp_pose(self, target_pose, velocity: float = 0.1, acceleration: float = 0.1):
+        """
+        Command an absolute TCP target pose, reissued every call -- the
+        position-control analogue of set_ee_velocity()/set_joint_velocity().
+
+        Same reactive pattern as those two: issues a fresh CartesianMotion
+        every tick (asynchronous=True) instead of opening a persistent
+        session, so franky/Ruckig plans a jerk-limited trajectory from
+        wherever the robot currently is toward the new target each time --
+        a continuously-updated target_pose (e.g. from a SpaceMouse, streamed
+        at the control loop's rate) produces smooth motion with no manual
+        accel-ramp loop of our own, the same way set_ee_velocity() does for
+        velocity commands.
+
+        Unlike move_tcp_pose() (meant for one-shot point-to-point moves,
+        e.g. "return to start", and blocking by default), this is always
+        asynchronous and meant to be called at the control loop's rate.
+
+        Parameters
+        ----------
+        target_pose : (6,) [x, y, z, rx, ry, rz] m/rad, absolute, base frame.
+        velocity, acceleration : relative_dynamics_factor scaling (0-1) --
+                       see move_tcp_pose's docstring for why these are
+                       fractions of Franka's own limits, not literal m/s.
+        """
+        target_pose = np.asarray(target_pose, dtype=float)
+
+        current_elbow = self._robot.current_pose.elbow_state
+        target_robot_pose = RobotPose(_pose6_to_affine(target_pose), current_elbow)
+        motion = CartesianMotion(target_robot_pose, ReferenceType.Absolute)
+
+        prev_dyn = self._robot.relative_dynamics_factor
+        self._robot.relative_dynamics_factor = _dyn_factor(velocity, acceleration)
+        try:
+            self._robot.move(motion, asynchronous=True)
+        except Exception as e:
+            print(f"[FrankaRobot] set_tcp_pose motion error: {e}")
+            self._robot.recover_from_errors()
+            raise
+        finally:
+            self._robot.relative_dynamics_factor = prev_dyn
+
     def set_ee_velocity(
         self,
         linear_velocity,
