@@ -701,11 +701,24 @@ class RobotDeployment:
 
     # ── Start position ────────────────────────────────────────────────────────
 
-    def move_to_start(self, speed: float = 0.05, accel: float = 0.05):
+    def move_to_start(self, speed: float = None, accel: float = None):
         """
         Move the arm to its default start pose using a point-to-point move,
         then reset flowbot.
+
+        speed, accel: None (default) resolves to self.franka_position_velocity/
+        acceleration for Franka -- so --franka_position_speed/--franka_position_accel
+        actually govern ALL Franka position-control motion, not just the
+        active per-tick episode loop (this move is also franky CartesianMotion
+        via move_tcp_pose, same relative_dynamics_factor semantics as
+        set_tcp_pose) -- or 0.05/0.05 for UR5e, unchanged from before and
+        independent of SERVO_SPEED/SERVO_ACCEL (those are for UR5e's active
+        per-tick servo_tcp_pose loop only).
         """
+        if speed is None:
+            speed = self.franka_position_velocity if self.is_franka else 0.05
+        if accel is None:
+            accel = self.franka_position_acceleration if self.is_franka else 0.05
         print("\nMoving to start position ...")
         start_pose = FRANKA_START_POSE if self.is_franka else DEFAULT_START_POSE
         self.robot.move_tcp_pose(start_pose, velocity=speed, acceleration=accel)
