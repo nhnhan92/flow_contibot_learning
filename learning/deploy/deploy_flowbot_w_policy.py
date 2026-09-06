@@ -77,7 +77,9 @@ FRANKA_START_POSE = [0.45, 0.15, 0.5, 3.14, 0.0, -0.05]
 # 'position'. Rotation is not predicted by the model in that case (action_dim=8)
 # so we hold it constant. Unused for Franka joint_velocity mode, which has no
 # "target rotation" concept at all (its action is joint velocities, not a pose).
-TCP_FIXED_ROTATION = DEFAULT_START_POSE[3:]   # [rx, ry, rz]
+# Arm-specific -- see RobotDeployment.__init__'s self.tcp_fixed_rotation:
+# UR5e's and Franka's start orientations differ (ry, rz), so a single shared
+# constant here would silently command the wrong arm's rotation.
 
 # Control frequency (Hz)
 CONTROL_FREQ =10.0
@@ -219,6 +221,10 @@ class RobotDeployment:
         self.is_franka = self.arm == "franka"
         self.current_pwm = np.array([0, 0, 0], dtype=int)
         self.prev_pwm    = np.zeros(3, dtype=np.float32)   # command from previous step
+        # Fixed rotation held when executing XYZ-only (tcp_dims=3) position
+        # actions -- arm-specific, since UR5e's and Franka's start
+        # orientations differ (ry, rz). See FRANKA_START_POSE/DEFAULT_START_POSE.
+        self.tcp_fixed_rotation = FRANKA_START_POSE[3:] if self.is_franka else DEFAULT_START_POSE[3:]
 
         # ── Load policy ───────────────────────────────────────────────────────
         print(f"\n[1/4] Loading policy from: {checkpoint_path}")
@@ -539,7 +545,7 @@ class RobotDeployment:
         elif d == 6:
             tcp_target = action[:6].tolist()
         else:  # d == 3: append fixed rotation so the robot holds its orientation
-            tcp_target = action[:3].tolist() + TCP_FIXED_ROTATION
+            tcp_target = action[:3].tolist() + self.tcp_fixed_rotation
         pwm_raw    = action[d:d+3]
 
         # Decode predicted operation mode (denorm ~[0,1] → binary)
