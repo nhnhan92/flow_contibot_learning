@@ -4,7 +4,6 @@
 obs_horizon: 2        # Number of observation frames
 pred_horizon: 16      # Number of action steps to predict
 action_horizon: 8     # Number of action steps to execute
-image_size: [216, 288]  # Center crop from 480x640
 exclude_episodes: []  # Episodes to exclude from training (e.g. incomplete)
 
 # Arm: 'franka' selects the joint-velocity action path (dataset.py, model.py,
@@ -83,4 +82,4 @@ early_stopping_patience: 50  # Stop if no improvement for N post-warmup epochs (
 
 # Checkpointing
 output_dir: "/media/protac/Desk SSD/Nhan/trained_models_franka"
-save_every: 200        # Save checkpoint every N epochs
+save_every: 200       # Save checkpoint every N epochs
