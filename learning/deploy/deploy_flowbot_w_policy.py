@@ -212,6 +212,7 @@ class RobotDeployment:
         camera_width: int = 640,
         camera_serial_global: str = _DEFAULT_CAMERA_SERIAL_GLOBAL,
         camera_serial_wrist: str = _DEFAULT_CAMERA_SERIAL_WRIST,
+        position_command_stride: int = 1,
     ):
         self.verbose = verbose
         self.arm = arm.lower()
@@ -241,6 +242,17 @@ class RobotDeployment:
         # Franka joint_velocity: always 7D (tcp_dims doesn't apply to it, only
         # to state). Otherwise (UR5e, or Franka position mode): TCP[:tcp_dims].
         self.action_dim_arm = self.tcp_dims if self.uses_position_action else 7
+        # Execute only every Nth predicted position waypoint instead of every
+        # one -- e.g. stride=2 on [A,B,C,D,E] executes only [B,D,E]. Gives
+        # each issued set_tcp_pose()/servo_tcp_pose() call N*DT instead of DT
+        # to actually settle before the next one supersedes it, which is what
+        # causes Franka position mode's jiggle (CartesianMotion plans to
+        # arrive-and-stop, then gets interrupted mid-brake every tick).
+        # No-op (every action still executed) for joint_velocity mode, which
+        # has no arrive-and-stop semantics to begin with.
+        self.position_command_stride = position_command_stride if self.uses_position_action else 1
+        if self.position_command_stride < 1:
+            raise ValueError(f"position_command_stride must be >= 1, got {position_command_stride}")
         self.camera_mode = self.config.get('camera_mode', 'global')
         if self.camera_mode not in ('global', 'wrist', 'both'):
             raise ValueError(
@@ -252,6 +264,9 @@ class RobotDeployment:
         print(f"      tcp_dims={self.tcp_dims}  ({'xyz only' if self.tcp_dims == 3 else 'xyz+rotation'})")
         print(f"      action_dim_arm={self.action_dim_arm} ({'TCP pose' if self.uses_position_action else 'joint velocity'})"
               + (f"  franka_action_space={self.franka_action_space}" if self.is_franka else ""))
+        if self.uses_position_action and self.position_command_stride > 1:
+            print(f"      position_command_stride={self.position_command_stride} "
+                  f"(executing 1 of every {self.position_command_stride} predicted waypoints)")
         print(f"      camera_mode={self.camera_mode}  (num_cameras={self.num_cameras})")
         print(f"      device={device_obj}")
         if image_size is None:
@@ -480,7 +495,7 @@ class RobotDeployment:
 
     # ── Action execution ──────────────────────────────────────────────────────
 
-    def _execute_action(self, action: np.ndarray):
+    def _execute_action(self, action: np.ndarray, execute_arm: bool = True, steps_covered: int = 1):
         """
         Send one action step to the robot and flowbot, gated by predicted operation mode.
 
@@ -497,6 +512,21 @@ class RobotDeployment:
                              get_joint_velocities() docstring for why this is
                              joint space even though live teleoperation
                              commands Cartesian velocity.
+            execute_arm : If False, decode and return PWM/op_mode as usual
+                     (flowbot is unaffected by position_command_stride) but
+                     don't touch the arm at all this tick -- used by
+                     position_command_stride > 1 to skip intermediate
+                     waypoints. The previously-issued command keeps running
+                     on its own; see run_episode's execution loop.
+            steps_covered : How many ticks (including this one) since the arm
+                     was last actually commanded. Only meaningful when
+                     execute_arm=True and position control (not Franka
+                     joint_velocity): scales the MAX_TCP_DELTA safety clamp,
+                     since a waypoint N ticks ahead in the model's own
+                     predicted trajectory is expectedly ~N times as far from
+                     the current position as a single tick's worth would be
+                     -- that's real predicted motion, not something to clip
+                     back down to a 1-tick-sized step.
 
         Returns:
             pwm_int      : np.ndarray (3,) int — clamped PWM actually sent
@@ -525,8 +555,11 @@ class RobotDeployment:
         if np.any(pwm_int < self.current_pwm):
             pwm_int = self.current_pwm.copy()
 
-        # Gate arm command: only move when ur5_active (field name kept for both arms)
-        if op_mode_pred[0] == 1:
+        # Gate arm command: only move when ur5_active (field name kept for both arms),
+        # and only if this tick actually owns the arm (position_command_stride
+        # may have this tick's predicted waypoint skipped -- the previously
+        # issued command keeps running on its own in that case).
+        if execute_arm and op_mode_pred[0] == 1:
             if franka_joint_vel:
                 # Safety clamp: cap each joint's speed to FRANKA_MAX_JOINT_VEL
                 # regardless of what speed the policy saw in training data.
@@ -545,16 +578,18 @@ class RobotDeployment:
             else:
                 # Position control -- UR5e always, Franka when
                 # franka_action_space=='position'. Safety clamp: limit XYZ
-                # displacement per step to MAX_TCP_DELTA.
+                # displacement to steps_covered * MAX_TCP_DELTA (see
+                # steps_covered's docstring above for why it's scaled).
                 current_tcp = self.robot.get_tcp_pose()
                 tcp_arr = np.array(tcp_target, dtype=np.float64)
                 delta_xyz = tcp_arr[:3] - current_tcp[:3]
                 dist = np.linalg.norm(delta_xyz)
-                if dist > MAX_TCP_DELTA:
-                    tcp_arr[:3] = current_tcp[:3] + delta_xyz * (MAX_TCP_DELTA / dist)
+                max_delta = steps_covered * MAX_TCP_DELTA
+                if dist > max_delta:
+                    tcp_arr[:3] = current_tcp[:3] + delta_xyz * (max_delta / dist)
                     tcp_target = tcp_arr.tolist()
                     if self.verbose:
-                        print(f"  ⚠️  TCP delta {dist*1000:.1f}mm clamped to {MAX_TCP_DELTA*1000:.0f}mm")
+                        print(f"  ⚠️  TCP delta {dist*1000:.1f}mm clamped to {max_delta*1000:.0f}mm")
                 if self.is_franka:
                     # set_tcp_pose (franky CartesianMotion) -- see
                     # hardware/franka_robot.py's docstring. velocity/acceleration
@@ -566,7 +601,7 @@ class RobotDeployment:
                     self.robot.servo_tcp_pose(target_pose=tcp_target, velocity=SERVO_SPEED,
                                             acceleration=SERVO_ACCEL, dt=DT,
                                             lookahead_time=SERVO_LOOKAHEAD, gain=SERVO_GAIN)
-        elif franka_joint_vel:
+        elif execute_arm and franka_joint_vel:
             # ur5_active == 0 this step -- franky's set_joint_velocity has no
             # staleness watchdog: a JointVelocityMotion keeps running at its
             # last commanded velocity indefinitely until explicitly
@@ -581,6 +616,7 @@ class RobotDeployment:
         # Franka position mode, inactive: no explicit stop needed here, same
         # as UR5e -- set_tcp_pose() is only called on active ticks (above),
         # not a continuously-running session the way set_joint_velocity() is.
+        # execute_arm=False: arm untouched entirely this tick, by design.
 
         # Gate flowbot PWM: only send when flowbot_active
         if op_mode_pred[1] == 1 and np.any(pwm_int >= PWM_MIN):
@@ -593,14 +629,15 @@ class RobotDeployment:
 
         if self.verbose:
             mode_str = ['idle', 'FB', 'UR5', 'release'][op_mode_pred[0] * 2 + op_mode_pred[1]]
+            skip_str = "" if execute_arm else " (skipped -- stride, prior command still running)"
             if franka_joint_vel:
                 dq_str = ', '.join(f'{v:.3f}' for v in dq)
-                print(f"  [{mode_str}] Q_VEL: [{dq_str}] rad/s  PWM: {pwm_int.tolist()}")
+                print(f"  [{mode_str}] Q_VEL: [{dq_str}] rad/s  PWM: {pwm_int.tolist()}{skip_str}")
             else:
                 tcp = np.array(tcp_target, dtype=np.float32)
                 print(
                     f"  [{mode_str}] TCP: [{tcp[0]:.3f}, {tcp[1]:.3f}, {tcp[2]:.3f}]  "
-                    f"PWM: {pwm_int.tolist()}"
+                    f"PWM: {pwm_int.tolist()}{skip_str}"
                 )
 
         return pwm_int, op_mode_pred
@@ -707,7 +744,19 @@ class RobotDeployment:
                     self.prev_pwm = self.current_pwm.astype(np.float32)
 
                     action = actions[step_i]            # (8,)
-                    pwm_int, op_mode_pred = self._execute_action(action)
+                    # position_command_stride: execute only every Nth
+                    # predicted waypoint (the last of each group of N), e.g.
+                    # stride=2 on 5 steps [A,B,C,D,E] executes only [B,D,E] --
+                    # always execute the very last step of the horizon too,
+                    # even if it falls mid-group (a partial, smaller-than-N
+                    # trailing group still needs to be acted on). No-op when
+                    # stride=1 (every step executes, steps_covered always 1).
+                    stride = self.position_command_stride
+                    execute_arm = ((step_i + 1) % stride == 0) or (step_i == self.action_horizon - 1)
+                    steps_covered = (step_i % stride) + 1
+                    pwm_int, op_mode_pred = self._execute_action(
+                        action, execute_arm=execute_arm, steps_covered=steps_covered
+                    )
 
                     # Release phase detected: hold 1 s then end episode immediately
                     if op_mode_pred[0] == 1 and op_mode_pred[1] == 1:
@@ -821,6 +870,16 @@ def main():
                         help='Reduce per-step output')
     parser.add_argument('--log_dir',       type=str,   default=None,
                         help='Directory to save deployment logs (.npz per episode). ')
+    parser.add_argument('--position_command_stride', '-skip', type=int, default=1,
+                        help='Position control only (UR5e, or Franka with franka_action_space='
+                             "'position'): execute only every Nth predicted waypoint instead of "
+                             'every one, e.g. 2 on [A,B,C,D,E] executes only [B,D,E]. Gives each '
+                             'issued command N*DT instead of DT to settle before the next '
+                             'supersedes it -- fixes Franka position-mode jiggle (CartesianMotion '
+                             'plans to arrive-and-stop, then gets interrupted mid-brake every '
+                             'tick at stride 1). No-op (1) for UR5e/joint_velocity, which have no '
+                             'arrive-and-stop semantics to begin with. Tune empirically on '
+                             'hardware -- start at 2, increase if jiggle persists.')
     args = parser.parse_args()
 
     if not os.path.exists(args.checkpoint):
@@ -841,6 +900,7 @@ def main():
             verbose=not args.quiet,
             camera_serial_global=args.camera_serial_global,
             camera_serial_wrist=args.camera_serial_wrist,
+            position_command_stride=args.position_command_stride,
         )
         if args.log_dir:
             log_dir = Path(args.log_dir)
