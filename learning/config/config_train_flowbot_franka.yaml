@@ -7,10 +7,22 @@ action_horizon: 8     # Number of action steps to execute
 image_size: [216, 288]  # Center crop from 480x640
 exclude_episodes: []  # Episodes to exclude from training (e.g. incomplete)
 
-# Arm: 'franka' selects the joint-velocity action path (dataset.py, model.py,
-# deploy script all branch on this). A checkpoint trained with arm: franka
-# is only valid for --arm franka at deploy time.
+# Arm: 'franka' selects Franka (dataset.py, model.py, deploy script all
+# branch on this). A checkpoint trained with arm: franka is only valid for
+# --arm franka at deploy time.
 arm: franka
+
+# Franka action space -- both are always available in any Franka dataset (no
+# recollection needed to switch), see dataset.py's class docstring:
+#   'joint_velocity' (default): 7D joint velocities, rad/s, from data/action
+#       (see demo_collect.py's _servo_toward / hardware/franka_robot.py's
+#       get_joint_velocities() docstrings). action_dim = 7 + 3 (pwm) + 2 (op_mode) = 12.
+#   'position': TCP[:tcp_dims] one step ahead, from data/robot_eef_pose (the
+#       measured next position -- there's no commanded position target under
+#       velocity-control teleop). Same action shape as UR5e's, so a checkpoint
+#       trained this way can reuse UR5e's TCP-position execution at deploy time.
+#       action_dim = tcp_dims + 3 (pwm) + 2 (op_mode) -- see action_dim below.
+franka_action_space: joint_velocity
 
 # Cameras: demo_collect.py always records camera_0 (global); camera_1 (wrist)
 # is present only if collected with the wrist camera connected (not
@@ -35,14 +47,19 @@ wrist_crop_x: 1
 wrist_crop_y: 1
 
 # TCP dimensions: 3 = xyz only, 6 = xyz + rotation (rx,ry,rz)
-# Only affects STATE (robot_eef_pose[:tcp_dims]) -- Franka's ACTION is
-# always the full 7D joint velocity regardless of tcp_dims (see
-# action_dim below; tcp_dims does not gate it the way it does for UR5e).
+# Always affects STATE (robot_eef_pose[:tcp_dims]). Affects ACTION too when
+# franka_action_space: position (TCP[:tcp_dims]) -- but NOT when
+# franka_action_space: joint_velocity, which is always the full 7D
+# regardless of tcp_dims (train.py checks action_dim below matches whichever
+# applies and raises a clear error if not).
 tcp_dims: 3           # 3 → xyz only state (8D); 6 → xyz+rotation state (11D)
 
 # Model architecture
-# action_dim = 7 (joint velocities, rad/s) + flowbot PWM (3) + operation_mode (2) = 12
-# state_dim  = tcp_dims(3) + flowbot PWM (3) + operation_mode (2) = 8
+# state_dim = tcp_dims(3) + flowbot PWM (3) + operation_mode (2) = 8
+# action_dim depends on franka_action_space (train.py validates this against
+# the dataset and errors out on a mismatch):
+#   joint_velocity: 7 (joint velocities, rad/s) + pwm (3) + op_mode (2) = 12
+#   position:       tcp_dims(3) + pwm (3) + op_mode (2) = 8   (or 11 if tcp_dims: 6)
 action_dim: 12
 state_dim: 8
 vision_feature_dim: 512

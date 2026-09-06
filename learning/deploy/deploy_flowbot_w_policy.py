@@ -15,7 +15,8 @@ Usage:
         --flowbot_port /dev/ttyACM0
 
 Hardware:
-    - UR5e (RTDE servoL) or Franka (franky joint-velocity control)
+    - UR5e (RTDE servoL) or Franka (franky -- set_joint_velocity() or
+      set_tcp_pose(), see franka_action_space below)
     - Flowbot soft pneumatic manipulator (3 valves via Arduino serial)
     - Intel RealSense camera(s): determined automatically from the
       checkpoint's camera_mode config ('global', 'wrist', or 'both'),
@@ -23,12 +24,16 @@ Hardware:
 
 State  (tcp_dims+5 D): robot TCP pose[:tcp_dims] + flowbot pwm (3D) + operation_mode (2D)
                         Cartesian, both arms.
-Action, depends on arm (see demo_collect.py's _servo_toward / hardware/franka_robot.py's
-get_joint_velocities() docstrings for why Franka's differs from its control input):
-    UR5e   (tcp_dims+5 D): target TCP[:tcp_dims] + pwm (3D) + op_mode (2D)
-    Franka (7+5=12 D):     7D joint velocities (rad/s) + pwm (3D) + op_mode (2D)
-    A checkpoint is only valid for the arm it was trained on -- --arm must
-    match the collection arm.
+Action, depends on arm and (Franka only) the checkpoint's franka_action_space
+config (see demo_collect.py's _servo_toward / hardware/franka_robot.py's
+get_joint_velocities() docstrings for why joint_velocity differs from its
+control input):
+    UR5e, or Franka franka_action_space='position' (tcp_dims+5 D):
+                           target TCP[:tcp_dims] + pwm (3D) + op_mode (2D)
+    Franka franka_action_space='joint_velocity' (7+5=12 D, default):
+                           7D joint velocities (rad/s) + pwm (3D) + op_mode (2D)
+    A checkpoint is only valid for the arm (and, for Franka, the action
+    space) it was trained on -- --arm must match the collection arm.
 """
 
 import os
@@ -67,10 +72,11 @@ DEFAULT_START_POSE = [0.20636, -0.46706, 0.44268, 3.14, -0.14, 0.0]
 # Franka demonstrations actually started from.
 FRANKA_START_POSE = [0.45, 0.15, 0.5, 3.14, 0.0, -0.05]
 
-# Fixed TCP rotation used when executing XYZ-only actions from the policy.
-# Rotation is not predicted by the model (action_dim=8) so we hold it constant.
-# UR5e-only: Franka's action is joint velocity, not an absolute pose, so
-# there's no "target rotation" to hold here at all.
+# Fixed TCP rotation used when executing XYZ-only (tcp_dims=3) position
+# actions from the policy -- UR5e always, Franka when franka_action_space=
+# 'position'. Rotation is not predicted by the model in that case (action_dim=8)
+# so we hold it constant. Unused for Franka joint_velocity mode, which has no
+# "target rotation" concept at all (its action is joint velocities, not a pose).
 TCP_FIXED_ROTATION = DEFAULT_START_POSE[3:]   # [rx, ry, rz]
 
 # Control frequency (Hz)
@@ -221,9 +227,20 @@ class RobotDeployment:
         self.obs_horizon = self.config['obs_horizon']
         self.action_horizon = self.config['action_horizon']
         self.tcp_dims = self.config.get('tcp_dims', 3)   # 3=xyz only, 6=xyz+rotation -- state only
-        # Franka's action is always 7D joint velocities (tcp_dims doesn't
-        # apply to it, only to state); UR5e's action is the TCP pose.
-        self.action_dim_arm = 7 if self.is_franka else self.tcp_dims
+        self.franka_action_space = self.config.get('franka_action_space', 'joint_velocity')
+        if self.is_franka and self.franka_action_space not in ('joint_velocity', 'position'):
+            raise ValueError(
+                f"Checkpoint config has franka_action_space={self.franka_action_space!r} "
+                "(expected 'joint_velocity' or 'position')"
+            )
+        # True iff this checkpoint's action is TCP position -- always for
+        # UR5e, only for Franka when its config selected 'position'. Gates
+        # which half of _execute_action runs (see dataset.py's identical flag).
+        self.uses_position_action = (not self.is_franka) or self.franka_action_space == 'position'
+        self.is_franka_joint_vel = self.is_franka and not self.uses_position_action
+        # Franka joint_velocity: always 7D (tcp_dims doesn't apply to it, only
+        # to state). Otherwise (UR5e, or Franka position mode): TCP[:tcp_dims].
+        self.action_dim_arm = self.tcp_dims if self.uses_position_action else 7
         self.camera_mode = self.config.get('camera_mode', 'global')
         if self.camera_mode not in ('global', 'wrist', 'both'):
             raise ValueError(
@@ -233,7 +250,8 @@ class RobotDeployment:
         self.num_cameras = self.policy.num_cameras   # 1 (single) or 2 (+ wrist), from checkpoint config
         print(f"      obs_horizon={self.obs_horizon}, action_horizon={self.action_horizon}")
         print(f"      tcp_dims={self.tcp_dims}  ({'xyz only' if self.tcp_dims == 3 else 'xyz+rotation'})")
-        print(f"      action_dim_arm={self.action_dim_arm} ({'joint velocity' if self.is_franka else 'TCP pose'})")
+        print(f"      action_dim_arm={self.action_dim_arm} ({'TCP pose' if self.uses_position_action else 'joint velocity'})"
+              + (f"  franka_action_space={self.franka_action_space}" if self.is_franka else ""))
         print(f"      camera_mode={self.camera_mode}  (num_cameras={self.num_cameras})")
         print(f"      device={device_obj}")
         if image_size is None:
@@ -443,8 +461,9 @@ class RobotDeployment:
 
         Returns:
             actions : np.ndarray (pred_horizon, action_dim_arm+5) — denormalised actions.
-                      UR5e:   [:tcp_dims] = TCP target, [tcp_dims:tcp_dims+3] = pwm, rest = op_mode
-                      Franka: [:7] = joint velocities (rad/s), [7:10] = pwm, rest = op_mode
+                      Position control (UR5e; Franka franka_action_space='position'):
+                          [:tcp_dims] = TCP target, [tcp_dims:tcp_dims+3] = pwm, rest = op_mode
+                      Franka joint_velocity: [:7] = joint velocities (rad/s), [7:10] = pwm, rest = op_mode
         """
         obs_state, obs_image, obs_image_wrist = self._get_obs_tensors()
         actions_norm = self.policy.predict(
@@ -468,11 +487,15 @@ class RobotDeployment:
         Args:
             action : np.ndarray (action_dim_arm+5,) — [action_dim_arm-wide arm command,
                      pwm1,pwm2,pwm3, ur5_active, flowbot_active]
-                     UR5e:   action[:tcp_dims] is an absolute TCP target (fixed rotation
-                             TCP_FIXED_ROTATION is appended when tcp_dims=3 to form a 6D target).
-                     Franka: action[:7] is joint velocities (rad/s) -- see
-                             hardware/franka_robot.py's get_joint_velocities() docstring
-                             for why this is joint space even though live teleoperation
+                     Position control (UR5e always; Franka when
+                             franka_action_space=='position'): action[:tcp_dims]
+                             is an absolute TCP target (fixed rotation
+                             TCP_FIXED_ROTATION is appended when tcp_dims=3 to
+                             form a 6D target).
+                     Franka joint_velocity: action[:7] is joint velocities
+                             (rad/s) -- see hardware/franka_robot.py's
+                             get_joint_velocities() docstring for why this is
+                             joint space even though live teleoperation
                              commands Cartesian velocity.
 
         Returns:
@@ -480,7 +503,8 @@ class RobotDeployment:
             op_mode_pred : np.ndarray (2,) int — [ur5_active, flowbot_active]
         """
         d = self.action_dim_arm
-        if self.is_franka:
+        franka_joint_vel = self.is_franka_joint_vel
+        if franka_joint_vel:
             dq = np.array(action[:7], dtype=np.float64)
         elif d == 6:
             tcp_target = action[:6].tolist()
@@ -503,7 +527,7 @@ class RobotDeployment:
 
         # Gate arm command: only move when ur5_active (field name kept for both arms)
         if op_mode_pred[0] == 1:
-            if self.is_franka:
+            if franka_joint_vel:
                 # Safety clamp: cap each joint's speed to FRANKA_MAX_JOINT_VEL
                 # regardless of what speed the policy saw in training data.
                 # Elementwise, not a norm clamp -- a joint velocity limit is
@@ -519,7 +543,9 @@ class RobotDeployment:
                 # old set_ee_velocity path could.
                 self.robot.set_joint_velocity(dq, max_vel=FRANKA_MAX_JOINT_VEL)
             else:
-                # Safety clamp: limit XYZ displacement per step to MAX_TCP_DELTA
+                # Position control -- UR5e always, Franka when
+                # franka_action_space=='position'. Safety clamp: limit XYZ
+                # displacement per step to MAX_TCP_DELTA.
                 current_tcp = self.robot.get_tcp_pose()
                 tcp_arr = np.array(tcp_target, dtype=np.float64)
                 delta_xyz = tcp_arr[:3] - current_tcp[:3]
@@ -529,10 +555,18 @@ class RobotDeployment:
                     tcp_target = tcp_arr.tolist()
                     if self.verbose:
                         print(f"  ⚠️  TCP delta {dist*1000:.1f}mm clamped to {MAX_TCP_DELTA*1000:.0f}mm")
-                self.robot.servo_tcp_pose(target_pose=tcp_target, velocity=SERVO_SPEED,
-                                        acceleration=SERVO_ACCEL, dt=DT,
-                                        lookahead_time=SERVO_LOOKAHEAD, gain=SERVO_GAIN)
-        elif self.is_franka:
+                if self.is_franka:
+                    # set_tcp_pose (franky CartesianMotion) -- see
+                    # hardware/franka_robot.py's docstring. velocity/acceleration
+                    # are relative_dynamics_factor fractions (0-1), not m/s --
+                    # reusing SERVO_SPEED/SERVO_ACCEL's small values by the same
+                    # convention already documented on FrankaRobot.move_tcp_pose.
+                    self.robot.set_tcp_pose(tcp_target, velocity=SERVO_SPEED, acceleration=SERVO_ACCEL)
+                else:
+                    self.robot.servo_tcp_pose(target_pose=tcp_target, velocity=SERVO_SPEED,
+                                            acceleration=SERVO_ACCEL, dt=DT,
+                                            lookahead_time=SERVO_LOOKAHEAD, gain=SERVO_GAIN)
+        elif franka_joint_vel:
             # ur5_active == 0 this step -- franky's set_joint_velocity has no
             # staleness watchdog: a JointVelocityMotion keeps running at its
             # last commanded velocity indefinitely until explicitly
@@ -544,6 +578,9 @@ class RobotDeployment:
             # hardware/franka_robot.py's stop_joint_velocity() docstring for
             # why the Cartesian-velocity stop doesn't reliably cover this.
             self.robot.stop_joint_velocity()
+        # Franka position mode, inactive: no explicit stop needed here, same
+        # as UR5e -- set_tcp_pose() is only called on active ticks (above),
+        # not a continuously-running session the way set_joint_velocity() is.
 
         # Gate flowbot PWM: only send when flowbot_active
         if op_mode_pred[1] == 1 and np.any(pwm_int >= PWM_MIN):
@@ -556,7 +593,7 @@ class RobotDeployment:
 
         if self.verbose:
             mode_str = ['idle', 'FB', 'UR5', 'release'][op_mode_pred[0] * 2 + op_mode_pred[1]]
-            if self.is_franka:
+            if franka_joint_vel:
                 dq_str = ', '.join(f'{v:.3f}' for v in dq)
                 print(f"  [{mode_str}] Q_VEL: [{dq_str}] rad/s  PWM: {pwm_int.tolist()}")
             else:
@@ -635,8 +672,18 @@ class RobotDeployment:
                 # communication_constraints_violation reflex already seen (and
                 # fixed the same way) for flowbot's synchronous work in
                 # demo_collect.py. UR5e's servo_tcp_pose has no persistent
-                # session to stop here, so this is Franka-only.
-                if self.is_franka:
+                # session to stop here, so this only applies to Franka
+                # joint_velocity mode. Franka position mode's set_tcp_pose()
+                # is also a reactive/async call every tick (same pattern as
+                # set_joint_velocity()), so the same GIL-starvation concern
+                # could plausibly apply there too -- but there's no verified
+                # equivalent stop call for an active CartesianMotion (as
+                # opposed to CartesianVelocityMotion, which stop_joint_velocity()'s
+                # docstring says needs its own distinct stop type) to reach for
+                # here without confirming on hardware first, so this is left
+                # as a known gap for franka_action_space='position' rather
+                # than guessing at an unverified API call.
+                if self.is_franka_joint_vel:
                     self.robot.stop_joint_velocity()
                 t_plan_start = time.time()
                 actions = self._predict_actions()   # (pred_horizon, 9)
@@ -701,13 +748,14 @@ class RobotDeployment:
         print(f"\n✅ Episode finished: {total_steps} steps in {elapsed_total:.1f}s")
 
         # Stop arm servoing/velocity control and let it settle before any subsequent move.
-        # Franka: joint velocity execution needs stop_joint_velocity(), not stop()
-        # (Cartesian) -- see hardware/franka_robot.py's stop_joint_velocity() docstring.
+        # Franka joint_velocity: needs stop_joint_velocity(), not stop() (Cartesian) --
+        # see hardware/franka_robot.py's stop_joint_velocity() docstring.
         print("Resetting Flowbot ...")
         self.fb.reset()
         if self.is_franka:
             self.move_to_start()
-            self.robot.stop_joint_velocity()
+            if self.is_franka_joint_vel:
+                self.robot.stop_joint_velocity()
         else:
             self.robot.stop()
         time.sleep(0.5)
