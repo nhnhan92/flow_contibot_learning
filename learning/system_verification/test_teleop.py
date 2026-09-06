@@ -11,6 +11,12 @@ Usage:
     python system_verification/test_teleop.py --arm franka --robot_ip 172.16.0.2 \\
         --max_pos_speed 0.02 --max_rot_speed 0.02 --speed_scale 0.2
 
+    # Franka only: compare velocity vs position control for smoothness under
+    # a sustained SpaceMouse push (see FrankaRobot.set_ee_velocity() vs
+    # set_tcp_pose() in hardware/franka_robot.py).
+    python system_verification/test_teleop.py --arm franka --control_mode velocity ...
+    python system_verification/test_teleop.py --arm franka --control_mode position ...
+
 Controls:
     SpaceMouse:
         - Push forward/back  → Robot X (forward/backward)
@@ -30,18 +36,26 @@ Franka notes:
     FrankaController (pylibfranka, learning/hardware/franka_control.py) was
     evaluated as an alternative backend and is kept in the tree for
     reference, but is no longer wired up here.
-    FrankaRobot has no absolute-position streaming primitive (RTDE servoL),
-    only set_ee_velocity() -- so for --arm franka the linear velocity
-    computed from the SpaceMouse each tick is sent directly to
-    set_ee_velocity(), clipped to max_pos_speed*speed_scale (and similarly
-    for rotation, though rotation is currently disabled for both arms).
-    This is a direct command, not a position-error feedback loop through
-    target_pose (target_pose is still tracked for status/reset display) --
-    routing a live per-tick target through position-error feedback fights
-    franky's own accel-limited ramp and produces a visible
-    oscillation/limit-cycle even under a constant, sustained stick push.
+    --control_mode selects which FrankaRobot primitive drives the SpaceMouse
+    each tick (UR5e is unaffected -- it always streams absolute position via
+    servo_tcp_pose/RTDE servoL, which is what --control_mode position gives
+    Franka too):
+        velocity (default): linear velocity computed from the SpaceMouse
+            each tick is sent directly to set_ee_velocity(), clipped to
+            max_pos_speed*speed_scale. This is a direct command, not a
+            position-error feedback loop through target_pose (target_pose
+            is still tracked for status/reset display) -- routing a live
+            per-tick target through position-error feedback fights franky's
+            own accel-limited ramp and produces a visible
+            oscillation/limit-cycle even under a constant, sustained stick
+            push.
+        position: target_pose is integrated from the SpaceMouse each tick
+            (same as UR5e) and streamed to set_tcp_pose() -- franky/Ruckig
+            plans a fresh jerk-limited trajectory toward the new absolute
+            target every call, same reactive pattern as velocity mode but
+            commanding *where* instead of *how fast*.
     Start with a lower --max_pos_speed/--max_rot_speed/--speed_scale than
-    you'd use on UR5e.
+    you'd use on UR5e, in either mode.
 """
 
 import sys
@@ -155,8 +169,13 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--max_pos_speed', default=0.05, help='Max linear speed (m/s)')
 @click.option('--max_rot_speed', default=0.1, help='Max angular speed (rad/s)')
 @click.option('--speed_scale', default=1, help='Speed scaling factor (0.1-1.0)')
-def main(arm, robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale):
+@click.option('--control_mode', default='velocity', type=click.Choice(['velocity', 'position'], case_sensitive=False),
+              help='Franka only: drive via set_ee_velocity() ("velocity", default) or '
+                   'set_tcp_pose() ("position"). UR5e always streams absolute position '
+                   '(servo_tcp_pose) regardless of this flag.')
+def main(arm, robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale, control_mode):
     is_franka = arm.lower() == 'franka'
+    control_mode = control_mode.lower()
     _default_ip = {'ur5': '192.168.11.20', 'franka': '172.16.0.2'}
     robot_ip = robot_ip or _default_ip[arm.lower()]
 
@@ -164,10 +183,15 @@ def main(arm, robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale):
     print(f"       {arm.upper()} TELEOPERATION TEST (SpaceMouse)")
     print("="*60)
     if is_franka:
-        print("\nFrankaRobot (franky) has no absolute-position streaming primitive --")
-        print("the linear velocity computed from the SpaceMouse each tick is sent")
-        print("directly to set_ee_velocity(). Start with a low")
-        print("--max_pos_speed/--max_rot_speed/--speed_scale.\n")
+        if control_mode == 'velocity':
+            print("\nControl mode: VELOCITY -- linear velocity computed from the SpaceMouse")
+            print("each tick is sent directly to set_ee_velocity(). Start with a low")
+            print("--max_pos_speed/--max_rot_speed/--speed_scale.\n")
+        else:
+            print("\nControl mode: POSITION -- target_pose is integrated from the SpaceMouse")
+            print("each tick and streamed to set_tcp_pose() (franky/Ruckig plans a fresh")
+            print("trajectory toward it every call). Start with a low")
+            print("--max_pos_speed/--max_rot_speed/--speed_scale.\n")
         robot = FrankaRobot(robot_ip=robot_ip, use_gripper=False)
     else:
         robot = UR5eRobot(robot_ip=robot_ip, frequency=frequency)
@@ -318,10 +342,10 @@ def main(arm, robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale):
                 current_rot = st.Rotation.from_rotvec(target_pose[3:])
                 target_pose[3:] = (drot * current_rot).as_rotvec()
 
-            # Apply workspace limits (UR5e: gates the absolute target
-            # servo_tcp_pose tracks. Franka: only cosmetic here -- see the
-            # real-position-based clamp below -- since target_pose is no
-            # longer what gets sent.)
+            # Apply workspace limits (UR5e and Franka position mode: gates
+            # the absolute target that gets streamed directly. Franka
+            # velocity mode: only cosmetic here -- see the real-position-based
+            # clamp below -- since target_pose isn't what gets sent in that mode.)
             target_pose[0] = np.clip(target_pose[0], WORKSPACE['x_min'], WORKSPACE['x_max'])
             target_pose[1] = np.clip(target_pose[1], WORKSPACE['y_min'], WORKSPACE['y_max'])
             target_pose[2] = np.clip(target_pose[2], WORKSPACE['z_min'], WORKSPACE['z_max'])
@@ -329,7 +353,14 @@ def main(arm, robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale):
             # print(f"target_pose = {target_pose}")
             # Send command to robot.
             try:
-                if is_franka:
+                if is_franka and control_mode == 'position':
+                    # Stream the integrated target_pose directly, same
+                    # pattern as UR5e's servo_tcp_pose below -- franky/Ruckig
+                    # plans a fresh trajectory toward it every call. Already
+                    # workspace-clamped above.
+                    robot.set_tcp_pose(target_pose, velocity=max_pos_speed * speed_scale,
+                                       acceleration=max_pos_speed * speed_scale)
+                elif is_franka:
                     # Command velocity directly from the SpaceMouse reading
                     # instead of routing it through a target_pose/
                     # position-error round-trip (the old approach here):
