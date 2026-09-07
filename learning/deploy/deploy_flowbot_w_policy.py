@@ -273,22 +273,12 @@ class RobotDeployment:
                 f"Checkpoint config has franka_action_space={self.franka_action_space!r} "
                 "(expected 'joint_velocity' or 'position')"
             )
-        # True iff this checkpoint's action is TCP position -- always for
-        # UR5e, only for Franka when its config selected 'position'. Gates
-        # which half of _execute_action runs (see dataset.py's identical flag).
+
         self.uses_position_action = (not self.is_franka) or self.franka_action_space == 'position'
         self.is_franka_joint_vel = self.is_franka and not self.uses_position_action
-        # Franka joint_velocity: always 7D (tcp_dims doesn't apply to it, only
-        # to state). Otherwise (UR5e, or Franka position mode): TCP[:tcp_dims].
+
         self.action_dim_arm = self.tcp_dims if self.uses_position_action else 7
-        # Execute only every Nth predicted position waypoint instead of every
-        # one -- e.g. stride=2 on [A,B,C,D,E] executes only [B,D,E]. Gives
-        # each issued set_tcp_pose()/servo_tcp_pose() call N*DT instead of DT
-        # to actually settle before the next one supersedes it, which is what
-        # causes Franka position mode's jiggle (CartesianMotion plans to
-        # arrive-and-stop, then gets interrupted mid-brake every tick).
-        # No-op (every action still executed) for joint_velocity mode, which
-        # has no arrive-and-stop semantics to begin with.
+
         self.position_command_stride = position_command_stride if self.uses_position_action else 1
         if self.position_command_stride < 1:
             raise ValueError(f"position_command_stride must be >= 1, got {position_command_stride}")
@@ -598,31 +588,18 @@ class RobotDeployment:
         if np.any(pwm_int < self.current_pwm):
             pwm_int = self.current_pwm.copy()
 
-        # Gate arm command: only move when ur5_active (field name kept for both arms),
-        # and only if this tick actually owns the arm (position_command_stride
-        # may have this tick's predicted waypoint skipped -- the previously
-        # issued command keeps running on its own in that case).
         if execute_arm and op_mode_pred[0] == 1:
             if franka_joint_vel:
                 # Safety clamp: cap each joint's speed to FRANKA_MAX_JOINT_VEL
-                # regardless of what speed the policy saw in training data.
-                # Elementwise, not a norm clamp -- a joint velocity limit is
-                # inherently per-DOF.
+
                 over = np.abs(dq) > FRANKA_MAX_JOINT_VEL
                 if np.any(over) and self.verbose:
                     print(f"  ⚠️  Predicted joint speed(s) {np.round(dq[over], 3).tolist()} "
                           f"clamped to ±{FRANKA_MAX_JOINT_VEL:.2f} rad/s")
                 dq = np.clip(dq, -FRANKA_MAX_JOINT_VEL, FRANKA_MAX_JOINT_VEL)
-                # No Cartesian planning or Jacobian inversion here -- joint
-                # velocities execute directly, so this can't trip a
-                # Cartesian-singularity discontinuity reflex the way the
-                # old set_ee_velocity path could.
+
                 self.robot.set_joint_velocity(dq, max_vel=FRANKA_MAX_JOINT_VEL)
             else:
-                # Position control -- UR5e always, Franka when
-                # franka_action_space=='position'. Safety clamp: limit XYZ
-                # displacement to steps_covered * MAX_TCP_DELTA (see
-                # steps_covered's docstring above for why it's scaled).
                 current_tcp = self.robot.get_tcp_pose()
                 tcp_arr = np.array(tcp_target, dtype=np.float64)
                 delta_xyz = tcp_arr[:3] - current_tcp[:3]
@@ -633,9 +610,7 @@ class RobotDeployment:
                     if self.verbose:
                         print(f"  ⚠️  TCP delta {dist*1000:.1f}mm clamped to {max_delta*1000:.0f}mm")
                 # Safety clamp: same idea, for rotation -- bounds an
-                # accidental large rotation command (e.g. self.tcp_fixed_rotation
-                # not actually matching the arm's current orientation) the way
-                # the XYZ clamp above bounds an accidental large position jump.
+
                 delta_rot = tcp_arr[3:] - current_tcp[3:]
                 rot_dist = np.linalg.norm(delta_rot)
                 max_rot_delta = steps_covered * MAX_TCP_ROT_DELTA
@@ -646,12 +621,7 @@ class RobotDeployment:
                               f"clamped to {np.degrees(max_rot_delta):.1f}°")
                 tcp_target = tcp_arr.tolist()
                 if self.is_franka:
-                    # set_tcp_pose (franky CartesianMotion) -- see
-                    # hardware/franka_robot.py's docstring. velocity/acceleration
-                    # are relative_dynamics_factor fractions (0-1), not m/s --
-                    # self.franka_position_velocity/acceleration, independently
-                    # tunable from UR5e's SERVO_SPEED/SERVO_ACCEL (see
-                    # FRANKA_POSITION_VELOCITY/FRANKA_POSITION_ACCEL above).
+
                     self.robot.set_tcp_pose(tcp_target, velocity=self.franka_position_velocity,
                                            acceleration=self.franka_position_acceleration)
                 else:
@@ -659,21 +629,9 @@ class RobotDeployment:
                                             acceleration=SERVO_ACCEL, dt=DT,
                                             lookahead_time=SERVO_LOOKAHEAD, gain=SERVO_GAIN)
         elif execute_arm and franka_joint_vel:
-            # ur5_active == 0 this step -- franky's set_joint_velocity has no
-            # staleness watchdog: a JointVelocityMotion keeps running at its
-            # last commanded velocity indefinitely until explicitly
-            # superseded or stopped. Simply not calling it here would leave
-            # the arm coasting at whatever speed the last active step
-            # commanded, not just briefly but until something else happens
-            # to stop it -- explicitly stop every tick the arm shouldn't be
-            # moving. stop_joint_velocity(), not stop() -- see
-            # hardware/franka_robot.py's stop_joint_velocity() docstring for
-            # why the Cartesian-velocity stop doesn't reliably cover this.
+
             self.robot.stop_joint_velocity()
-        # Franka position mode, inactive: no explicit stop needed here, same
-        # as UR5e -- set_tcp_pose() is only called on active ticks (above),
-        # not a continuously-running session the way set_joint_velocity() is.
-        # execute_arm=False: arm untouched entirely this tick, by design.
+
 
         # Gate flowbot PWM: only send when flowbot_active
         if op_mode_pred[1] == 1 and np.any(pwm_int >= PWM_MIN):
@@ -768,28 +726,6 @@ class RobotDeployment:
 
         try:
             while total_steps < max_steps:
-                # ── Plan: run DDIM inference ──────────────────────────────────
-                # Stop any live joint-velocity session before this heavy,
-                # synchronous compute burst -- otherwise a JointVelocityMotion
-                # left streaming from the previous action_horizon's last step
-                # keeps running while DDIM inference (ResNet+UNet, CPU-bound
-                # if --device cpu) competes for CPU scheduling time, which can
-                # starve franky/libfranka's realtime communication thread long
-                # enough to miss its deadline -- the same
-                # communication_constraints_violation reflex already seen (and
-                # fixed the same way) for flowbot's synchronous work in
-                # demo_collect.py. UR5e's servo_tcp_pose has no persistent
-                # session to stop here, so this only applies to Franka
-                # joint_velocity mode. Franka position mode's set_tcp_pose()
-                # is also a reactive/async call every tick (same pattern as
-                # set_joint_velocity()), so the same GIL-starvation concern
-                # could plausibly apply there too -- but there's no verified
-                # equivalent stop call for an active CartesianMotion (as
-                # opposed to CartesianVelocityMotion, which stop_joint_velocity()'s
-                # docstring says needs its own distinct stop type) to reach for
-                # here without confirming on hardware first, so this is left
-                # as a known gap for franka_action_space='position' rather
-                # than guessing at an unverified API call.
                 if self.is_franka_joint_vel:
                     self.robot.stop_joint_velocity()
                 t_plan_start = time.time()
@@ -814,13 +750,7 @@ class RobotDeployment:
                     self.prev_pwm = self.current_pwm.astype(np.float32)
 
                     action = actions[step_i]            # (8,)
-                    # position_command_stride: execute only every Nth
-                    # predicted waypoint (the last of each group of N), e.g.
-                    # stride=2 on 5 steps [A,B,C,D,E] executes only [B,D,E] --
-                    # always execute the very last step of the horizon too,
-                    # even if it falls mid-group (a partial, smaller-than-N
-                    # trailing group still needs to be acted on). No-op when
-                    # stride=1 (every step executes, steps_covered always 1).
+
                     stride = self.position_command_stride
                     execute_arm = ((step_i + 1) % stride == 0) or (step_i == self.action_horizon - 1)
                     steps_covered = (step_i % stride) + 1
@@ -829,17 +759,7 @@ class RobotDeployment:
                             action, execute_arm=execute_arm, steps_covered=steps_covered
                         )
                     except Exception as e:
-                        # A transient motion fault (e.g. Franka's
-                        # cartesian_motion_generator_*_discontinuity reflex --
-                        # "Motion finished commanded, but the robot is still
-                        # moving!", see _dyn_factor's docstring in
-                        # hardware/franka_robot.py) is already recovered on
-                        # the robot side inside set_tcp_pose/set_joint_velocity
-                        # (recover_from_errors()) before this re-raises --
-                        # without this catch that recovery was wasted, since
-                        # the exception would otherwise crash the whole
-                        # episode/deployment even though the arm is fine.
-                        # Treat this tick as idle (safest default) and continue.
+
                         print(f"\n⚠️  Action execution error (arm recovered, continuing): {e}")
                         pwm_int = self.current_pwm.copy()
                         op_mode_pred = np.zeros(2, dtype=int)
@@ -851,9 +771,7 @@ class RobotDeployment:
                         self.fb.release()   # sends 'r' to Arduino (triggers suction release)
                         total_steps += 1
                         raise _ReleaseDetected
-
-                    # Use longer step time when flowbot is actively actuating
-                    # so the soft actuator has enough time to inflate/deflate
+                    
                     step_dt = DT_FLOWBOT if op_mode_pred[1] == 1 else DT
                     elapsed = time.time() - t_step_start
                     sleep_time = step_dt - elapsed
@@ -882,10 +800,6 @@ class RobotDeployment:
 
         elapsed_total = time.time() - episode_start
         print(f"\n✅ Episode finished: {total_steps} steps in {elapsed_total:.1f}s")
-
-        # Stop arm servoing/velocity control and let it settle before any subsequent move.
-        # Franka joint_velocity: needs stop_joint_velocity(), not stop() (Cartesian) --
-        # see hardware/franka_robot.py's stop_joint_velocity() docstring.
         print("Resetting Flowbot ...")
         self.fb.reset()
         if self.is_franka:

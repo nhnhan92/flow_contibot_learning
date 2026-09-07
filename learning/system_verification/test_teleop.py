@@ -31,31 +31,6 @@ Controls:
         - 'r'                → Reset to home position
         - 's'                → Print current status
 
-Franka notes:
-    Driven via FrankaRobot (franky -- see learning/hardware/franka_robot.py).
-    FrankaController (pylibfranka, learning/hardware/franka_control.py) was
-    evaluated as an alternative backend and is kept in the tree for
-    reference, but is no longer wired up here.
-    --control_mode selects which FrankaRobot primitive drives the SpaceMouse
-    each tick (UR5e is unaffected -- it always streams absolute position via
-    servo_tcp_pose/RTDE servoL, which is what --control_mode position gives
-    Franka too):
-        velocity (default): linear velocity computed from the SpaceMouse
-            each tick is sent directly to set_ee_velocity(), clipped to
-            max_pos_speed*speed_scale. This is a direct command, not a
-            position-error feedback loop through target_pose (target_pose
-            is still tracked for status/reset display) -- routing a live
-            per-tick target through position-error feedback fights franky's
-            own accel-limited ramp and produces a visible
-            oscillation/limit-cycle even under a constant, sustained stick
-            push.
-        position: target_pose is integrated from the SpaceMouse each tick
-            (same as UR5e) and streamed to set_tcp_pose() -- franky/Ruckig
-            plans a fresh jerk-limited trajectory toward the new absolute
-            target every call, same reactive pattern as velocity mode but
-            commanding *where* instead of *how fast*.
-    Start with a lower --max_pos_speed/--max_rot_speed/--speed_scale than
-    you'd use on UR5e, in either mode.
 """
 
 import sys
@@ -123,20 +98,7 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 
     UR5eRobot: interpolates (position lerp + rotation slerp) over `duration`
     seconds, streaming each waypoint via servo_tcp_pose (RTDE servoL) at
-    ~1/dt Hz.
-
-    FrankaRobot (franky): one direct move_tcp_pose() call. It's a single
-    blocking point-to-point move with its own smooth, independently-timed
-    translation+rotation trapezoidal profile (see franka_robot.py) --
-    already the well-tested primitive for "go to this pose," so there's no
-    need to hand-roll interpolation or open a set_ee_velocity session for a
-    one-shot move like this.
-
-    settle_time (Franka only): pause after arm.stop() before starting
-    move_tcp_pose() -- see demo_collect.py's move_2_init_pos docstring,
-    same fix (starting a new control session immediately after stop() was
-    observed, empirically, to make move_tcp_pose plan/execute very slowly
-    regardless of the velocity/duration passed in)."""
+    ~1/dt Hz."""
     start_pose = np.asarray(start_pose, dtype=float).copy()
     goal_pose  = np.asarray(goal_pose,  dtype=float).copy()
 
@@ -166,7 +128,7 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--arm', default='ur5', type=click.Choice(['ur5', 'franka'], case_sensitive=False),
               help='Which robotic arm to use: "ur5" (default) or "franka".')
 @click.option('--robot_ip',default = None, required=False,
-              help='Arm IP. Default: 192.168.11.20 (UR5e) or 172.16.0.2 (Franka).')
+              help='Arm IP. Default: 150.65.146.87 (UR5e) or 172.16.0.2 (Franka).')
 @click.option('--frequency', default=10, help='Control frequency (Hz)')
 @click.option('--max_pos_speed', default=0.05, help='Max linear speed (m/s)')
 @click.option('--max_rot_speed', default=0.1, help='Max angular speed (rad/s)')
@@ -178,7 +140,7 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 def main(arm, robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale, control_mode):
     is_franka = arm.lower() == 'franka'
     control_mode = control_mode.lower()
-    _default_ip = {'ur5': '192.168.11.20', 'franka': '172.16.0.2'}
+    _default_ip = {'ur5': '150.65.146.87', 'franka': '172.16.0.2'}
     robot_ip = robot_ip or _default_ip[arm.lower()]
 
     print("="*60)
