@@ -493,7 +493,7 @@ def test_dual_streams(
 @click.option('--height', default=480, help='Capture height (single-camera mode). '
               'Dual mode (--dual) defaults to 480 instead, matching demo_collect.py, unless overridden.')
 @click.option('--fps', default=30, help='Target FPS')
-@click.option('--duration', default=100, help='Test duration in seconds')
+@click.option('--duration', default=1000, help='Test duration in seconds')
 @click.option('--display/--no-display', default=True, help='Show live preview')
 @click.option('--target-width', '-w', default=320, help='Target resize width for training '
               '(single-camera mode; global camera in --dual mode)')
@@ -513,7 +513,7 @@ def test_dual_streams(
 @click.option('--wrist-crop-y', default=1, help='Wrist camera crop anchor y in [0,1] (--dual mode only)')
 @click.option('--dual', is_flag=True, help='Test the global + wrist cameras together '
               '(same connection path as demo_collect.py) instead of the default single-camera test.')
-@click.option('--camera_serial_global', default='827112072398', help='Serial for the global camera (--dual only).')
+@click.option('--camera_serial_global', default='031422250511', help='Serial for the global camera (--dual only).')
 @click.option('--camera_serial_wrist', default='841512070635', help='Serial for the wrist camera (--dual only).')
 @click.pass_context
 def main(ctx, width, height, fps, duration, display, target_width, target_height, rgb_only,

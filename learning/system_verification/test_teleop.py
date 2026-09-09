@@ -48,7 +48,7 @@ from hardware.spacemouse import SpaceMouse
 from hardware.ur5e_rtde import UR5eRobot
 from hardware.franka_robot import FrankaRobot
 
-INIT_POSE_UR5E = np.array([0.550, 0.045, 0.45, 3.14, 0.0, -0.05])
+INIT_POSE_UR5E = np.array([0.15, -0.3, 0.45, 0.917, -3.0, 0.0])
 INIT_POSE_FRANKA = np.array([0.45, 0.15, 0.5, 3.14, 0.0, -0.05])
 
 def print_status(tcp_pose, target_pose, speed_scale):
@@ -141,7 +141,6 @@ def main(arm, robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale, co
     is_franka = arm.lower() == 'franka'
     control_mode = control_mode.lower()
     _default_ip = {'ur5': '150.65.146.87', 'franka': '172.16.0.2'}
-    _default_ip = {'ur5': '150.65.146.87', 'franka': '172.16.0.2'}
     robot_ip = robot_ip or _default_ip[arm.lower()]
 
     print("="*60)
@@ -206,9 +205,8 @@ def main(arm, robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale, co
     # Get initial pose
     tcp_pose = robot.get_tcp_pose()
     print(f"\nCurrent TCP pose: [{', '.join([f'{x:.3f}' for x in tcp_pose])}]")
-    # init_pose = np.array([0.550, 0.045, 0.45, 3.14, 0.0, -0.05])
-    # target_pose = init_pose.copy()
-    target_pose = tcp_pose
+    target_pose = INIT_POSE_UR5E.copy()
+    # target_pose = tcp_pose
     # move_2_init_pos(robot, tcp_pose, init_pose, dt=dt, velocity=0.05, duration=5.0, gain=150, is_franka=is_franka)
     tcp_pose = robot.get_tcp_pose()
     print(f"init pos = {tcp_pose}")
@@ -291,7 +289,7 @@ def main(arm, robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale, co
                 sm_state[1] * max_pos_speed * speed_scale,  # Y
                 sm_state[2] * max_pos_speed * speed_scale  ,  # Z
             ])
-            print(f"vel_linear: {vel_linear}")
+            # print(f"vel_linear: {vel_linear}")
             vel_angular = np.array([
                 sm_state[3] * max_rot_speed * speed_scale,  # rx
                 sm_state[4] * max_rot_speed * speed_scale,  # ry

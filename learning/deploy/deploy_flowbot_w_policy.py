@@ -73,7 +73,7 @@ _DEFAULT_ROBOT_IP = {"ur5": "150.65.146.87", "franka": "172.16.0.2"}
 # move_to_start() -- UR5e episodes were starting from the wrong physical
 # pose -- and self.tcp_fixed_rotation below -- see the Franka rotation bug
 # this was found alongside.)
-DEFAULT_START_POSE = [0.25, 0.15, 0.0, 2.878, 1.26, 0.0]
+DEFAULT_START_POSE = [0.15, -0.3, 0.45, 0.917, -3.0, 0.0]
 
 # Franka start pose -- matches init_pose in demo_collect.py, i.e. where
 # Franka demonstrations actually started from. (Currently identical to
@@ -132,7 +132,7 @@ FRANKA_MAX_JOINT_VEL = 0.3   # rad/s
 # a single-camera deploy still binds the intended physical device even if
 # both cameras happen to be connected, and 'both' mode's two pipelines never
 # race to grab the same one (see demo_collect.py's camera connection comments).
-_DEFAULT_CAMERA_SERIAL_GLOBAL = '827112072398'
+_DEFAULT_CAMERA_SERIAL_GLOBAL = '031422250511'
 _DEFAULT_CAMERA_SERIAL_WRIST  = '841512070635'
 
 SERVO_LOOKAHEAD = 0.1   # s
@@ -845,7 +845,7 @@ def main():
                         help='Path to trained checkpoint (.pt). Must match --arm: a checkpoint '
                              'trained on UR5e (TCP-pose actions) is not valid for Franka '
                              '(joint-velocity actions), and vice versa.')
-    parser.add_argument('--arm',           type=str,   default='franka', choices=['ur5', 'franka'],
+    parser.add_argument('--arm',           type=str,   default='ur5', choices=['ur5', 'franka'],
                         help='Which arm to deploy on -- must match the arm the checkpoint was trained for.')
     parser.add_argument('--robot_ip',      type=str, default=None,
                         help='Robot IP (default: 150.65.146.87 for ur5, 172.16.0.2 for franka)')
@@ -872,24 +872,9 @@ def main():
     parser.add_argument('--log_dir',       type=str,   default=None,
                         help='Directory to save deployment logs (.npz per episode). ')
     parser.add_argument('--position_command_stride', '-skip', type=int, default=1,
-                        help='Position control only (UR5e, or Franka with franka_action_space='
-                             "'position'): execute only every Nth predicted waypoint instead of "
-                             'every one, e.g. 2 on [A,B,C,D,E] executes only [B,D,E]. Gives each '
-                             'issued command N*DT instead of DT to settle before the next '
-                             'supersedes it -- fixes Franka position-mode jiggle (CartesianMotion '
-                             'plans to arrive-and-stop, then gets interrupted mid-brake every '
-                             'tick at stride 1). No-op (1) for UR5e/joint_velocity, which have no '
-                             'arrive-and-stop semantics to begin with. Tune empirically on '
-                             'hardware -- start at 2, increase if jiggle persists.')
+                        help='Position control only (UR5e, or Franka with franka_action_space=position')
     parser.add_argument('--franka_position_speed', type=float, default=FRANKA_POSITION_VELOCITY,
-                        help='Franka position mode only (franka_action_space=\'position\'): '
-                             'relative_dynamics_factor velocity fraction (0-1) for set_tcp_pose, '
-                             'independent of UR5e\'s SERVO_SPEED. NOT literal m/s -- a fraction of '
-                             "Franka's own max velocity. Lower = slower. Also the first thing to "
-                             'try if set_tcp_pose keeps tripping the "Motion finished commanded, '
-                             'but the robot is still moving!" discontinuity reflex, since lowering '
-                             'it lowers jerk too (see FRANKA_POSITION_VELOCITY/FRANKA_POSITION_ACCEL '
-                             'above).')
+                        help='Franka position mode only')
     parser.add_argument('--franka_position_accel', type=float, default=FRANKA_POSITION_ACCEL,
                         help='Franka position mode only: relative_dynamics_factor acceleration '
                              'fraction (0-1) for set_tcp_pose. Same caveats as '
