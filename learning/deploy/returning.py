@@ -32,7 +32,7 @@ FLOWBOT_FREQ = 10
 
 # Matches demo_collect.py's current init_pose -- see deploy_flowbot_w_policy.py's
 # DEFAULT_START_POSE comment for why this was stale until 2026-09.
-DEFAULT_START_POSE = [0.45, 0.15, 0.5, 3.14, 0.0, -0.05]
+DEFAULT_START_POSE = [0.15, -0.3, 0.45, 0.917, -3.0, 0.0]
 
 
 def return_to_start(
