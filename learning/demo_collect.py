@@ -61,7 +61,7 @@ import select
 import termios
 import tty
 import platform
-INIT_POSE_UR5E = np.array([0.15, -0.3, 0.45, 0.917, -3.0, 0.0])
+INIT_POSE_UR5E = np.array([0.115, -0.31, 0.45, 0.917, -3.0, 0.0])
 INIT_POSE_FRANKA = np.array([0.45, 0.15, 0.5, 3.14, 0.0, -0.05])
 class DataBuffer:
     """Buffer for collecting episode data with camera(s).

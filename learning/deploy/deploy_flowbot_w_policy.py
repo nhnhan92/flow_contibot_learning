@@ -73,7 +73,7 @@ _DEFAULT_ROBOT_IP = {"ur5": "150.65.146.87", "franka": "172.16.0.2"}
 # move_to_start() -- UR5e episodes were starting from the wrong physical
 # pose -- and self.tcp_fixed_rotation below -- see the Franka rotation bug
 # this was found alongside.)
-DEFAULT_START_POSE = [0.15, -0.3, 0.45, 0.917, -3.0, 0.0]
+DEFAULT_START_POSE = [0.115, -0.31, 0.45, 0.917, -3.0, 0.0]
 
 # Franka start pose -- matches init_pose in demo_collect.py, i.e. where
 # Franka demonstrations actually started from. (Currently identical to

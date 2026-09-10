@@ -91,7 +91,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default=None, help='Dataset path')
     parser.add_argument('--output_dir', '-o', type=str, default=None, help='Output directory for checkpoints and logs')
-    parser.add_argument('--config', type=str, default='/config/config_train_flowbot_franka.yaml', help='Config file')
+    parser.add_argument('--config', type=str, default='/config/config_train_flowbot_ur5.yaml', help='Config file')
     parser.add_argument('--resume', type=str, default=None, help='Checkpoint to resume from')
     parser.add_argument('--device', type=str, default='cuda', help='Device (cuda/cpu)')
     parser.add_argument('--wandb_project', type=str, default='pickplace-diffusion', help='W&B project name')
