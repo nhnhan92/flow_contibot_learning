@@ -113,7 +113,7 @@ SERVO_ACCEL = 0.05     # m/s^2
 FRANKA_POSITION_VELOCITY = 0.05
 FRANKA_POSITION_ACCEL = 0.05
 
-MAX_TCP_DELTA = 0.02   # m per step -- position control (UR5e, or Franka franka_action_space='position')
+MAX_TCP_DELTA = 0.03   # m per step -- position control (UR5e, or Franka franka_action_space='position')
 MAX_TCP_ROT_DELTA = 0.05   # rad per step, same scope as MAX_TCP_DELTA -- see
                             # the "Fixed TCP rotation" note above: this bounds
                             # accidental large rotation commands (e.g. a wrong
@@ -386,6 +386,7 @@ class RobotDeployment:
         self.current_op_mode = np.zeros(2, dtype=np.float32)
 
         print("\n✅ All systems ready!\n")
+        
 
     # ── Low-level observation ─────────────────────────────────────────────────
 
@@ -579,8 +580,12 @@ class RobotDeployment:
         op_mode_pred = np.clip(np.round(action[d+3:d+5]), 0, 1).astype(int)
 
         # PWM offset, flowbot-active steps only.
+        if op_mode_pred[1] == 1 and np.all(pwm_raw<5):
+            pwm_raw = np.array([5, 5, 5])
+        elif op_mode_pred[1] == 1 and np.any(pwm_raw>=5):
+            pwm_raw = pwm_raw + np.array([3, 6, 0])
         # if op_mode_pred[1] == 1:
-        #     pwm_raw = pwm_raw + np.array([3, 0, 1])
+        #     pwm_raw = pwm_raw + np.array([4, 7, -1])
 
         pwm_int    = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
 
@@ -706,6 +711,8 @@ class RobotDeployment:
         """
         if move_to_start:
             self.move_to_start()
+            input("    Press ENTER to start ...............")
+            
 
         # Reset internal state so the new episode starts clean (op_mode=[0,0], PWM=0).
         # This prevents carryover from the previous episode biasing the first observation.
@@ -782,7 +789,14 @@ class RobotDeployment:
                     state_raw = self._update_obs_buffer()
                     if self.verbose:
                         _, image_raw, image_wrist = self._get_raw_observation()   # second read just for display
-                        cv2.imshow("Live", cv2.cvtColor(image_raw, cv2.COLOR_RGB2BGR))
+                        # combined = np.hstack([image_raw, image_wrist])
+                        # cv2.putText(combined, f"RGB {self.image_size[1]}x{self.image_size[0]}", (10, 20),
+                        #                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                        # cv2.putText(combined, f"Depth {self.image_size[1]}x{self.image_size[0]}", (self.image_size[1] + 10, 20),
+                        #             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                        cv2.imshow("Global", cv2.cvtColor(image_raw, cv2.COLOR_RGB2BGR))
+                        cv2.waitKey(1)
+                        cv2.imshow("Wrist", cv2.cvtColor(image_wrist, cv2.COLOR_RGB2BGR))
                         cv2.waitKey(1)
                     if logger is not None:
                         logger.log_step(state_raw, action, pwm_int)
@@ -807,6 +821,7 @@ class RobotDeployment:
             if self.is_franka_joint_vel:
                 self.robot.stop_joint_velocity()
         else:
+            self.move_to_start()
             self.robot.stop()
         time.sleep(0.5)
 
@@ -859,7 +874,7 @@ def main():
                         help='Arduino serial port for Flowbot')
     parser.add_argument('--flowbot_baud',  type=int,   default=115200,
                         help='Flowbot serial baud rate')
-    parser.add_argument('--max_steps',     type=int,   default=450,
+    parser.add_argument('--max_steps',     type=int,   default=500,
                         help='Max steps per episode')
     parser.add_argument('--num_episodes',  type=int,   default=1,
                         help='Number of episodes to run')
