@@ -61,7 +61,8 @@ import select
 import termios
 import tty
 import platform
-
+INIT_POSE_UR5E = np.array([0.115, -0.31, 0.45, 0.917, -3.0, 0.0])
+INIT_POSE_FRANKA = np.array([0.45, 0.15, 0.5, 3.14, 0.0, -0.05])
 class DataBuffer:
     """Buffer for collecting episode data with camera(s).
 
@@ -313,12 +314,12 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 
 @click.command()
 @click.option('--output', '-o', required=True, default=None, help='Output folder name')
-@click.option('--arm', default='franka', type=click.Choice(['ur5', 'franka'], case_sensitive=False),
+@click.option('--arm', default='ur5', type=click.Choice(['ur5', 'franka'], case_sensitive=False),
               help='Which robotic arm to use: "ur5" (default) or "franka".')
 @click.option('--robot_ip', '-ri', default=None,
               help='Arm IP. Default: 150.65.146.87 (UR5) or 172.16.0.2 (Franka).')
 @click.option('--arduino_port', default="/dev/ttyACM0")
-@click.option('--camera_serial_global', default='827112072398',
+@click.option('--camera_serial_global', default='031422250511',
               help='RealSense serial for the global (scene) camera.')
 @click.option('--camera_serial_wrist', default='841512070635',
               help='RealSense serial for the wrist camera.')
@@ -327,18 +328,13 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--camera_width', default=640, type=int, help='Camera width (both cameras)')
 @click.option('--camera_height', default=480, type=int, help='Camera height (both cameras)')
 @click.option('--camera_fps', default=30, type=int,
-              help='Camera FPS (both cameras). Must be a rate the sensor natively supports '
-                   '(RealSense color streams typically only offer 6/15/30/60) -- pipeline.start() '
-                   'fails with "Couldn\'t resolve requests" for any other value. This does not need '
-                   'to match --frequency: get_frames() is only called once per control tick regardless '
-                   'of the sensor\'s configured rate, so the effective capture rate already follows '
-                   '--frequency. Use system_verification/test_camera.py to check what a given camera supports.')
+              help='Camera FPS (both cameras). Must be a rate the sensor natively supports ')
 @click.option('--frequency', '-f', default=10.0, type=float, help='Control Hz')
 @click.option('--flowbot_freqency', '-fb_freq', default=30.0, type=float, help='Control Hz for flowbot')
 @click.option('--flowbot_speed_factor', '-fspeed', default =1.5, type=float)
-@click.option('--max_pos_speed', default=0.05, type=float)
+@click.option('--max_pos_speed', default=0.07, type=float)
 @click.option('--max_rot_speed', default=0.05, type=float)
-@click.option('--deadzone', default=0.3, type=float, help='Spacemouse threshold')
+@click.option('--deadzone', default=0.2, type=float, help='Spacemouse threshold')
 @click.option('--release_frames', default=10, type=int,
               help='Frames to record after release (both-button press). '
                    'At 10 Hz the default of 10 gives 1 s of released state.')
@@ -460,7 +456,7 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
 
     # Get initial pose
     tcp_pose = ur5.get_tcp_pose()
-    init_pose = np.array([0.45, 0.15, 0.5, 3.14, 0.0, -0.05])
+    init_pose = INIT_POSE_FRANKA if is_franka else INIT_POSE_UR5E
     target_pose = init_pose.copy()
 
     last_action = init_pose.copy() if not is_franka else np.zeros(7)
@@ -561,12 +557,12 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
             if button_status[1] and not button_status[0]:          # right btn: flowbot
                 cmd_sm = sm.get_latest_xyz()
                 xyz_fb = cmd_sm * flowbot_speed_factor
-                # xyz_fb[2] = -xyz_fb[2]
-                # xyz_fb[1] = -xyz_fb[1]
-                copied_xyz = xyz_fb.copy()
                 xyz_fb[2] = -xyz_fb[2]
-                xyz_fb[1] = -copied_xyz[0]  # for better visualization during teleop
-                xyz_fb[0] = -copied_xyz[1]
+                xyz_fb[0] = -xyz_fb[0]
+                # copied_xyz = xyz_fb.copy()
+                # xyz_fb[2] = -xyz_fb[2]
+                # xyz_fb[1] = -copied_xyz[0]  # for better visualization during teleop
+                # xyz_fb[0] = -copied_xyz[1]
                 xyz_fb = np.where(np.abs(xyz_fb) < deadzone, 0.0, xyz_fb)
                 fb.step(xyz_fb)
                 fb.update_plot()
