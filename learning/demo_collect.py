@@ -86,19 +86,21 @@ class DataBuffer:
         self.joint_states = []
         self.actions = []
         self.pwm_signals = []
+        self.flowrates = []
         self.operation_modes = []
         if self.with_camera_global:
             self.camera_frames = []        # RGB images, global camera (camera_0)
         if self.with_camera_wrist:
             self.camera_frames_wrist = []  # RGB images, wrist camera (camera_1)
 
-    def add(self, timestamp, robot_state, joint_state, pwm_signals, action,
+    def add(self, timestamp, robot_state, joint_state, pwm_signals, action, flowrate,
             operation_mode=None, camera_frame=None, camera_frame_wrist=None):
         self.timestamps.append(timestamp)
         self.robot_states.append(robot_state.copy())
         self.joint_states.append(joint_state.copy())
         self.actions.append(action.copy())
         self.pwm_signals.append(pwm_signals.copy())
+        self.flowrates.append(flowrate.copy())
         if operation_mode is not None:
             self.operation_modes.append(np.array(operation_mode, dtype=np.uint8))
         else:
@@ -122,6 +124,7 @@ class DataBuffer:
             'robot_eef_pose': np.array(self.robot_states),
             'robot_joint': np.array(self.joint_states),
             'pwm_signals': np.array(self.pwm_signals),
+            'flowrate': np.array(self.flowrates),  # (T, 3) L/min, one per actuator -- see flowbot.last_flowrate
             'action': np.array(self.actions),
             'operation_mode': np.array(self.operation_modes, dtype=np.uint8),  # (T, 2)
         }
@@ -660,6 +663,7 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                             joint_state=rel_joints,
                             action=last_action,       # robot not moving (~0 velocity for Franka)
                             pwm_signals=fb.last_pwm, # = [0,0,0] after reset
+                            flowrate=fb.last_flowrate,
                             operation_mode=np.array([1, 1], dtype=np.uint8),
                             camera_frame=rel_frame,
                             camera_frame_wrist=rel_frame_wrist,
@@ -703,6 +707,11 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                     joint_state=current_joints,
                     action=last_action,
                     pwm_signals=prev_pwm,   # command from previous step (matches current image/tcp)
+                    # Sensor reading, not a command we send -- read fresh here
+                    # (like current_tcp/current_joints above), reflecting
+                    # actual measured airflow after this tick's sleep, not a
+                    # pre-tick snapshot the way prev_pwm is.
+                    flowrate=fb.last_flowrate,
                     operation_mode=op_mode,
                     camera_frame=camera_frame,
                     camera_frame_wrist=camera_frame_wrist,

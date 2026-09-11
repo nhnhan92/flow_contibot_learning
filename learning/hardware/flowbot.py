@@ -70,6 +70,17 @@ class flowbot:
         self._ack_pwm   = None                # last ACK'd PWM (np.ndarray (3,) int)
         self._ack_lock  = threading.Lock()
 
+        # Latest flow-sensor reading, parsed from the periodic telemetry CSV
+        # line arduino_controller.ino prints every SAMPLE_PERIOD_MS (~50ms):
+        # now,rawFlow1,processed_flow1,rawFlow2,processed_flow2,rawFlow3,
+        # processed_flow3,rawPress,processed_press,pwm1_cur,pwm2_cur,pwm3_cur
+        # -- processed_flow1/2/3 (fields 2,4,6) are each actuator's filtered,
+        # zero-offset-corrected flow rate in L/min. Updated in the background
+        # reader thread below; read directly (self.last_flowrate), same
+        # convention as self.last_pwm.
+        self._flow_lock = threading.Lock()
+        self.last_flowrate = np.zeros(3, dtype=np.float32)
+
         # ACK-aware reader replaces the old drain_serial thread.
         t_reader = threading.Thread(target=self._serial_reader_thread, daemon=True)
         t_reader.start()
@@ -155,8 +166,12 @@ class flowbot:
         """
         Background serial reader.
 
-        Captures ACK lines from Arduino (format: "ACK p1 p2 p3\\n").
-        All other lines are silently drained so the input buffer never fills up.
+        Captures ACK lines from Arduino (format: "ACK p1 p2 p3\\n") and the
+        periodic telemetry CSV line (12 comma-separated fields -- see
+        self.last_flowrate's docstring above for the exact layout). Any other
+        line (arduino_controller.ino's "#"-prefixed status/comment lines,
+        "SUCTION: OFF", "RESETTING", etc.) is silently drained so the input
+        buffer never fills up.
         """
         while not self.stop_flag["stop"]:
             try:
@@ -172,7 +187,20 @@ class flowbot:
                         with self._ack_lock:
                             self._ack_pwm = ack_pwm
                         self._ack_event.set()
-                # non-ACK lines are discarded (drain behaviour)
+                elif "," in line:
+                    fields = line.split(",")
+                    if len(fields) == 12:
+                        try:
+                            flowrate = np.array(
+                                [float(fields[2]), float(fields[4]), float(fields[6])],
+                                dtype=np.float32,
+                            )
+                        except ValueError:
+                            pass  # malformed/torn line (mid-write read) -- drop it, next line recovers
+                        else:
+                            with self._flow_lock:
+                                self.last_flowrate = flowrate
+                # other lines (status/comments) are discarded (drain behaviour)
             except Exception:
                 pass
 
