@@ -61,7 +61,8 @@ import select
 import termios
 import tty
 import platform
-INIT_POSE_UR5E = np.array([0.115, -0.31, 0.45, 0.917, -3.0, 0.0])
+# INIT_POSE_UR5E = np.array([0.115, -0.31, 0.45, 0.917, -3.0, 0.0])
+INIT_POSE_UR5E = np.array([0.115, -0.31, 0.45, 0.885, -2.85, -0.044])
 INIT_POSE_FRANKA = np.array([0.45, 0.15, 0.5, 3.14, 0.0, -0.05])
 class DataBuffer:
     """Buffer for collecting episode data with camera(s).
@@ -221,7 +222,9 @@ def _sample_target_pc(base, jitter_mm):
     base = np.asarray(base, dtype=float)
     if jitter_mm <= 0:
         return base.copy()
-    return base + np.random.uniform(-jitter_mm, jitter_mm, size=3)
+    randomized_target_pc = base + np.random.uniform(-jitter_mm, jitter_mm, size=3)
+    print(f"randomized target pc = {randomized_target_pc}")
+    return randomized_target_pc
 
 
 def _servo_toward(arm, is_franka, target_pose, dt, velocity, acceleration,
@@ -352,9 +355,9 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--release_frames', default=5, type=int,
               help='Frames to record after release (both-button press). '
                    'At 10 Hz the default of 10 gives 1 s of released state.')
-@click.option('--target_pc', default=[10.05142857,  36.02857143, 103.45428571], type=(float, float, float),
+@click.option('--target_pc', default=[11.05142857,  39.2857143, 103.45428571], type=(float, float, float),
               help='Target point cloud position for flowbot to reach (x, y, z) in meters.')
-@click.option('--target_pc_jitter', default=0.0, type=float,
+@click.option('--target_pc_jitter', default=0.8, type=float,
               help='Per-axis uniform jitter (mm) added to --target_pc, resampled fresh each time '
                    "'C' starts a new recording -- so each collected episode's flowbot target is a "
                    'slightly different point near --target_pc instead of always the exact same one. '
@@ -449,7 +452,7 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                  pwm_max= 26,
                  enable_plot = True,
                 frequency = flowbot_freqency,
-                max_pos_speed = 40,
+                max_pos_speed = 30,
                 draw_hull = True)
     fb.start()
 
@@ -590,30 +593,30 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                     pass
                 target_pose = robot.get_tcp_pose()
             ARRIVAL_THRESHOLD_MM = 1.0
-            if button_status[1] and not button_status[0]:          # right btn: flowbot
-                cmd_sm = sm.get_latest_xyz()
-                xyz_fb = cmd_sm * flowbot_speed_factor
-                xyz_fb[2] = -xyz_fb[2]
-                xyz_fb[0] = -xyz_fb[0]
-                # copied_xyz = xyz_fb.copy()
-                # xyz_fb[2] = -xyz_fb[2]
-                # xyz_fb[1] = -copied_xyz[0]  # for better visualization during teleop
-                # xyz_fb[0] = -copied_xyz[1]
-                xyz_fb = np.where(np.abs(xyz_fb) < deadzone, 0.0, xyz_fb)
-                fb.step(xyz_fb)
-                fb.update_plot()
-                print(f"current pc = {fb.pc}")
-            
             # if button_status[1] and not button_status[0]:          # right btn: flowbot
-            #     d    = target_pc - fb.pc
-            #     dist = float(np.linalg.norm(d))
-            #     if dist < ARRIVAL_THRESHOLD_MM:
-            #         pass
-            #     else:
-            #         step_scale = min(1.0, dist / (fb.max_pos_speed * fb.dt + 1e-12))
-            #         direction  = (d / dist) * step_scale
-            #         pwm        = fb.step(direction)
-            #         fb.update_plot()
+            #     cmd_sm = sm.get_latest_xyz()
+            #     xyz_fb = cmd_sm * flowbot_speed_factor
+            #     xyz_fb[2] = -xyz_fb[2]
+            #     xyz_fb[0] = -xyz_fb[0]
+            #     # copied_xyz = xyz_fb.copy()
+            #     # xyz_fb[2] = -xyz_fb[2]
+            #     # xyz_fb[1] = -copied_xyz[0]  # for better visualization during teleop
+            #     # xyz_fb[0] = -copied_xyz[1]
+            #     xyz_fb = np.where(np.abs(xyz_fb) < deadzone, 0.0, xyz_fb)
+            #     fb.step(xyz_fb)
+            #     fb.update_plot()
+            #     print(f"current pc = {fb.pc}")
+            
+            if button_status[1] and not button_status[0]:          # right btn: flowbot
+                d    = target_pc - fb.pc
+                dist = float(np.linalg.norm(d))
+                if dist < ARRIVAL_THRESHOLD_MM:
+                    pass
+                else:
+                    step_scale = min(1.0, dist / (fb.max_pos_speed * fb.dt + 1e-12))
+                    direction  = (d / dist) * step_scale
+                    pwm        = fb.step(direction)
+                    fb.update_plot()
 
 
             elif button_status[0] and not button_status[1]:        # left btn: UR5e/Franka
