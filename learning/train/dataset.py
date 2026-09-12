@@ -17,6 +17,23 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hardware.image_utils import crop_and_resize
 
 
+# state_keys component name -> zarr dataset key. 'tcp' additionally gets
+# sliced to :tcp_dims (its width varies with tcp_dims); the others are used
+# in full at their fixed width below. See DiffusionDataset's docstring.
+STATE_COMPONENT_ZARR_KEY = {
+    'tcp':      'data/robot_eef_pose',
+    'pwm':      'data/pwm_signals',
+    'flowrate': 'data/flowrate',
+    'op_mode':  'data/operation_mode',
+}
+STATE_COMPONENT_WIDTH = {'pwm': 3, 'flowrate': 3, 'op_mode': 2}  # 'tcp' width = tcp_dims
+# Components whose normalization range is fixed, not derived from the data:
+# op_mode is always exactly {0, 1} per dim -- deriving min/max from data
+# would risk a degenerate (zero-width) range if a given dataset only ever
+# visited one op_mode value.
+STATE_COMPONENT_HARDCODED_STATS = {'op_mode'}
+
+
 class DiffusionDataset(Dataset):
     """
     Dataset for robot demonstrations with Flowbot soft manipulator.
@@ -25,6 +42,10 @@ class DiffusionDataset(Dataset):
         - robot_eef_pose: (T, 6) - arm end-effector TCP pose [x, y, z, rx, ry, rz]
         - robot_joint:    (T, 6 or 7) - arm joint angles (not used for training)
         - pwm_signals:    (T, 3) - Flowbot PWM signals [pwm1, pwm2, pwm3]
+        - flowrate:       (T, 3) - Flowbot flow-sensor readings, L/min per
+                          actuator (optional -- only present in datasets
+                          collected after flowrate recording was added; see
+                          state_keys below)
         - action:         (T, 6) UR5e or (T, 7) Franka -- see `arm` below
         - camera_0:       (T, H, W, 3) - RGB images, global (scene) camera
         - camera_1:       (T, H, W, 3) - RGB images, wrist camera (optional,
@@ -32,9 +53,22 @@ class DiffusionDataset(Dataset):
                           camera connected -- see `camera_mode`)
         - timestamp:      (T,) - timestamps
 
-    State  (tcp_dims+5 D):  robot_eef_pose[:tcp_dims] + pwm_signals (3D) + operation_mode (2D)
-                             Always the Cartesian TCP pose, regardless of `arm` --
-                             only the ACTION space differs per arm (below).
+    State: freely composable from state_keys, a list of component names in
+    the order they're concatenated. Available components:
+        'tcp'      : robot_eef_pose[:tcp_dims]  (width = tcp_dims)
+        'pwm'      : pwm_signals                (width 3)
+        'flowrate' : flowrate                   (width 3) -- raises a clear
+                     error at load time if this dataset predates flowrate
+                     recording and doesn't have data/flowrate
+        'op_mode'  : operation_mode              (width 2) -- always a fixed
+                     {0,1} range (see _compute_stats), never data-derived
+    Default state_keys=('tcp', 'pwm', 'op_mode') reproduces the original
+    fixed tcp_dims+5 composition exactly. Examples from the class's actual
+    use: state_keys=('tcp', 'flowrate', 'op_mode') swaps pwm for flowrate
+    (tcp_dims+5 D); state_keys=('tcp', 'pwm', 'flowrate', 'op_mode') uses
+    all four (tcp_dims+8 D). Set via config key 'state_keys'. Always the
+    Cartesian TCP pose for 'tcp', regardless of `arm` -- only the ACTION
+    space differs per arm (below), which is NOT affected by state_keys.
 
     Action, depends on `arm` and (Franka only) `franka_action_space`:
         UR5e             (tcp_dims+5 D): target TCP[:tcp_dims] from data/action
@@ -98,6 +132,11 @@ class DiffusionDataset(Dataset):
         normalize=True,
         exclude_episodes=None,  # List of episode indices to exclude
         tcp_dims=3,         # TCP components used: 3=xyz only, 6=xyz+rotation
+        state_keys=('tcp', 'pwm', 'op_mode'),  # Which components make up the
+                                # state vector, in order -- any subset/order
+                                # of 'tcp', 'pwm', 'flowrate', 'op_mode'. See
+                                # class docstring. Default reproduces the
+                                # original fixed composition exactly.
         crop_scale=1.5,     # Crop window size as a multiple of image_size
         crop_x=0.5,         # Crop anchor in [0,1]: 0=left, 0.5=center, 1=right
         crop_y=0.5,         # Crop anchor in [0,1]: 0=top, 0.5=center, 1=bottom
@@ -119,6 +158,17 @@ class DiffusionDataset(Dataset):
         self.normalize = normalize
         self.exclude_episodes = exclude_episodes if exclude_episodes is not None else []
         self.tcp_dims = tcp_dims
+        self.state_keys = list(state_keys)
+        _unknown = set(self.state_keys) - set(STATE_COMPONENT_ZARR_KEY)
+        if _unknown:
+            raise ValueError(
+                f"Unknown state_keys entry/entries {sorted(_unknown)}. "
+                f"Valid: {sorted(STATE_COMPONENT_ZARR_KEY)}."
+            )
+        self.state_dim = sum(
+            self.tcp_dims if key == 'tcp' else STATE_COMPONENT_WIDTH[key]
+            for key in self.state_keys
+        )
         self.crop_scale = crop_scale
         self.crop_x = crop_x
         self.crop_y = crop_y
@@ -200,6 +250,15 @@ class DiffusionDataset(Dataset):
                 "without a wrist camera (or with --no_camera_wrist). Either "
                 "recollect with the wrist camera connected, or use camera_mode='global'."
             )
+        for key in self.state_keys:
+            zarr_key = STATE_COMPONENT_ZARR_KEY[key]
+            if zarr_key.split('/', 1)[1] not in self.zarr_root['data']:
+                raise ValueError(
+                    f"state_keys includes {key!r}, but {self.dataset_path} has no "
+                    f"{zarr_key} -- this dataset was collected with an older "
+                    f"demo_collect.py that didn't record it. Recollect with the "
+                    f"current demo_collect.py, or remove {key!r} from state_keys."
+                )
         if self.is_franka and self.franka_action_space == 'joint_velocity':
             action_shape = self.zarr_root['data/action'].shape
             if action_shape[1] != 7:
@@ -266,12 +325,14 @@ class DiffusionDataset(Dataset):
 
         total_len = int(self.episode_ends[-1])
         FULL_SCAN_THRESHOLD = 10_000  # use all frames below this size
+        needs_flowrate = 'flowrate' in self.state_keys
 
         if total_len <= FULL_SCAN_THRESHOLD:
             # Load everything — guaranteed correct min/max
             robot_states  = self.zarr_root['data/robot_eef_pose'][:]  # (T, 6)
             pwm_states    = self.zarr_root['data/pwm_signals'][:]     # (T, 3)
             robot_actions = self.zarr_root[self._action_source_key][:]  # (T, 6 or 7)
+            flowrate_states = self.zarr_root['data/flowrate'][:] if needs_flowrate else None
             print(f"  Using all {total_len} frames for stats")
         else:
             # Seeded random sample — reproducible across runs
@@ -280,23 +341,40 @@ class DiffusionDataset(Dataset):
             robot_states  = self.zarr_root['data/robot_eef_pose'].oindex[sample_indices]
             pwm_states    = self.zarr_root['data/pwm_signals'].oindex[sample_indices]
             robot_actions = self.zarr_root[self._action_source_key].oindex[sample_indices]
+            flowrate_states = self.zarr_root['data/flowrate'].oindex[sample_indices] if needs_flowrate else None
             print(f"  Using 5000/{total_len} seeded-random frames for stats")
 
         robot_states  = np.array(robot_states)   # (N, 6)
         pwm_states    = np.array(pwm_states)     # (N, 3)
         robot_actions = np.array(robot_actions)  # (N, tcp_dims-compatible 6) or (N, 7) joint velocity
+        if needs_flowrate:
+            flowrate_states = np.array(flowrate_states)  # (N, 3)
 
         eps = 1e-6
         d = self.tcp_dims        # state TCP width: 3 or 6, both arms
         a = self.action_dim_raw  # action raw width: tcp_dims (UR5e) or 7 (Franka)
 
-        # State: robot_eef_pose[:tcp_dims] + pwm (3D) -- Cartesian pose,
-        # regardless of arm/action space.
-        self.state_min = np.concatenate([robot_states[:, :d].min(0), pwm_states.min(0)])
-        self.state_max = np.concatenate([robot_states[:, :d].max(0), pwm_states.max(0)])
+        # State: generic composition from self.state_keys, in order (see
+        # class docstring). Reproduces the original fixed
+        # tcp+pwm+op_mode computation exactly when state_keys is left default.
+        _state_source = {'tcp': robot_states[:, :d], 'pwm': pwm_states, 'flowrate': flowrate_states}
+        state_mins, state_maxs = [], []
+        for key in self.state_keys:
+            if key in STATE_COMPONENT_HARDCODED_STATS:  # op_mode: always {0,1}, never data-derived
+                width = STATE_COMPONENT_WIDTH[key]
+                state_mins.append(np.zeros(width))
+                state_maxs.append(np.ones(width))
+            else:
+                comp = _state_source[key]
+                state_mins.append(comp.min(0))
+                state_maxs.append(comp.max(0))
+        self.state_min = np.concatenate(state_mins)
+        self.state_max = np.concatenate(state_maxs)
         self.state_range = self.state_max - self.state_min + eps
 
-        # Action: UR5e target_pose[:tcp_dims], Franka full 7D joint velocity + pwm (3D)
+        # Action: UR5e target_pose[:tcp_dims], Franka full 7D joint velocity
+        # + pwm (3D) + op_mode (2D) -- always this fixed composition,
+        # regardless of state_keys (state_keys only affects the STATE above).
         self.action_min = np.concatenate([robot_actions[:, :a].min(0), pwm_states.min(0)])
         self.action_max = np.concatenate([robot_actions[:, :a].max(0), pwm_states.max(0)])
         self.action_range = self.action_max - self.action_min + eps
@@ -306,18 +384,23 @@ class DiffusionDataset(Dataset):
         op_min   = np.array([0.0, 0.0])
         op_max   = np.array([1.0, 1.0])
         op_range = np.array([1.0 + eps, 1.0 + eps])
-        self.state_min   = np.concatenate([self.state_min,   op_min])
-        self.state_max   = np.concatenate([self.state_max,   op_max])
-        self.state_range = np.concatenate([self.state_range, op_range])
         self.action_min   = np.concatenate([self.action_min,   op_min])
         self.action_max   = np.concatenate([self.action_max,   op_max])
         self.action_range = np.concatenate([self.action_range, op_range])
 
-        tcp_labels = ['X', 'Y', 'Z', 'Rx', 'Ry', 'Rz'][:d]
-        tcp_str = ', '.join(f"{l}=[{self.state_min[i]:.4f}, {self.state_max[i]:.4f}]"
-                            for i, l in enumerate(tcp_labels))
-        print(f"  State  range (TCP {d}D): {tcp_str}")
+        print(f"  State composition {self.state_keys} ({self.state_dim}D):")
+        offset = 0
+        for key in self.state_keys:
+            width = d if key == 'tcp' else STATE_COMPONENT_WIDTH[key]
+            rng_str = ', '.join(
+                f"[{self.state_min[offset+i]:.4f}, {self.state_max[offset+i]:.4f}]"
+                for i in range(width)
+            )
+            tag = " (hardcoded)" if key in STATE_COMPONENT_HARDCODED_STATS else ""
+            print(f"    {key}: {rng_str}{tag}")
+            offset += width
 
+        tcp_labels = ['X', 'Y', 'Z', 'Rx', 'Ry', 'Rz'][:d]
         if self.is_franka and self.franka_action_space == 'joint_velocity':
             joint_labels = [f'q{i+1}' for i in range(a)]
             action_str = ', '.join(f"{l}=[{self.action_min[i]:.4f}, {self.action_max[i]:.4f}]"
@@ -328,15 +411,11 @@ class DiffusionDataset(Dataset):
                                     for i, l in enumerate(tcp_labels))
             print(f"  Action range (TCP {a}D): {action_str}")
 
-        print(f"  PWM range (state):  "
-              f"[{self.state_min[d]:.1f}, {self.state_max[d]:.1f}], "
-              f"[{self.state_min[d+1]:.1f}, {self.state_max[d+1]:.1f}], "
-              f"[{self.state_min[d+2]:.1f}, {self.state_max[d+2]:.1f}]")
         print(f"  PWM range (action): "
               f"[{self.action_min[a]:.1f}, {self.action_max[a]:.1f}], "
               f"[{self.action_min[a+1]:.1f}, {self.action_max[a+1]:.1f}], "
               f"[{self.action_min[a+2]:.1f}, {self.action_max[a+2]:.1f}]")
-        print(f"  op_mode: hardcoded [0,0]→[-1,-1], [1,1]→[+1,+1]")
+        print(f"  op_mode (action): hardcoded [0,0]→[-1,-1], [1,1]→[+1,+1]")
 
     def _normalize_state(self, state):
         """Normalize state using Min-Max to [-1, 1]"""
@@ -373,17 +452,21 @@ class DiffusionDataset(Dataset):
         obs_start = sample_idx - (self.obs_horizon - 1)
         obs_end = sample_idx + 1
 
-        # Robot TCP states (obs_horizon, 6)
-        robot_states = self.zarr_root['data/robot_eef_pose'][obs_start:obs_end]
+        # Read only the raw zarr components self.state_keys actually needs
+        # (obs_horizon, width) each -- see class docstring / state_keys.
+        _state_raw = {}
+        if 'tcp' in self.state_keys:
+            _state_raw['tcp'] = self.zarr_root['data/robot_eef_pose'][obs_start:obs_end][:, :self.tcp_dims] \
+                .astype(np.float32)
+        if 'pwm' in self.state_keys:
+            _state_raw['pwm'] = self.zarr_root['data/pwm_signals'][obs_start:obs_end].astype(np.float32)
+        if 'flowrate' in self.state_keys:
+            _state_raw['flowrate'] = self.zarr_root['data/flowrate'][obs_start:obs_end].astype(np.float32)
+        if 'op_mode' in self.state_keys:  # [ur5_active, flowbot_active]
+            _state_raw['op_mode'] = self.zarr_root['data/operation_mode'][obs_start:obs_end].astype(np.float32)
 
-        # Flowbot PWM states (obs_horizon, 3)
-        pwm_states = self.zarr_root['data/pwm_signals'][obs_start:obs_end].astype(np.float32)
-
-        # Operation mode (obs_horizon, 2): [ur5_active, flowbot_active]
-        op_mode_states = self.zarr_root['data/operation_mode'][obs_start:obs_end].astype(np.float32)
-
-        # Combined state (obs_horizon, tcp_dims+5): tcp[:tcp_dims] + pwm + op_mode
-        states = np.concatenate([robot_states[:, :self.tcp_dims], pwm_states, op_mode_states], axis=-1)
+        # Combined state (obs_horizon, state_dim): components in self.state_keys order.
+        states = np.concatenate([_state_raw[key] for key in self.state_keys], axis=-1)
         states = self._normalize_state(states)
 
         # Images
@@ -397,7 +480,7 @@ class DiffusionDataset(Dataset):
             images = np.zeros((self.obs_horizon, 3, *self._primary_image_size), dtype=np.float32)
 
         sample = {
-            'obs_state': torch.from_numpy(states).float(),    # (obs_horizon, d+5)
+            'obs_state': torch.from_numpy(states).float(),    # (obs_horizon, state_dim)
             'obs_image': torch.from_numpy(images).float(),    # (obs_horizon, 3, H, W)
         }
 

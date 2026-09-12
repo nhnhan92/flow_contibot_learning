@@ -755,10 +755,6 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                     joint_state=current_joints,
                     action=last_action,
                     pwm_signals=prev_pwm,   # command from previous step (matches current image/tcp)
-                    # Sensor reading, not a command we send -- read fresh here
-                    # (like current_tcp/current_joints above), reflecting
-                    # actual measured airflow after this tick's sleep, not a
-                    # pre-tick snapshot the way prev_pwm is.
                     flowrate=fb.last_flowrate,
                     operation_mode=op_mode,
                     camera_frame=camera_frame,
