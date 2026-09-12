@@ -210,6 +210,20 @@ def save_episode(zarr_root, episode_data):
 
     return n_eps
 
+def _sample_target_pc(base, jitter_mm):
+    """
+    Sample a per-episode flowbot target near `base`, for domain-randomizing
+    the collected goal position (helps the trained model generalize instead
+    of only ever seeing one exact target). jitter_mm is a per-axis half-range
+    (mm) for independent uniform noise; 0 (default) disables it and always
+    returns `base` unchanged, matching the pre-jitter behaviour exactly.
+    """
+    base = np.asarray(base, dtype=float)
+    if jitter_mm <= 0:
+        return base.copy()
+    return base + np.random.uniform(-jitter_mm, jitter_mm, size=3)
+
+
 def _servo_toward(arm, is_franka, target_pose, dt, velocity, acceleration,
                    gain=300, lookahead_time=0.1):
     """
@@ -340,9 +354,15 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
                    'At 10 Hz the default of 10 gives 1 s of released state.')
 @click.option('--target_pc', default=[10.05142857,  36.02857143, 103.45428571], type=(float, float, float),
               help='Target point cloud position for flowbot to reach (x, y, z) in meters.')
+@click.option('--target_pc_jitter', default=0.0, type=float,
+              help='Per-axis uniform jitter (mm) added to --target_pc, resampled fresh each time '
+                   "'C' starts a new recording -- so each collected episode's flowbot target is a "
+                   'slightly different point near --target_pc instead of always the exact same one. '
+                   '0 (default) disables jitter, always using --target_pc exactly.')
 def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_camera_wrist,no_camera_global,
          camera_width, camera_height, camera_fps, arduino_port, flowbot_freqency,
-         flowbot_speed_factor, frequency, max_pos_speed, max_rot_speed, deadzone, release_frames, target_pc):
+         flowbot_speed_factor, frequency, max_pos_speed, max_rot_speed, deadzone, release_frames,
+         target_pc, target_pc_jitter):
 
     print("="*60)
     print("   PICK-PLACE DATA COLLECTION WITH CAMERA")
@@ -456,6 +476,14 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
     episode_count = 0
     iter_count = 0
 
+    # Flowbot target: target_pc_base is the CLI-provided nominal point;
+    # target_pc is the per-episode (possibly jittered) point actually used --
+    # resampled fresh each time 'C' starts a new recording (see 'C' handler
+    # below). Also sampled once here so a target already exists if the
+    # operator drives the flowbot before the first recording starts.
+    target_pc_base = np.asarray(target_pc, dtype=float)
+    target_pc = _sample_target_pc(target_pc_base, target_pc_jitter)
+
     # Get initial pose
     tcp_pose = ur5.get_tcp_pose()
     init_pose = INIT_POSE_FRANKA if is_franka else INIT_POSE_UR5E
@@ -504,6 +532,12 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                     if not is_recording:
                         episode_buffer.reset()
                         is_recording = True
+                        # Resample the flowbot target fresh for this episode
+                        # (no-op, always target_pc_base, if --target_pc_jitter
+                        # is 0) -- see target_pc_base's setup comment above.
+                        target_pc = _sample_target_pc(target_pc_base, target_pc_jitter)
+                        if target_pc_jitter > 0:
+                            print(f"    Target pc (jittered): {np.round(target_pc, 3).tolist()}")
                         print("\n>>> RECORDING STARTED <<<\n")
 
                 elif key in ['s', 'S']:
