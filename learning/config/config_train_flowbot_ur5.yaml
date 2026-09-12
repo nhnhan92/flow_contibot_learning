@@ -60,9 +60,9 @@ tcp_dims: 3           # 3 → xyz only state (8D); 6 → xyz+rotation state (11D
 # the dataset and errors out on a mismatch):
 #   joint_velocity: 7 (joint velocities, rad/s) + pwm (3) + op_mode (2) = 12
 #   position:       tcp_dims(3) + pwm (3) + op_mode (2) = 8   (or 11 if tcp_dims: 6)
-action_dim: 11
+action_dim: 8
 state_keys: ['tcp', 'pwm', 'flowrate', 'op_mode']  # 'tcp'/'pwm'/'flowrate'/'op_mode'
-state_dim: 8
+state_dim: 11
 vision_feature_dim: 512
 state_feature_dim: 128
 num_diffusion_iters: 100  # Number of diffusion training steps (DDPM)
@@ -81,7 +81,7 @@ use_spatial_softmax: true # null = auto (true if use_film_unet else false); or o
 num_keypoints: 32         # SpatialSoftmax keypoints → 64-D per frame (Stanford default)
 
 # Training
-num_epochs: 500
+num_epochs: 200
 batch_size: 64
 learning_rate: 5.0e-5  # Peak LR reached after warmup
 weight_decay: 1.0e-5   # AdamW weight decay
@@ -97,7 +97,7 @@ val_ratio: 0.1        # Validation split ratio
 num_workers: 4        # DataLoader workers
 
 # Early stopping
-early_stopping_patience: 50  # Stop if no improvement for N post-warmup epochs (0 = disabled)
+early_stopping_patience: 25  # Stop if no improvement for N post-warmup epochs (0 = disabled)
 
 # Checkpointing
 output_dir: "/media/protac/Desk SSD/Nhan/trained_models_franka"
