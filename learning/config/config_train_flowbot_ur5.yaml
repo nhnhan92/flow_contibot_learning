@@ -28,7 +28,7 @@ franka_action_space: position
 # --no_camera_wrist). 'global' (camera_0 only), 'wrist' (camera_1 only), or
 # 'both' -- dataset.py raises a clear error at load time if the dataset is
 # missing a camera this setting needs.
-camera_mode: both
+camera_mode: wrist
 
 # Crop + resize (global camera): crop_scale is the crop window size as a
 # multiple of image_size; crop_x/crop_y anchor it in [0,1] (0=left/top,
@@ -88,7 +88,7 @@ ema_max_value: 0.9999  # EMA adaptive decay upper bound (UNet-only, Stanford def
 seed: 42
 
 # LR schedule: linear warmup → cosine decay
-warmup_epochs: 20     # Linear warmup from 0 → peak_lr over first 500 epochs (~16%)
+warmup_epochs: 30     # Linear warmup from 0 → peak_lr over first 500 epochs (~16%)
 lr_min_factor: 0.01    # Cosine decays to peak_lr * 0.01 at the end
 
 # Data
@@ -100,4 +100,4 @@ early_stopping_patience: 50  # Stop if no improvement for N post-warmup epochs (
 
 # Checkpointing
 output_dir: "/media/protac/Desk SSD/Nhan/trained_models_franka"
-save_every: 200       # Save checkpoint every N epochs
+save_every: 50       # Save checkpoint every N epochs
