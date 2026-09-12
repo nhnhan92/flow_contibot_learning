@@ -22,8 +22,10 @@ Hardware:
       checkpoint's camera_mode config ('global', 'wrist', or 'both'),
       matching what it was trained with.
 
-State  (tcp_dims+5 D): robot TCP pose[:tcp_dims] + flowbot pwm (3D) + operation_mode (2D)
-                        Cartesian, both arms.
+State: freely composable via the checkpoint's state_keys config (default
+                        tcp+pwm+op_mode, tcp_dims+5 D) -- see dataset.py's DiffusionDataset
+                        docstring for the full component list (tcp/pwm/flowrate/op_mode) and
+                        RobotDeployment.state_keys for how it's read back at deploy time.
 Action, depends on arm and (Franka only) the checkpoint's franka_action_space
 config (see demo_collect.py's _servo_toward / hardware/franka_robot.py's
 get_joint_velocities() docstrings for why joint_velocity differs from its
@@ -113,7 +115,7 @@ SERVO_ACCEL = 0.05     # m/s^2
 FRANKA_POSITION_VELOCITY = 0.05
 FRANKA_POSITION_ACCEL = 0.05
 
-MAX_TCP_DELTA = 0.02   # m per step -- position control (UR5e, or Franka franka_action_space='position')
+MAX_TCP_DELTA = 0.03   # m per step -- position control (UR5e, or Franka franka_action_space='position')
 MAX_TCP_ROT_DELTA = 0.05   # rad per step, same scope as MAX_TCP_DELTA -- see
                             # the "Fixed TCP rotation" note above: this bounds
                             # accidental large rotation commands (e.g. a wrong
@@ -163,11 +165,31 @@ class DeploymentLogger:
         pred = data['predicted_horizons'] # (N_plans, pred_horizon, 9)
     """
 
-    def __init__(self, log_dir: str, checkpoint_path: str, tcp_dims: int = 3):
+    def __init__(self, log_dir: str, checkpoint_path: str, tcp_dims: int = 3,
+                 state_keys=('tcp', 'pwm', 'op_mode')):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint_path = str(checkpoint_path)
         self.tcp_dims = tcp_dims
+        # Locate 'tcp'/'pwm' within the concatenated state vector (see
+        # RobotDeployment.state_keys / dataset.py's identical scheme) so
+        # log_step can pull them out for the tcp_poses/pwm_actual log
+        # columns regardless of composition/order -- state_raw is no longer
+        # guaranteed to be [tcp, pwm, ...] now that state_keys is configurable.
+        _widths = {'pwm': 3, 'flowrate': 3, 'op_mode': 2}
+        self._tcp_offset = self._pwm_offset = None
+        offset = 0
+        for key in state_keys:
+            width = tcp_dims if key == 'tcp' else _widths[key]
+            if key == 'tcp':
+                self._tcp_offset = offset
+            elif key == 'pwm':
+                self._pwm_offset = offset
+            offset += width
+        if self._tcp_offset is None:
+            print("[DeploymentLogger] 'tcp' not in state_keys -- tcp_poses log will be all zeros.")
+        if self._pwm_offset is None:
+            print("[DeploymentLogger] 'pwm' not in state_keys -- pwm_actual log will be all zeros.")
         self._reset()
 
     def _reset(self):
@@ -190,8 +212,12 @@ class DeploymentLogger:
         """Call once per executed step (after _update_obs_buffer)."""
         d = self.tcp_dims
         self._timestamps.append(time.time())
-        self._tcp_poses.append(state_raw[:d].copy())      # tcp_dims components
-        self._pwm_actual.append(state_raw[d:d+3].copy())
+        tcp = state_raw[self._tcp_offset:self._tcp_offset + d].copy() \
+            if self._tcp_offset is not None else np.zeros(d, dtype=np.float32)
+        pwm = state_raw[self._pwm_offset:self._pwm_offset + 3].copy() \
+            if self._pwm_offset is not None else np.zeros(3, dtype=np.float32)
+        self._tcp_poses.append(tcp)
+        self._pwm_actual.append(pwm)
         self._executed_actions.append(action.copy())
         self._pwm_commanded.append(pwm_commanded.copy())
 
@@ -267,6 +293,18 @@ class RobotDeployment:
         self.obs_horizon = self.config['obs_horizon']
         self.action_horizon = self.config['action_horizon']
         self.tcp_dims = self.config.get('tcp_dims', 3)   # 3=xyz only, 6=xyz+rotation -- state only
+        # Which components make up the state vector, in order -- must match
+        # dataset.py's state_keys exactly (same default) or the observation
+        # fed to the model won't match what it was trained on. Read from the
+        # checkpoint's saved config, never hardcoded, for exactly that reason.
+        self.state_keys = list(self.config.get('state_keys', ['tcp', 'pwm', 'op_mode']))
+        _unknown_state_keys = set(self.state_keys) - {'tcp', 'pwm', 'flowrate', 'op_mode'}
+        if _unknown_state_keys:
+            raise ValueError(
+                f"Checkpoint config has unknown state_keys entry/entries "
+                f"{sorted(_unknown_state_keys)} (expected any of 'tcp', 'pwm', "
+                f"'flowrate', 'op_mode')"
+            )
         self.franka_action_space = self.config.get('franka_action_space', 'joint_velocity')
         if self.is_franka and self.franka_action_space not in ('joint_velocity', 'position'):
             raise ValueError(
@@ -291,6 +329,7 @@ class RobotDeployment:
         self.num_cameras = self.policy.num_cameras   # 1 (single) or 2 (+ wrist), from checkpoint config
         print(f"      obs_horizon={self.obs_horizon}, action_horizon={self.action_horizon}")
         print(f"      tcp_dims={self.tcp_dims}  ({'xyz only' if self.tcp_dims == 3 else 'xyz+rotation'})")
+        print(f"      state_keys={self.state_keys}")
         print(f"      action_dim_arm={self.action_dim_arm} ({'TCP pose' if self.uses_position_action else 'joint velocity'})"
               + (f"  franka_action_space={self.franka_action_space}" if self.is_franka else ""))
         if self.uses_position_action and self.position_command_stride > 1:
@@ -386,6 +425,7 @@ class RobotDeployment:
         self.current_op_mode = np.zeros(2, dtype=np.float32)
 
         print("\n✅ All systems ready!\n")
+        
 
     # ── Low-level observation ─────────────────────────────────────────────────
 
@@ -408,7 +448,11 @@ class RobotDeployment:
         Read current robot state and camera image(s).
 
         Returns:
-            state_raw       : np.ndarray (tcp_dims+5,) — [tcp[:tcp_dims], pwm1,pwm2,pwm3, ur5_active, flowbot_active]
+            state_raw       : np.ndarray (state_dim,) — self.state_keys components
+                               concatenated in order (see dataset.py's identical
+                               state_keys scheme -- this MUST match whatever the
+                               checkpoint was trained with, which is why it's read
+                               from the checkpoint's saved config, not hardcoded).
             image_raw       : np.ndarray (H,W,3) uint8 — cropped primary-camera frame
                                (global, unless camera_mode=='wrist')
             image_raw_wrist : np.ndarray (H,W,3) uint8, or None unless camera_mode=='both' — cropped wrist camera frame
@@ -419,8 +463,16 @@ class RobotDeployment:
         # PWM from previous step — matches the physical state visible in the current image
         pwm = self.prev_pwm.copy()                                                          # (3,)
 
-        # Operation mode from last executed action (2D)
-        state_raw = np.concatenate([tcp_pose[:self.tcp_dims], pwm, self.current_op_mode])  # (tcp_dims+5,)
+        # Live value for each possible state_keys component -- see dataset.py's
+        # STATE_COMPONENT_ZARR_KEY for the training-time equivalent (there it's a
+        # zarr field; here it's whatever hardware/tracked value corresponds to it).
+        _state_source = {
+            'tcp':      tcp_pose[:self.tcp_dims],
+            'pwm':      pwm,
+            'flowrate': self.fb.last_flowrate,
+            'op_mode':  self.current_op_mode,
+        }
+        state_raw = np.concatenate([_state_source[key] for key in self.state_keys])  # (state_dim,)
 
         # Camera image(s)
         camera_frame, _ = self.cam.get_frames()
@@ -579,8 +631,17 @@ class RobotDeployment:
         op_mode_pred = np.clip(np.round(action[d+3:d+5]), 0, 1).astype(int)
 
         # PWM offset, flowbot-active steps only.
+        if op_mode_pred[1] == 1 and np.all(pwm_raw<5):
+            pwm_raw = np.array([5, 5, 0])
+        elif op_mode_pred[1] == 1 and np.any(5<=pwm_raw) and np.all(pwm_raw<18):
+            pwm_raw = pwm_raw + np.array([0, 0, 0])
+            pwm_raw[2] = 0
+        elif op_mode_pred[1] == 1 and np.any(18<=pwm_raw) :
+            pwm_raw = pwm_raw + np.array([0, 0, 0])
+            pwm_raw[2] = 0
+        # pwm_raw[2] = 0
         # if op_mode_pred[1] == 1:
-        #     pwm_raw = pwm_raw + np.array([3, 0, 1])
+        #     pwm_raw = pwm_raw + np.array([4, 7, -1])
 
         pwm_int    = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
 
@@ -706,6 +767,8 @@ class RobotDeployment:
         """
         if move_to_start:
             self.move_to_start()
+            input("    Press ENTER to start ...............")
+            
 
         # Reset internal state so the new episode starts clean (op_mode=[0,0], PWM=0).
         # This prevents carryover from the previous episode biasing the first observation.
@@ -782,8 +845,15 @@ class RobotDeployment:
                     state_raw = self._update_obs_buffer()
                     if self.verbose:
                         _, image_raw, image_wrist = self._get_raw_observation()   # second read just for display
-                        cv2.imshow("Live", cv2.cvtColor(image_raw, cv2.COLOR_RGB2BGR))
-                        cv2.waitKey(1)
+                        # combined = np.hstack([image_raw, image_wrist])
+                        # cv2.putText(combined, f"RGB {self.image_size[1]}x{self.image_size[0]}", (10, 20),
+                        #                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                        # cv2.putText(combined, f"Depth {self.image_size[1]}x{self.image_size[0]}", (self.image_size[1] + 10, 20),
+                        #             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                        # cv2.imshow("Global", cv2.cvtColor(image_raw, cv2.COLOR_RGB2BGR))
+                        # cv2.waitKey(1)
+                        # cv2.imshow("Wrist", cv2.cvtColor(image_wrist, cv2.COLOR_RGB2BGR))
+                        # cv2.waitKey(1)
                     if logger is not None:
                         logger.log_step(state_raw, action, pwm_int)
 
@@ -807,6 +877,7 @@ class RobotDeployment:
             if self.is_franka_joint_vel:
                 self.robot.stop_joint_velocity()
         else:
+            self.move_to_start()
             self.robot.stop()
         time.sleep(0.5)
 
@@ -859,9 +930,9 @@ def main():
                         help='Arduino serial port for Flowbot')
     parser.add_argument('--flowbot_baud',  type=int,   default=115200,
                         help='Flowbot serial baud rate')
-    parser.add_argument('--max_steps',     type=int,   default=450,
+    parser.add_argument('--max_steps',     type=int,   default=500,
                         help='Max steps per episode')
-    parser.add_argument('--num_episodes',  type=int,   default=1,
+    parser.add_argument('--num_episodes', '-ep',  type=int,   default=1,
                         help='Number of episodes to run')
     parser.add_argument('--device',        type=str,   default='cuda',
                         help='Inference device (cuda/cpu)')
@@ -907,7 +978,8 @@ def main():
             log_dir = Path(args.log_dir)
             if not log_dir.is_absolute():
                 log_dir = Path(DEPLOY_DIR) / 'deploy_logs' / log_dir
-            logger = DeploymentLogger(str(log_dir), args.checkpoint, tcp_dims=robot.tcp_dims)
+            logger = DeploymentLogger(str(log_dir), args.checkpoint, tcp_dims=robot.tcp_dims,
+                                      state_keys=robot.state_keys)
             print(f"Logging enabled → {log_dir}")
         else:
             logger = None

@@ -61,7 +61,8 @@ import select
 import termios
 import tty
 import platform
-INIT_POSE_UR5E = np.array([0.115, -0.31, 0.45, 0.917, -3.0, 0.0])
+# INIT_POSE_UR5E = np.array([0.115, -0.31, 0.45, 0.917, -3.0, 0.0])
+INIT_POSE_UR5E = np.array([0.115, -0.31, 0.45, 0.885, -2.85, -0.044])
 INIT_POSE_FRANKA = np.array([0.45, 0.15, 0.5, 3.14, 0.0, -0.05])
 class DataBuffer:
     """Buffer for collecting episode data with camera(s).
@@ -87,19 +88,21 @@ class DataBuffer:
         self.joint_states = []
         self.actions = []
         self.pwm_signals = []
+        self.flowrates = []
         self.operation_modes = []
         if self.with_camera_global:
             self.camera_frames = []        # RGB images, global camera (camera_0)
         if self.with_camera_wrist:
             self.camera_frames_wrist = []  # RGB images, wrist camera (camera_1)
 
-    def add(self, timestamp, robot_state, joint_state, pwm_signals, action,
+    def add(self, timestamp, robot_state, joint_state, pwm_signals, action, flowrate,
             operation_mode=None, camera_frame=None, camera_frame_wrist=None):
         self.timestamps.append(timestamp)
         self.robot_states.append(robot_state.copy())
         self.joint_states.append(joint_state.copy())
         self.actions.append(action.copy())
         self.pwm_signals.append(pwm_signals.copy())
+        self.flowrates.append(flowrate.copy())
         if operation_mode is not None:
             self.operation_modes.append(np.array(operation_mode, dtype=np.uint8))
         else:
@@ -123,6 +126,7 @@ class DataBuffer:
             'robot_eef_pose': np.array(self.robot_states),
             'robot_joint': np.array(self.joint_states),
             'pwm_signals': np.array(self.pwm_signals),
+            'flowrate': np.array(self.flowrates),  # (T, 3) L/min, one per actuator -- see flowbot.last_flowrate
             'action': np.array(self.actions),
             'operation_mode': np.array(self.operation_modes, dtype=np.uint8),  # (T, 2)
         }
@@ -206,6 +210,22 @@ def save_episode(zarr_root, episode_data):
     episode_ends[-1] = new_len
 
     return n_eps
+
+def _sample_target_pc(base, jitter_mm):
+    """
+    Sample a per-episode flowbot target near `base`, for domain-randomizing
+    the collected goal position (helps the trained model generalize instead
+    of only ever seeing one exact target). jitter_mm is a per-axis half-range
+    (mm) for independent uniform noise; 0 (default) disables it and always
+    returns `base` unchanged, matching the pre-jitter behaviour exactly.
+    """
+    base = np.asarray(base, dtype=float)
+    if jitter_mm <= 0:
+        return base.copy()
+    randomized_target_pc = base + np.random.uniform(-jitter_mm, jitter_mm, size=3)
+    print(f"randomized target pc = {randomized_target_pc}")
+    return randomized_target_pc
+
 
 def _servo_toward(arm, is_franka, target_pose, dt, velocity, acceleration,
                    gain=300, lookahead_time=0.1):
@@ -332,12 +352,20 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--max_pos_speed', default=0.07, type=float)
 @click.option('--max_rot_speed', default=0.05, type=float)
 @click.option('--deadzone', default=0.2, type=float, help='Spacemouse threshold')
-@click.option('--release_frames', default=10, type=int,
+@click.option('--release_frames', default=5, type=int,
               help='Frames to record after release (both-button press). '
                    'At 10 Hz the default of 10 gives 1 s of released state.')
+@click.option('--target_pc', default=[11.05142857,  39.2857143, 103.45428571], type=(float, float, float),
+              help='Target point cloud position for flowbot to reach (x, y, z) in meters.')
+@click.option('--target_pc_jitter', default=0.8, type=float,
+              help='Per-axis uniform jitter (mm) added to --target_pc, resampled fresh each time '
+                   "'C' starts a new recording -- so each collected episode's flowbot target is a "
+                   'slightly different point near --target_pc instead of always the exact same one. '
+                   '0 (default) disables jitter, always using --target_pc exactly.')
 def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_camera_wrist,no_camera_global,
          camera_width, camera_height, camera_fps, arduino_port, flowbot_freqency,
-         flowbot_speed_factor, frequency, max_pos_speed, max_rot_speed, deadzone, release_frames):
+         flowbot_speed_factor, frequency, max_pos_speed, max_rot_speed, deadzone, release_frames,
+         target_pc, target_pc_jitter):
 
     print("="*60)
     print("   PICK-PLACE DATA COLLECTION WITH CAMERA")
@@ -424,7 +452,7 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                  pwm_max= 26,
                  enable_plot = True,
                 frequency = flowbot_freqency,
-                max_pos_speed = 40,
+                max_pos_speed = 30,
                 draw_hull = True)
     fb.start()
 
@@ -450,6 +478,14 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
     episode_buffer = DataBuffer(with_camera_global=with_camera_global, with_camera_wrist=with_camera_wrist)
     episode_count = 0
     iter_count = 0
+
+    # Flowbot target: target_pc_base is the CLI-provided nominal point;
+    # target_pc is the per-episode (possibly jittered) point actually used --
+    # resampled fresh each time 'C' starts a new recording (see 'C' handler
+    # below). Also sampled once here so a target already exists if the
+    # operator drives the flowbot before the first recording starts.
+    target_pc_base = np.asarray(target_pc, dtype=float)
+    target_pc = _sample_target_pc(target_pc_base, target_pc_jitter)
 
     # Get initial pose
     tcp_pose = ur5.get_tcp_pose()
@@ -499,6 +535,12 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                     if not is_recording:
                         episode_buffer.reset()
                         is_recording = True
+                        # Resample the flowbot target fresh for this episode
+                        # (no-op, always target_pc_base, if --target_pc_jitter
+                        # is 0) -- see target_pc_base's setup comment above.
+                        target_pc = _sample_target_pc(target_pc_base, target_pc_jitter)
+                        if target_pc_jitter > 0:
+                            print(f"    Target pc (jittered): {np.round(target_pc, 3).tolist()}")
                         print("\n>>> RECORDING STARTED <<<\n")
 
                 elif key in ['s', 'S']:
@@ -550,19 +592,32 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                 except Exception:
                     pass
                 target_pose = robot.get_tcp_pose()
-
+            ARRIVAL_THRESHOLD_MM = 1.0
+            # if button_status[1] and not button_status[0]:          # right btn: flowbot
+            #     cmd_sm = sm.get_latest_xyz()
+            #     xyz_fb = cmd_sm * flowbot_speed_factor
+            #     xyz_fb[2] = -xyz_fb[2]
+            #     xyz_fb[0] = -xyz_fb[0]
+            #     # copied_xyz = xyz_fb.copy()
+            #     # xyz_fb[2] = -xyz_fb[2]
+            #     # xyz_fb[1] = -copied_xyz[0]  # for better visualization during teleop
+            #     # xyz_fb[0] = -copied_xyz[1]
+            #     xyz_fb = np.where(np.abs(xyz_fb) < deadzone, 0.0, xyz_fb)
+            #     fb.step(xyz_fb)
+            #     fb.update_plot()
+            #     print(f"current pc = {fb.pc}")
+            
             if button_status[1] and not button_status[0]:          # right btn: flowbot
-                cmd_sm = sm.get_latest_xyz()
-                xyz_fb = cmd_sm * flowbot_speed_factor
-                xyz_fb[2] = -xyz_fb[2]
-                xyz_fb[0] = -xyz_fb[0]
-                # copied_xyz = xyz_fb.copy()
-                # xyz_fb[2] = -xyz_fb[2]
-                # xyz_fb[1] = -copied_xyz[0]  # for better visualization during teleop
-                # xyz_fb[0] = -copied_xyz[1]
-                xyz_fb = np.where(np.abs(xyz_fb) < deadzone, 0.0, xyz_fb)
-                fb.step(xyz_fb)
-                fb.update_plot()
+                d    = target_pc - fb.pc
+                dist = float(np.linalg.norm(d))
+                if dist < ARRIVAL_THRESHOLD_MM:
+                    pass
+                else:
+                    step_scale = min(1.0, dist / (fb.max_pos_speed * fb.dt + 1e-12))
+                    direction  = (d / dist) * step_scale
+                    pwm        = fb.step(direction)
+                    fb.update_plot()
+
 
             elif button_status[0] and not button_status[1]:        # left btn: UR5e/Franka
                 cmd_arm = sm.get_latest_xyz()
@@ -656,6 +711,7 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                             joint_state=rel_joints,
                             action=last_action,       # robot not moving (~0 velocity for Franka)
                             pwm_signals=fb.last_pwm, # = [0,0,0] after reset
+                            flowrate=fb.last_flowrate,
                             operation_mode=np.array([1, 1], dtype=np.uint8),
                             camera_frame=rel_frame,
                             camera_frame_wrist=rel_frame_wrist,
@@ -699,6 +755,7 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                     joint_state=current_joints,
                     action=last_action,
                     pwm_signals=prev_pwm,   # command from previous step (matches current image/tcp)
+                    flowrate=fb.last_flowrate,
                     operation_mode=op_mode,
                     camera_frame=camera_frame,
                     camera_frame_wrist=camera_frame_wrist,

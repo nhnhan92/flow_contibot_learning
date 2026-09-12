@@ -136,6 +136,7 @@ def main():
         image_size=tuple(config['image_size']),
         exclude_episodes=exclude_episodes,
         tcp_dims=config.get('tcp_dims', 3),
+        state_keys=config.get('state_keys', ('tcp', 'pwm', 'op_mode')),
         crop_scale=config.get('crop_scale', 1.5),
         crop_x=config.get('crop_x', 0.5),
         crop_y=config.get('crop_y', 0.5),
@@ -150,9 +151,9 @@ def main():
     action_space_str = f", franka_action_space: {dataset.franka_action_space}" if dataset.is_franka else ""
     print(f"Arm: {arm}  |  camera_mode: {camera_mode}{action_space_str}")
     print(f"Total samples: {len(dataset)}")
-    d = dataset.tcp_dims
-    print(f"State  TCP range - min: {dataset.state_min[:d]}, max: {dataset.state_max[:d]}")
-    print(f"State  PWM range - min: {dataset.state_min[d:d+3]}, max: {dataset.state_max[d:d+3]}")
+    # (dataset._compute_stats() already printed a full per-component state
+    # breakdown at construction time -- see dataset.py -- so nothing repeated
+    # here; state composition is no longer a fixed tcp+pwm layout to summarize.)
     a = dataset.action_dim_raw
     action_label = "TCP" if dataset.uses_position_action else "joint velocity"
     print(f"Action {action_label} range - min: {dataset.action_min[:a]}, max: {dataset.action_max[:a]}")
@@ -195,7 +196,7 @@ def main():
     # without updating action_dim) with a clear message instead of a cryptic
     # shape error deep in the first training step.
     expected_action_dim = dataset.action_dim_raw + 5
-    expected_state_dim = dataset.tcp_dims + 5
+    expected_state_dim = dataset.state_dim
     if config['action_dim'] != expected_action_dim:
         raise ValueError(
             f"config action_dim={config['action_dim']} but this dataset "
@@ -205,9 +206,9 @@ def main():
         )
     if config['state_dim'] != expected_state_dim:
         raise ValueError(
-            f"config state_dim={config['state_dim']} but tcp_dims={dataset.tcp_dims} "
-            f"produces {expected_state_dim}D states. Set state_dim: {expected_state_dim} "
-            f"in the config."
+            f"config state_dim={config['state_dim']} but state_keys={dataset.state_keys} "
+            f"(tcp_dims={dataset.tcp_dims}) produces {expected_state_dim}D states. "
+            f"Set state_dim: {expected_state_dim} in the config."
         )
 
     print("\nInitializing model...")
