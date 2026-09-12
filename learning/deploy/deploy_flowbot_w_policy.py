@@ -581,9 +581,14 @@ class RobotDeployment:
 
         # PWM offset, flowbot-active steps only.
         if op_mode_pred[1] == 1 and np.all(pwm_raw<5):
-            pwm_raw = np.array([5, 5, 5])
-        elif op_mode_pred[1] == 1 and np.any(pwm_raw>=5):
-            pwm_raw = pwm_raw + np.array([3, 6, 0])
+            pwm_raw = np.array([5, 5, 0])
+        elif op_mode_pred[1] == 1 and np.any(5<=pwm_raw) and np.all(pwm_raw<18):
+            pwm_raw = pwm_raw + np.array([0, 0, 0])
+            pwm_raw[2] = 0
+        elif op_mode_pred[1] == 1 and np.any(18<=pwm_raw) :
+            pwm_raw = pwm_raw + np.array([0, 0, 0])
+            pwm_raw[2] = 0
+        # pwm_raw[2] = 0
         # if op_mode_pred[1] == 1:
         #     pwm_raw = pwm_raw + np.array([4, 7, -1])
 
@@ -794,10 +799,10 @@ class RobotDeployment:
                         #                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                         # cv2.putText(combined, f"Depth {self.image_size[1]}x{self.image_size[0]}", (self.image_size[1] + 10, 20),
                         #             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                        cv2.imshow("Global", cv2.cvtColor(image_raw, cv2.COLOR_RGB2BGR))
-                        cv2.waitKey(1)
-                        cv2.imshow("Wrist", cv2.cvtColor(image_wrist, cv2.COLOR_RGB2BGR))
-                        cv2.waitKey(1)
+                        # cv2.imshow("Global", cv2.cvtColor(image_raw, cv2.COLOR_RGB2BGR))
+                        # cv2.waitKey(1)
+                        # cv2.imshow("Wrist", cv2.cvtColor(image_wrist, cv2.COLOR_RGB2BGR))
+                        # cv2.waitKey(1)
                     if logger is not None:
                         logger.log_step(state_raw, action, pwm_int)
 
@@ -876,7 +881,7 @@ def main():
                         help='Flowbot serial baud rate')
     parser.add_argument('--max_steps',     type=int,   default=500,
                         help='Max steps per episode')
-    parser.add_argument('--num_episodes',  type=int,   default=1,
+    parser.add_argument('--num_episodes', '-ep',  type=int,   default=1,
                         help='Number of episodes to run')
     parser.add_argument('--device',        type=str,   default='cuda',
                         help='Inference device (cuda/cpu)')
