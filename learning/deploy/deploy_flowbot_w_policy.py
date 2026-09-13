@@ -75,7 +75,8 @@ _DEFAULT_ROBOT_IP = {"ur5": "150.65.146.87", "franka": "172.16.0.2"}
 # move_to_start() -- UR5e episodes were starting from the wrong physical
 # pose -- and self.tcp_fixed_rotation below -- see the Franka rotation bug
 # this was found alongside.)
-DEFAULT_START_POSE = [0.115, -0.31, 0.45, 0.917, -3.0, 0.0]
+# DEFAULT_START_POSE = [0.115, -0.31, 0.45, 0.917, -3.0, 0.0]
+DEFAULT_START_POSE = [0.115, -0.31, 0.45, 0.885, -2.85, -0.044]
 
 # Franka start pose -- matches init_pose in demo_collect.py, i.e. where
 # Franka demonstrations actually started from. (Currently identical to
@@ -632,13 +633,13 @@ class RobotDeployment:
 
         # PWM offset, flowbot-active steps only.
         if op_mode_pred[1] == 1 and np.all(pwm_raw<5):
-            pwm_raw = np.array([5, 5, 0])
-        elif op_mode_pred[1] == 1 and np.any(5<=pwm_raw) and np.all(pwm_raw<18):
-            pwm_raw = pwm_raw + np.array([0, 0, 0])
-            pwm_raw[2] = 0
-        elif op_mode_pred[1] == 1 and np.any(18<=pwm_raw) :
-            pwm_raw = pwm_raw + np.array([0, 0, 0])
-            pwm_raw[2] = 0
+            pwm_raw = np.array([2, 5, 0])
+        # elif op_mode_pred[1] == 1 and np.any(5<=pwm_raw) and np.all(pwm_raw<18):
+        #     pwm_raw = pwm_raw + np.array([0, 0, 0])
+        #     pwm_raw[2] = 0
+        # elif op_mode_pred[1] == 1 and np.any(18<=pwm_raw) :
+        #     pwm_raw = pwm_raw + np.array([0, 0, 0])
+        #     pwm_raw[2] = 0
         # pwm_raw[2] = 0
         # if op_mode_pred[1] == 1:
         #     pwm_raw = pwm_raw + np.array([4, 7, -1])
@@ -786,7 +787,7 @@ class RobotDeployment:
 
         total_steps = 0
         episode_start = time.time()
-
+        number_release = 0
         try:
             while total_steps < max_steps:
                 if self.is_franka_joint_vel:
@@ -832,9 +833,13 @@ class RobotDeployment:
                     if op_mode_pred[0] == 1 and op_mode_pred[1] == 1:
                         print("\n🔓 Release phase")
                         self.fb.release()   # sends 'r' to Arduino (triggers suction release)
+                        print("Resetting Flowbot ...")
+                        self.fb.reset()
                         total_steps += 1
-                        raise _ReleaseDetected
-                    
+                        print(f"number release = {number_release}")
+                        if number_release >=2:
+                            raise _ReleaseDetected
+                    number_release += 1
                     step_dt = DT_FLOWBOT if op_mode_pred[1] == 1 else DT
                     elapsed = time.time() - t_step_start
                     sleep_time = step_dt - elapsed
