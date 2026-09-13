@@ -142,10 +142,6 @@ SERVO_LOOKAHEAD = 0.1   # s
 SERVO_GAIN = 300
 
 
-class _ReleaseDetected(Exception):
-    """Internal sentinel: raised when op_mode [1,1] is predicted to exit episode loop."""
-
-
 class DeploymentLogger:
     """
     Logs model predictions and robot states during a deployment episode.
@@ -787,7 +783,6 @@ class RobotDeployment:
 
         total_steps = 0
         episode_start = time.time()
-        number_release = 0
         try:
             while total_steps < max_steps:
                 if self.is_franka_joint_vel:
@@ -828,18 +823,8 @@ class RobotDeployment:
                         pwm_int = self.current_pwm.copy()
                         op_mode_pred = np.zeros(2, dtype=int)
                         self.current_op_mode = op_mode_pred.astype(np.float32)
-
-                    # Release phase detected: hold 1 s then end episode immediately
                     if op_mode_pred[0] == 1 and op_mode_pred[1] == 1:
-                        print("\n🔓 Release phase")
                         self.fb.release()   # sends 'r' to Arduino (triggers suction release)
-                        print("Resetting Flowbot ...")
-                        self.fb.reset()
-                        total_steps += 1
-                        print(f"number release = {number_release}")
-                        if number_release >=2:
-                            raise _ReleaseDetected
-                    number_release += 1
                     step_dt = DT_FLOWBOT if op_mode_pred[1] == 1 else DT
                     elapsed = time.time() - t_step_start
                     sleep_time = step_dt - elapsed
@@ -864,17 +849,11 @@ class RobotDeployment:
 
                     total_steps += 1
 
-        except _ReleaseDetected:
-            print("✅ Episode ended by release phase")
-            # time.sleep(1)
-            # print("Resetting Flowbot ...")
-            # self.fb.reset()
-            self.move_to_start()
         except KeyboardInterrupt:
             print("\n⚠️  Episode interrupted by user")
 
         elapsed_total = time.time() - episode_start
-        print(f"\n✅ Episode finished: {total_steps} steps in {elapsed_total:.1f}s")
+        print(f"\n✅ Episode finished: {total_steps} steps in {elapsed_total:.1f}s ")
         print("Resetting Flowbot ...")
         self.fb.reset()
         if self.is_franka:
