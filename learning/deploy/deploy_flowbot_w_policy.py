@@ -630,8 +630,8 @@ class RobotDeployment:
         # PWM offset, flowbot-active steps only.
         if op_mode_pred[1] == 1 and np.all(pwm_raw<5):
             pwm_raw = np.array([2, 5, 0])
-        # elif op_mode_pred[1] == 1 and np.any(5<=pwm_raw) and np.all(pwm_raw<18):
-        #     pwm_raw = pwm_raw + np.array([0, 0, 0])
+        elif op_mode_pred[1] == 1 and np.any(5<=pwm_raw) and np.all(pwm_raw<18):
+            pwm_raw = pwm_raw + np.array([1, 2, 0])
         #     pwm_raw[2] = 0
         # elif op_mode_pred[1] == 1 and np.any(18<=pwm_raw) :
         #     pwm_raw = pwm_raw + np.array([0, 0, 0])
@@ -825,6 +825,9 @@ class RobotDeployment:
                         self.current_op_mode = op_mode_pred.astype(np.float32)
                     if op_mode_pred[0] == 1 and op_mode_pred[1] == 1:
                         self.fb.release()   # sends 'r' to Arduino (triggers suction release)
+                        print("Resetting Flowbot ...")
+                        self.fb.reset()
+                        time.sleep(1)
                     step_dt = DT_FLOWBOT if op_mode_pred[1] == 1 else DT
                     elapsed = time.time() - t_step_start
                     sleep_time = step_dt - elapsed

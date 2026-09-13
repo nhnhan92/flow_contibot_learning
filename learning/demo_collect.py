@@ -668,11 +668,8 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
             elif button_status[0] and button_status[1]:            # both btns: release
                 print("======== RELEASING =========")
                 fb.release()      # sends 'r' hardware command
-                time.sleep(0.5)
-                fb.reset()        # sets last_pwm = [0,0,0] and sends "0 0 0"
-                fb.update_plot()
+                time.sleep(0.5)                
                 
- 
                 if is_recording:
                     print(f"  Recording {release_frames} release frames ...")
                     for _ in range(release_frames):
@@ -718,6 +715,8 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                         )
                     print(f"  Release recorded ({release_frames} steps, PWM={fb.last_pwm.tolist()})")
 
+                fb.reset()        # sets last_pwm = [0,0,0] and sends "0 0 0"
+                fb.update_plot()
             # ── 3. Sleep BEFORE reading observations ──────────────────────────
 
             elapsed = time.time() - loop_start
