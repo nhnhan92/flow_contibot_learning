@@ -43,11 +43,21 @@ import sys
 import time
 import datetime
 import argparse
+import select
 import numpy as np
 import torch
 import cv2
 from pathlib import Path
 from collections import deque
+
+try:
+    import termios
+    import tty
+except ImportError:
+    # Windows: no POSIX tty support -- the 'E' end-episode keyboard flag
+    # (see run_episode) is simply unavailable there; Ctrl+C still works.
+    termios = None
+    tty = None
 
 # Add parent directory to path
 DEPLOY_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -780,8 +790,25 @@ class RobotDeployment:
 
         total_steps = 0
         episode_start = time.time()
+        end_requested = False
+
+        # Non-blocking 'E' keypress -> end this episode early (finishes the
+        # current step, then falls through to the same Flowbot-reset +
+        # move_to_start cleanup as a normal/max_steps end -- robot stays
+        # connected). Only available on a real interactive POSIX tty; falls
+        # back silently (Ctrl+C still works) otherwise, e.g. piped stdin or
+        # Windows.
+        old_settings = None
+        if termios is not None and sys.stdin.isatty():
+            try:
+                old_settings = termios.tcgetattr(sys.stdin)
+                tty.setcbreak(sys.stdin.fileno())
+                print("Press 'E' at any time to end this episode now (Flowbot resets, arm returns to start).")
+            except Exception:
+                old_settings = None
+
         try:
-            while total_steps < max_steps:
+            while total_steps < max_steps and not end_requested:
                 if self.is_franka_joint_vel:
                     self.robot.stop_joint_velocity()
                 t_plan_start = time.time()
@@ -798,6 +825,13 @@ class RobotDeployment:
                 for step_i in range(self.action_horizon):
                     if total_steps >= max_steps:
                         break
+
+                    if old_settings is not None and select.select([sys.stdin], [], [], 0)[0]:
+                        key = sys.stdin.read(1)
+                        if key in ('e', 'E'):
+                            print("\n🚩 End-episode flag raised -- finishing this episode now ...")
+                            end_requested = True
+                            break
 
                     t_step_start = time.time()
 
@@ -852,6 +886,9 @@ class RobotDeployment:
 
         except KeyboardInterrupt:
             print("\n⚠️  Episode interrupted by user")
+        finally:
+            if old_settings is not None:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
 
         elapsed_total = time.time() - episode_start
         print(f"\n✅ Episode finished: {total_steps} steps in {elapsed_total:.1f}s ")
