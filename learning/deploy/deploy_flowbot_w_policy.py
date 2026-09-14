@@ -75,7 +75,8 @@ _DEFAULT_ROBOT_IP = {"ur5": "150.65.146.87", "franka": "172.16.0.2"}
 # move_to_start() -- UR5e episodes were starting from the wrong physical
 # pose -- and self.tcp_fixed_rotation below -- see the Franka rotation bug
 # this was found alongside.)
-DEFAULT_START_POSE = [0.115, -0.31, 0.45, 0.917, -3.0, 0.0]
+# DEFAULT_START_POSE = [0.115, -0.31, 0.45, 0.917, -3.0, 0.0]
+DEFAULT_START_POSE = [0.115, -0.31, 0.45, 0.885, -2.85, -0.044]
 
 # Franka start pose -- matches init_pose in demo_collect.py, i.e. where
 # Franka demonstrations actually started from. (Currently identical to
@@ -139,10 +140,6 @@ _DEFAULT_CAMERA_SERIAL_WRIST  = '841512070635'
 
 SERVO_LOOKAHEAD = 0.1   # s
 SERVO_GAIN = 300
-
-
-class _ReleaseDetected(Exception):
-    """Internal sentinel: raised when op_mode [1,1] is predicted to exit episode loop."""
 
 
 class DeploymentLogger:
@@ -632,13 +629,13 @@ class RobotDeployment:
 
         # PWM offset, flowbot-active steps only.
         if op_mode_pred[1] == 1 and np.all(pwm_raw<5):
-            pwm_raw = np.array([5, 5, 0])
+            pwm_raw = np.array([2, 5, 0])
         elif op_mode_pred[1] == 1 and np.any(5<=pwm_raw) and np.all(pwm_raw<18):
-            pwm_raw = pwm_raw + np.array([0, 0, 0])
-            pwm_raw[2] = 0
-        elif op_mode_pred[1] == 1 and np.any(18<=pwm_raw) :
-            pwm_raw = pwm_raw + np.array([0, 0, 0])
-            pwm_raw[2] = 0
+            pwm_raw = pwm_raw + np.array([1, 2, 0])
+        #     pwm_raw[2] = 0
+        # elif op_mode_pred[1] == 1 and np.any(18<=pwm_raw) :
+        #     pwm_raw = pwm_raw + np.array([0, 0, 0])
+        #     pwm_raw[2] = 0
         # pwm_raw[2] = 0
         # if op_mode_pred[1] == 1:
         #     pwm_raw = pwm_raw + np.array([4, 7, -1])
@@ -786,7 +783,6 @@ class RobotDeployment:
 
         total_steps = 0
         episode_start = time.time()
-
         try:
             while total_steps < max_steps:
                 if self.is_franka_joint_vel:
@@ -827,14 +823,11 @@ class RobotDeployment:
                         pwm_int = self.current_pwm.copy()
                         op_mode_pred = np.zeros(2, dtype=int)
                         self.current_op_mode = op_mode_pred.astype(np.float32)
-
-                    # Release phase detected: hold 1 s then end episode immediately
                     if op_mode_pred[0] == 1 and op_mode_pred[1] == 1:
-                        print("\n🔓 Release phase")
                         self.fb.release()   # sends 'r' to Arduino (triggers suction release)
-                        total_steps += 1
-                        raise _ReleaseDetected
-                    
+                        print("Resetting Flowbot ...")
+                        self.fb.reset()
+                        time.sleep(1)
                     step_dt = DT_FLOWBOT if op_mode_pred[1] == 1 else DT
                     elapsed = time.time() - t_step_start
                     sleep_time = step_dt - elapsed
@@ -859,17 +852,11 @@ class RobotDeployment:
 
                     total_steps += 1
 
-        except _ReleaseDetected:
-            print("✅ Episode ended by release phase")
-            # time.sleep(1)
-            # print("Resetting Flowbot ...")
-            # self.fb.reset()
-            self.move_to_start()
         except KeyboardInterrupt:
             print("\n⚠️  Episode interrupted by user")
 
         elapsed_total = time.time() - episode_start
-        print(f"\n✅ Episode finished: {total_steps} steps in {elapsed_total:.1f}s")
+        print(f"\n✅ Episode finished: {total_steps} steps in {elapsed_total:.1f}s ")
         print("Resetting Flowbot ...")
         self.fb.reset()
         if self.is_franka:
