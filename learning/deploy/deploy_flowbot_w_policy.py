@@ -632,11 +632,8 @@ class RobotDeployment:
             pwm_raw = np.array([2, 5, 0])
         elif op_mode_pred[1] == 1 and np.any(5<=pwm_raw) and np.all(pwm_raw<18):
             pwm_raw = pwm_raw + np.array([1, 2, 0])
-        #     pwm_raw[2] = 0
-        # elif op_mode_pred[1] == 1 and np.any(18<=pwm_raw) :
-        #     pwm_raw = pwm_raw + np.array([0, 0, 0])
-        #     pwm_raw[2] = 0
-        # pwm_raw[2] = 0
+        elif op_mode_pred[1] == 1 and np.any(18<=pwm_raw) :
+            pwm_raw = pwm_raw + np.array([0, 1, 0])
         # if op_mode_pred[1] == 1:
         #     pwm_raw = pwm_raw + np.array([4, 7, -1])
 
@@ -827,6 +824,7 @@ class RobotDeployment:
                         self.fb.release()   # sends 'r' to Arduino (triggers suction release)
                         print("Resetting Flowbot ...")
                         self.fb.reset()
+                        self.current_pwm = np.array([0,0,0])
                         time.sleep(1)
                     step_dt = DT_FLOWBOT if op_mode_pred[1] == 1 else DT
                     elapsed = time.time() - t_step_start
@@ -917,7 +915,7 @@ def main():
                         help='Arduino serial port for Flowbot')
     parser.add_argument('--flowbot_baud',  type=int,   default=115200,
                         help='Flowbot serial baud rate')
-    parser.add_argument('--max_steps',     type=int,   default=500,
+    parser.add_argument('--max_steps',     type=int,   default=2000,
                         help='Max steps per episode')
     parser.add_argument('--num_episodes', '-ep',  type=int,   default=1,
                         help='Number of episodes to run')
