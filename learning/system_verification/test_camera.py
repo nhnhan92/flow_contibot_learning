@@ -249,7 +249,6 @@ def test_streams(
             if display and cv2 is not None:
                 # Convert RGB to BGR for OpenCV
                 color_bgr = cv2.cvtColor(color_image, cv2.COLOR_RGB2BGR)
-
                 # Resize to target size for preview
                 color_resized = crop_and_resize(
                     color_image, (target_height, target_width),
@@ -269,7 +268,7 @@ def test_streams(
                         cv2.COLORMAP_JET
                     )
                     depth_resized = cv2.resize(depth_colormap, (target_width, target_height))
-
+                    depth_resized = cv2.cvtColor(depth_resized, cv2.COLOR_RGB2BGR)
                     # Stack horizontally
                     combined = np.hstack([color_resized, depth_resized])
 
@@ -495,9 +494,9 @@ def test_dual_streams(
 @click.option('--fps', default=30, help='Target FPS')
 @click.option('--duration', default=100, help='Test duration in seconds')
 @click.option('--display/--no-display', default=True, help='Show live preview')
-@click.option('--target-width', '-w', default=320, help='Target resize width for training '
+@click.option('--target-width', '-w', default=228, help='Target resize width for training '
               '(single-camera mode; global camera in --dual mode)')
-@click.option('--target-height', '-h', default=240, help='Target resize height for training '
+@click.option('--target-height', '-h', default=212, help='Target resize height for training '
               '(single-camera mode; global camera in --dual mode)')
 @click.option('--rgb-only', is_flag=True, help='Only test RGB stream (no depth)')
 @click.option('--crop-scale', default=1.5, help='Crop window size as a multiple of target size '
@@ -506,8 +505,8 @@ def test_dual_streams(
               '(single-camera mode; global camera in --dual mode)')
 @click.option('--crop-y', default=0.5, help='Crop anchor y in [0,1]: 0=top, 0.5=center, 1=bottom '
               '(single-camera mode; global camera in --dual mode)')
-@click.option('--wrist-target-width', default=320, help='Wrist camera target resize width (--dual mode only)')
-@click.option('--wrist-target-height', default=240, help='Wrist camera target resize height (--dual mode only)')
+@click.option('--wrist-target-width', default=228, help='Wrist camera target resize width (--dual mode only)')
+@click.option('--wrist-target-height', default=212, help='Wrist camera target resize height (--dual mode only)')
 @click.option('--wrist-crop-scale', default=2.5, help='Wrist camera crop window size as a multiple of target size (--dual mode only)')
 @click.option('--wrist-crop-x', default=1, help='Wrist camera crop anchor x in [0,1] (--dual mode only)')
 @click.option('--wrist-crop-y', default=1, help='Wrist camera crop anchor y in [0,1] (--dual mode only)')

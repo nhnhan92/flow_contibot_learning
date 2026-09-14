@@ -630,10 +630,10 @@ class RobotDeployment:
         # PWM offset, flowbot-active steps only.
         if op_mode_pred[1] == 1 and np.all(pwm_raw<5):
             pwm_raw = np.array([2, 5, 0])
-        elif op_mode_pred[1] == 1 and np.any(5<=pwm_raw) and np.all(pwm_raw<18):
-            pwm_raw = pwm_raw + np.array([1, 2, 0])
-        elif op_mode_pred[1] == 1 and np.any(18<=pwm_raw) :
-            pwm_raw = pwm_raw + np.array([0, 1, 0])
+        # elif op_mode_pred[1] == 1 and np.any(5<=pwm_raw) and np.all(pwm_raw<18):
+        #     pwm_raw = pwm_raw + np.array([1, 2, 0])
+        # elif op_mode_pred[1] == 1 and np.any(18<=pwm_raw) :
+        #     pwm_raw = pwm_raw + np.array([0, 1, 0])
         # if op_mode_pred[1] == 1:
         #     pwm_raw = pwm_raw + np.array([4, 7, -1])
 
