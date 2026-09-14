@@ -199,6 +199,20 @@ def save_episode(zarr_root, episode_data):
         else:
             # Resize
             dataset = data_group[key]
+            existing_shape = dataset.shape[1:]
+            if value.shape[1:] != existing_shape:
+                raise ValueError(
+                    f"This episode's {key!r} has per-frame shape {value.shape[1:]}, but "
+                    f"this dataset's existing {key!r} array is already {existing_shape} "
+                    f"(set by an earlier episode/session). Blindly resizing here would "
+                    f"silently corrupt already-written frames -- their bytes on disk are "
+                    f"laid out under the OLD shape, and a zarr array can't hold frames of "
+                    f"two different shapes. This usually means camera settings "
+                    f"(--camera_width/--camera_height) or --arm changed between recording "
+                    f"sessions that wrote into the same --output directory. Recollect into "
+                    f"a fresh --output directory instead, or fix the mismatched setting "
+                    f"before continuing this one."
+                )
             # dataset.resize(new_len, *value.shape[1:])
             dataset.resize((new_len,) + value.shape[1:])
 
