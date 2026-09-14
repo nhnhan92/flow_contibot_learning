@@ -742,6 +742,24 @@ class RobotDeployment:
             speed = self.franka_position_velocity if self.is_franka else 0.05
         if accel is None:
             accel = self.franka_position_acceleration if self.is_franka else 0.05
+
+        # Stop whatever streaming/velocity session the per-tick episode loop
+        # left active BEFORE issuing the point-to-point move below -- for
+        # UR5e, move_tcp_pose() -> moveL() is silently a no-op while RTDE is
+        # still in servo mode (see UR5eRobot.stop()'s docstring: "Does NOT
+        # stop the RTDE script so moveL() can be called immediately after" --
+        # implying it MUST be called first). Calling stop()/
+        # stop_joint_velocity() here, unconditionally and before the move,
+        # makes move_to_start() safe to call from anywhere regardless of
+        # what the arm was doing a moment ago.
+        if self.is_franka:
+            if self.is_franka_joint_vel:
+                self.robot.stop_joint_velocity()
+            else:
+                self.robot.stop()
+        else:
+            self.robot.stop()
+
         print("\nMoving to start position ...")
         start_pose = FRANKA_START_POSE if self.is_franka else DEFAULT_START_POSE
         self.robot.move_tcp_pose(start_pose, velocity=speed, acceleration=accel)
@@ -894,13 +912,10 @@ class RobotDeployment:
         print(f"\n✅ Episode finished: {total_steps} steps in {elapsed_total:.1f}s ")
         print("Resetting Flowbot ...")
         self.fb.reset()
-        if self.is_franka:
-            self.move_to_start()
-            if self.is_franka_joint_vel:
-                self.robot.stop_joint_velocity()
-        else:
-            self.move_to_start()
-            self.robot.stop()
+        # move_to_start() stops any active streaming/velocity session itself
+        # (in the correct order, before the point-to-point move) -- see its
+        # docstring.
+        self.move_to_start()
         time.sleep(0.5)
 
         # Save deployment log
