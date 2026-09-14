@@ -28,7 +28,7 @@ franka_action_space: position
 # --no_camera_wrist). 'global' (camera_0 only), 'wrist' (camera_1 only), or
 # 'both' -- dataset.py raises a clear error at load time if the dataset is
 # missing a camera this setting needs.
-camera_mode: wrist
+camera_mode: both
 
 # Crop + resize (global camera): crop_scale is the crop window size as a
 # multiple of image_size; crop_x/crop_y anchor it in [0,1] (0=left/top,
@@ -61,8 +61,8 @@ tcp_dims: 3           # 3 → xyz only state (8D); 6 → xyz+rotation state (11D
 #   joint_velocity: 7 (joint velocities, rad/s) + pwm (3) + op_mode (2) = 12
 #   position:       tcp_dims(3) + pwm (3) + op_mode (2) = 8   (or 11 if tcp_dims: 6)
 action_dim: 8
-state_keys: ['tcp', 'pwm', 'flowrate', 'op_mode']  # 'tcp'/'pwm'/'flowrate'/'op_mode'
-state_dim: 11
+state_keys: ['tcp', 'pwm', 'op_mode']  # 'tcp'/'pwm'/'flowrate'/'op_mode'
+state_dim: 8
 vision_feature_dim: 512
 state_feature_dim: 128
 num_diffusion_iters: 100  # Number of diffusion training steps (DDPM)
