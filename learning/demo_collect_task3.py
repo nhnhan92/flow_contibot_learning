@@ -366,17 +366,17 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--max_pos_speed', default=0.07, type=float)
 @click.option('--max_rot_speed', default=0.05, type=float)
 @click.option('--deadzone', default=0.2, type=float, help='Spacemouse threshold')
-@click.option('--release_frames', default=5, type=int,
+@click.option('--release_frames', default=1, type=int,
               help='Frames to record after release (both-button press). '
                    'At 10 Hz the default of 10 gives 1 s of released state.')
 @click.option('--target_pc_a', default=(11.05142857, 39.2857143, 103.45428571), type=(float, float, float),
               help='First flowbot target point (x, y, z) in mm. Selected by pushing the SpaceMouse '
                    'forward on its z-axis (cmd_sm[2] > 0) while holding the right button.')
-@click.option('--target_pc_b', required=True, type=(float, float, float),
+@click.option('--target_pc_b', default=(10.05142857, -39.2857143, 103.45428571), type=(float, float, float),
               help='Second flowbot target point (x, y, z) in mm. Selected by pushing the SpaceMouse '
                    'backward on its z-axis (cmd_sm[2] < 0) while holding the right button. Required '
                    '(task3 always has two candidate targets -- no sensible default).')
-@click.option('--target_pc_jitter', default=0.8, type=float,
+@click.option('--target_pc_jitter', default=0.5, type=float,
               help='Per-axis uniform jitter (mm) added to --target_pc_a/--target_pc_b independently, '
                    "resampled fresh each time 'C' starts a new recording -- so each collected episode's "
                    'flowbot targets are slightly different points near the CLI values instead of always '
@@ -626,23 +626,24 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
             
             if button_status[1] and not button_status[0]:          # right btn: flowbot
                 cmd_sm = sm.get_latest_xyz()
-                if cmd_sm[2] > 0 and selected_target_idx != 0:
-                    selected_target_idx = 0
-                    print("    → Target A selected")
-                elif cmd_sm[2] < 0 and selected_target_idx != 1:
-                    selected_target_idx = 1
-                    print("    → Target B selected")
+                if cmd_sm[1] != 0:
+                    if cmd_sm[1] > 0 and selected_target_idx != 0:
+                        selected_target_idx = 0
+                        print("    → Target A selected")
+                    elif cmd_sm[1] < 0 and selected_target_idx != 1:
+                        selected_target_idx = 1
+                        print("    → Target B selected")
 
-                target_pc = target_pc_list[selected_target_idx]
-                d    = target_pc - fb.pc
-                dist = float(np.linalg.norm(d))
-                if dist < ARRIVAL_THRESHOLD_MM:
-                    pass
-                else:
-                    step_scale = min(1.0, dist / (fb.max_pos_speed * fb.dt + 1e-12))
-                    direction  = (d / dist) * step_scale
-                    pwm        = fb.step(direction)
-                    fb.update_plot()
+                    target_pc = target_pc_list[selected_target_idx]
+                    d    = target_pc - fb.pc
+                    dist = float(np.linalg.norm(d))
+                    if dist < ARRIVAL_THRESHOLD_MM:
+                        pass
+                    else:
+                        step_scale = min(1.0, dist / (fb.max_pos_speed * fb.dt + 1e-12))
+                        direction  = (d / dist) * step_scale
+                        pwm        = fb.step(direction)
+                        fb.update_plot()
 
 
             elif button_status[0] and not button_status[1]:        # left btn: UR5e/Franka
