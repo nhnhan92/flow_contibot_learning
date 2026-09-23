@@ -507,7 +507,7 @@ def test_dual_streams(
               '(single-camera mode; global camera in --dual mode)')
 @click.option('--wrist-target-width', default=228, help='Wrist camera target resize width (--dual mode only)')
 @click.option('--wrist-target-height', default=212, help='Wrist camera target resize height (--dual mode only)')
-@click.option('--wrist-crop-scale', default=2.5, help='Wrist camera crop window size as a multiple of target size (--dual mode only)')
+@click.option('--wrist-crop-scale', default=2, help='Wrist camera crop window size as a multiple of target size (--dual mode only)')
 @click.option('--wrist-crop-x', default=1, help='Wrist camera crop anchor x in [0,1] (--dual mode only)')
 @click.option('--wrist-crop-y', default=1, help='Wrist camera crop anchor y in [0,1] (--dual mode only)')
 @click.option('--dual', is_flag=True, help='Test the global + wrist cameras together '
