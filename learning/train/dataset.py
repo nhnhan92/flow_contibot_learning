@@ -129,6 +129,15 @@ class DiffusionDataset(Dataset):
         action_horizon=8,   # Number of actions to execute
         image_size=(240, 320),  # Resize images to this size
         use_images=True,
+        cache_images=True,  # Precompute+cache cropped/resized frames in RAM once
+                             # (__init__), instead of re-decoding+resizing from zarr
+                             # on every __getitem__ call of every epoch. Cropping is
+                             # deterministic (fixed crop_scale/crop_x/crop_y -- the
+                             # actual random augmentation happens later, in model.py,
+                             # on already-loaded GPU tensors), so the cached result is
+                             # valid for the whole training run. Set False only if the
+                             # dataset is too large to fit the cache in RAM (see the
+                             # printed size estimate at construction time).
         normalize=True,
         exclude_episodes=None,  # List of episode indices to exclude
         tcp_dims=3,         # TCP components used: 3=xyz only, 6=xyz+rotation
@@ -155,6 +164,7 @@ class DiffusionDataset(Dataset):
         self.action_horizon = action_horizon
         self.image_size = image_size
         self.use_images = use_images
+        self.cache_images = cache_images
         self.normalize = normalize
         self.exclude_episodes = exclude_episodes if exclude_episodes is not None else []
         self.tcp_dims = tcp_dims
@@ -311,6 +321,47 @@ class DiffusionDataset(Dataset):
         # Compute normalization stats
         if self.normalize:
             self._compute_stats()
+
+        # Precompute cropped/resized frames once (see cache_images above) --
+        # keyed by camera_key since 'both' mode caches camera_0 and camera_1
+        # independently, each under its own crop settings.
+        self._image_caches = {}
+        if self.use_images and self.cache_images:
+            self._image_caches[self._primary_camera_key] = self._build_image_cache(
+                self._primary_camera_key, self._primary_image_size,
+                self._primary_crop_scale, self._primary_crop_x, self._primary_crop_y,
+            )
+            if self.camera_mode == 'both':
+                self._image_caches['data/camera_1'] = self._build_image_cache(
+                    'data/camera_1', self.wrist_image_size,
+                    self.wrist_crop_scale, self.wrist_crop_x, self.wrist_crop_y,
+                )
+
+    def _build_image_cache(self, camera_key, image_size, crop_scale, crop_x, crop_y):
+        """Decode + crop + resize every frame of `camera_key` once, up front,
+        and hold the result (uint8, pre-normalization) in RAM. See
+        cache_images's docstring above for why this is safe (deterministic
+        crop) and worthwhile (eliminates ~num_epochs redundant re-decodes).
+        """
+        total_len = int(self.episode_ends[-1])
+        target_h, target_w = image_size
+        size_mb = total_len * target_h * target_w * 3 / (1024 ** 2)
+        print(f"Caching {camera_key} in RAM: {total_len} frames @ {target_h}x{target_w} "
+              f"(~{size_mb:.0f} MB)...")
+
+        cache = np.empty((total_len, target_h, target_w, 3), dtype=np.uint8)
+        zarr_arr = self.zarr_root[camera_key]
+        BATCH = 256
+        for start in range(0, total_len, BATCH):
+            end = min(start + BATCH, total_len)
+            raw_batch = zarr_arr[start:end]  # decodes this batch's chunks from disk
+            for i, img in enumerate(raw_batch):
+                cache[start + i] = crop_and_resize(img, image_size, crop_scale=crop_scale,
+                                                    crop_x=crop_x, crop_y=crop_y)
+            if (start // BATCH) % 8 == 0 or end == total_len:
+                print(f"  {end}/{total_len}", end='\r', flush=True)
+        print(f"  {total_len}/{total_len} cached.")
+        return cache
 
     def _compute_stats(self):
         """Compute min/max for normalization (Min-Max to [-1, 1]).
@@ -518,19 +569,23 @@ class DiffusionDataset(Dataset):
 
     def _load_and_process_images(self, camera_key, obs_start, obs_end,
                                   image_size, crop_scale, crop_x, crop_y):
-        """Crop + resize + normalize one camera's frames to (obs_horizon, C, H, W)."""
-        images = self.zarr_root[camera_key][obs_start:obs_end]
+        """Crop + resize + normalize one camera's frames to (obs_horizon, C, H, W).
 
-        processed_images = []
-        for img in images:
-            img_resized = crop_and_resize(
-                img, image_size,
-                crop_scale=crop_scale, crop_x=crop_x, crop_y=crop_y,
-            )
-            img_normalized = (img_resized.astype(np.float32) / 127.5) - 1.0
-            processed_images.append(img_normalized)
+        Uses the precomputed RAM cache (see _build_image_cache) when
+        available -- only decodes/crops/resizes from zarr on a cache miss
+        (cache_images=False, e.g. a dataset too large to fit in RAM).
+        """
+        cache = self._image_caches.get(camera_key)
+        if cache is not None:
+            images_uint8 = cache[obs_start:obs_end]
+        else:
+            raw = self.zarr_root[camera_key][obs_start:obs_end]
+            images_uint8 = np.array([
+                crop_and_resize(img, image_size, crop_scale=crop_scale, crop_x=crop_x, crop_y=crop_y)
+                for img in raw
+            ])
 
-        images = np.array(processed_images)
+        images = (images_uint8.astype(np.float32) / 127.5) - 1.0
         return images.transpose(0, 3, 1, 2)  # (obs_horizon, C, H, W)
 
     def get_normalizer(self):
