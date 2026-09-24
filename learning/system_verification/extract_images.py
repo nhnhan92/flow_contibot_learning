@@ -146,7 +146,7 @@ def main():
     parser = argparse.ArgumentParser(description="Extract images from zarr dataset")
     parser.add_argument('--dataset', type=str, default=None,
                         help='Task folder name under data/demo_data/ (e.g. Task0, Task3)')
-    parser.add_argument('--output', type=str, default='data/extracted_images',
+    parser.add_argument('--output', '-o', type=str, default='data/extracted_images',
                         help='Output root directory')
     parser.add_argument('--episode', '-ep', type=int, default=0,
                         help='Extract only this episode index (default: all)')
