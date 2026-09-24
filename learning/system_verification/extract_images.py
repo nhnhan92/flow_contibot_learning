@@ -2,6 +2,13 @@
 """
 Extract images from a zarr dataset to disk.
 
+If the dataset has a wrist camera (data/camera_1 -- collected with
+camera_mode='both'/demo_collect.py's wrist camera connected), both cameras
+are extracted automatically: global frames/video alongside wrist
+frames/video, each under its own crop settings (--wrist_* overrides, same
+global/wrist split as dataset.py -- unset falls back to the global values).
+Datasets with only camera_0 behave exactly as before.
+
 Usage:
     # Raw frames (original 480x640)
     python system_verification/extract_images.py --dataset Task0 --output /tmp/frames
@@ -11,6 +18,10 @@ Usage:
 
     # Custom target size (must match config image_size)
     python system_verification/extract_images.py --dataset Task0 --output /tmp/frames --preprocessed --image_size 216 288
+
+    # Wrist camera with its own crop settings (must match config wrist_*)
+    python system_verification/extract_images.py --dataset Task0 --output /tmp/frames --preprocessed \
+        --wrist_image_size 212 228 --wrist_crop_scale 2 --wrist_crop_x 1 --wrist_crop_y 1
 
     # Extract only episode 0
     python system_verification/extract_images.py --dataset Task0 --output /tmp/frames --episode 0
@@ -56,6 +67,51 @@ def preprocess_image(img_rgb: np.ndarray, target_h: int, target_w: int,
                             crop_scale=crop_scale, crop_x=crop_x, crop_y=crop_y)
 
 
+def _extract_camera_episode(
+    z, camera_key, suffix, frame_indices, ep_idx, output_dir,
+    as_video, fps, preprocessed, image_size, crop_scale, crop_x, crop_y, raw_shape,
+):
+    """Extract one camera's frames for one episode -- video or individual images."""
+    import cv2
+
+    target_h, target_w = image_size
+
+    if as_video:
+        video_path = output_dir / f"episode_{ep_idx:03d}_{suffix}.mp4"
+        out_h = target_h if preprocessed else raw_shape[0]
+        out_w = target_w if preprocessed else raw_shape[1]
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(str(video_path), fourcc, fps, (out_w, out_h))
+
+        for i, fi in enumerate(frame_indices):
+            img_rgb = z[camera_key][fi]           # uint8 RGB
+            if preprocessed:
+                img_rgb = preprocess_image(img_rgb, target_h, target_w, crop_scale, crop_x, crop_y)
+            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+            writer.write(img_bgr)
+            if (i + 1) % 50 == 0 or i == len(frame_indices) - 1:
+                print(f"  [{suffix}] {i+1}/{len(frame_indices)} frames written", end='\r')
+
+        writer.release()
+        print(f"\n  Saved: {video_path}")
+
+    else:
+        ep_dir = output_dir / f"episode_{ep_idx:03d}"
+        ep_dir.mkdir(exist_ok=True)
+
+        for i, fi in enumerate(frame_indices):
+            img_rgb = z[camera_key][fi]           # uint8 RGB
+            if preprocessed:
+                img_rgb = preprocess_image(img_rgb, target_h, target_w, crop_scale, crop_x, crop_y)
+            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+            img_path = ep_dir / f"frame_{i:05d}_{suffix}{fi:06d}.jpg"
+            cv2.imwrite(str(img_path), img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            if (i + 1) % 100 == 0 or i == len(frame_indices) - 1:
+                print(f"  [{suffix}] {i+1}/{len(frame_indices)} images saved", end='\r')
+
+        print(f"\n  Saved to: {ep_dir}/")
+
+
 def extract_images(
     dataset_path,
     output_dir,
@@ -68,9 +124,12 @@ def extract_images(
     crop_scale=1.5,
     crop_x=0.5,
     crop_y=0.5,
+    wrist_image_size=None,
+    wrist_crop_scale=None,
+    wrist_crop_x=None,
+    wrist_crop_y=None,
 ):
     import zarr
-    import cv2
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -78,10 +137,22 @@ def extract_images(
     print(f"Opening dataset: {dataset_path}")
     z = zarr.open(str(dataset_path), mode='r')
 
+    # Wrist camera (data/camera_1) is only present if the dataset was
+    # collected with camera_mode='both' (see demo_collect.py) -- extract it
+    # alongside camera_0, under its own crop settings, only when it exists.
+    # Any --wrist_* left unset falls back to the global camera's value,
+    # matching dataset.py's identical global/wrist split.
+    has_wrist = 'camera_1' in z['data']
+    wrist_image_size = tuple(wrist_image_size) if wrist_image_size is not None else image_size
+    wrist_crop_scale = wrist_crop_scale if wrist_crop_scale is not None else crop_scale
+    wrist_crop_x     = wrist_crop_x     if wrist_crop_x     is not None else crop_x
+    wrist_crop_y     = wrist_crop_y     if wrist_crop_y     is not None else crop_y
+
     episode_ends = z['meta/episode_ends'][:]
     n_episodes   = len(episode_ends)
     total_frames = int(episode_ends[-1])
     raw_shape    = z['data/camera_0'].shape[1:]      # (H, W, 3)
+    wrist_raw_shape = z['data/camera_1'].shape[1:] if has_wrist else None
 
     target_h, target_w = image_size
     mode_str = (
@@ -92,6 +163,11 @@ def extract_images(
     print(f"Dataset  : {n_episodes} episodes, {total_frames} frames")
     print(f"Raw size : {raw_shape[0]}×{raw_shape[1]}")
     print(f"Mode     : {mode_str}")
+    print(f"Cameras  : global" + (
+        f" + wrist ({wrist_raw_shape[0]}×{wrist_raw_shape[1]} raw"
+        + (f", preprocessed {wrist_image_size[0]}×{wrist_image_size[1]}" if preprocessed else "")
+        + ")" if has_wrist else " only (no data/camera_1 in this dataset)"
+    ))
 
     episodes = [episode] if episode is not None else list(range(n_episodes))
 
@@ -104,40 +180,16 @@ def extract_images(
         print(f"\nEpisode {ep_idx:03d}: frames {ep_start}–{ep_end-1}"
               f" ({ep_len} frames, extracting {len(frame_indices)})")
 
-        if as_video:
-            video_path = output_dir / f"episode_{ep_idx:03d}.mp4"
-            out_h = target_h if preprocessed else raw_shape[0]
-            out_w = target_w if preprocessed else raw_shape[1]
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            writer = cv2.VideoWriter(str(video_path), fourcc, fps, (out_w, out_h))
-
-            for i, fi in enumerate(frame_indices):
-                img_rgb = z['data/camera_0'][fi]           # uint8 RGB
-                if preprocessed:
-                    img_rgb = preprocess_image(img_rgb, target_h, target_w, crop_scale, crop_x, crop_y)
-                img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-                writer.write(img_bgr)
-                if (i + 1) % 50 == 0 or i == len(frame_indices) - 1:
-                    print(f"  {i+1}/{len(frame_indices)} frames written", end='\r')
-
-            writer.release()
-            print(f"\n  Saved: {video_path}")
-
-        else:
-            ep_dir = output_dir / f"episode_{ep_idx:03d}"
-            ep_dir.mkdir(exist_ok=True)
-
-            for i, fi in enumerate(frame_indices):
-                img_rgb = z['data/camera_0'][fi]           # uint8 RGB
-                if preprocessed:
-                    img_rgb = preprocess_image(img_rgb, target_h, target_w, crop_scale, crop_x, crop_y)
-                img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-                img_path = ep_dir / f"frame_{i:05d}_global{fi:06d}.jpg"
-                cv2.imwrite(str(img_path), img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                if (i + 1) % 100 == 0 or i == len(frame_indices) - 1:
-                    print(f"  {i+1}/{len(frame_indices)} images saved", end='\r')
-
-            print(f"\n  Saved to: {ep_dir}/")
+        _extract_camera_episode(
+            z, 'data/camera_0', 'global', frame_indices, ep_idx, output_dir,
+            as_video, fps, preprocessed, image_size, crop_scale, crop_x, crop_y, raw_shape,
+        )
+        if has_wrist:
+            _extract_camera_episode(
+                z, 'data/camera_1', 'wrist', frame_indices, ep_idx, output_dir,
+                as_video, fps, preprocessed, wrist_image_size, wrist_crop_scale, wrist_crop_x, wrist_crop_y,
+                wrist_raw_shape,
+            )
 
     print("\nDone.")
 
@@ -171,6 +223,20 @@ def main():
     parser.add_argument('--crop_y', type=float, default=0.5,
                         help='Crop anchor y in [0,1]: 0=top, 0.5=center, 1=bottom. '
                              'Must match config crop_y used during training.')
+    parser.add_argument('--wrist_image_size', type=int, nargs=2, default=None,
+                        metavar=('H', 'W'),
+                        help='Wrist camera target size after preprocessing (default: same as '
+                             '--image_size). Only used if the dataset has data/camera_1. '
+                             'Must match config wrist_image_size used during training.')
+    parser.add_argument('--wrist_crop_scale', type=float, default=None,
+                        help='Wrist camera crop_scale (default: same as --crop_scale). '
+                             'Must match config wrist_crop_scale used during training.')
+    parser.add_argument('--wrist_crop_x', type=float, default=None,
+                        help='Wrist camera crop_x (default: same as --crop_x). '
+                             'Must match config wrist_crop_x used during training.')
+    parser.add_argument('--wrist_crop_y', type=float, default=None,
+                        help='Wrist camera crop_y (default: same as --crop_y). '
+                             'Must match config wrist_crop_y used during training.')
     args = parser.parse_args()
     if args.dataset is None:
         
@@ -193,6 +259,10 @@ def main():
         crop_scale=args.crop_scale,
         crop_x=args.crop_x,
         crop_y=args.crop_y,
+        wrist_image_size=args.wrist_image_size,
+        wrist_crop_scale=args.wrist_crop_scale,
+        wrist_crop_x=args.wrist_crop_x,
+        wrist_crop_y=args.wrist_crop_y,
     )
 
 
