@@ -75,33 +75,14 @@ from hardware.image_utils import crop_and_resize
 PWM_MIN = 0   # 0 = fully deflated (release); model must be able to command this
 PWM_MAX = 26
 
+GRIP_FLOOR_CH0 = 8
+
 _DEFAULT_ROBOT_IP = {"ur5": "150.65.146.87", "franka": "172.16.0.2"}
 
-# UR5e start pose -- matches init_pose in demo_collect.py, i.e. where UR5e
-# demonstrations actually started from. (Was stale until 2026-09 -- an old
-# value left over from a since-renamed predecessor script,
-# collect_demos_with_camera.py, that didn't match demo_collect.py's current
-# init_pose in either position or rotation. That mismatch fed both
-# move_to_start() -- UR5e episodes were starting from the wrong physical
-# pose -- and self.tcp_fixed_rotation below -- see the Franka rotation bug
-# this was found alongside.)
 # DEFAULT_START_POSE = [0.115, -0.31, 0.45, 0.917, -3.0, 0.0]
 DEFAULT_START_POSE = [0.115, -0.31, 0.45, 0.885, -2.85, -0.044]
 
-# Franka start pose -- matches init_pose in demo_collect.py, i.e. where
-# Franka demonstrations actually started from. (Currently identical to
-# DEFAULT_START_POSE above -- demo_collect.py's init_pose isn't arm-specific
-# -- but kept separate in case that ever changes.)
 FRANKA_START_POSE = [0.45, 0.15, 0.5, 3.14, 0.0, -0.05]
-
-# Fixed TCP rotation used when executing XYZ-only (tcp_dims=3) position
-# actions from the policy -- UR5e always, Franka when franka_action_space=
-# 'position'. Rotation is not predicted by the model in that case (action_dim=8)
-# so we hold it constant. Unused for Franka joint_velocity mode, which has no
-# "target rotation" concept at all (its action is joint velocities, not a pose).
-# Arm-specific -- see RobotDeployment.__init__'s self.tcp_fixed_rotation:
-# UR5e's and Franka's start orientations differ (ry, rz), so a single shared
-# constant here would silently command the wrong arm's rotation.
 
 # Control frequency (Hz)
 CONTROL_FREQ =10.0
@@ -113,38 +94,14 @@ FLOWBOT_FREQ = 10.0  # Flowbot command frequency — must match CONTROL_FREQ
 SERVO_SPEED = 0.05     # m/s
 SERVO_ACCEL = 0.05     # m/s^2
 
-# Franka position mode (set_tcp_pose) defaults -- relative_dynamics_factor
-# fractions (0-1) of Franka's own hardware limits, NOT literal m/s (see
-# FrankaRobot.move_tcp_pose's docstring). Separate from UR5e's SERVO_SPEED/
-# SERVO_ACCEL above -- overridable per-instance via RobotDeployment's
-# franka_position_velocity/franka_position_acceleration (CLI:
-# --franka_position_speed/--franka_position_accel). Lower = slower and
-# gentler; also lowers jerk, since _dyn_factor ties jerk to the acceleration
-# factor -- so this is also the first thing to try if set_tcp_pose keeps
-# tripping the "Motion finished commanded, but the robot is still moving!"
-# discontinuity reflex.
 FRANKA_POSITION_VELOCITY = 0.05
 FRANKA_POSITION_ACCEL = 0.05
 
 MAX_TCP_DELTA = 0.03   # m per step -- position control (UR5e, or Franka franka_action_space='position')
-MAX_TCP_ROT_DELTA = 0.05   # rad per step, same scope as MAX_TCP_DELTA -- see
-                            # the "Fixed TCP rotation" note above: this bounds
-                            # accidental large rotation commands (e.g. a wrong
-                            # or mismatched fixed rotation) the way MAX_TCP_DELTA
-                            # already bounds accidental large position commands.
+MAX_TCP_ROT_DELTA = 0.05   # rad per step, same scope as MAX_TCP_DELTA 
 
-# Franka set_joint_velocity cap -- runtime safety limit on the per-joint
-# speed a policy-predicted action is allowed to command, independent of
-# whatever speed it saw in training data. Applied elementwise (each of the
-# 7 joints clipped independently), not as a Euclidean-norm cap -- a joint
-# velocity limit is inherently per-DOF.
 FRANKA_MAX_JOINT_VEL = 0.3   # rad/s
 
-# Default RealSense serials, matching demo_collect.py's -- both are passed
-# explicitly whenever their camera is opened (regardless of camera_mode) so
-# a single-camera deploy still binds the intended physical device even if
-# both cameras happen to be connected, and 'both' mode's two pipelines never
-# race to grab the same one (see demo_collect.py's camera connection comments).
 _DEFAULT_CAMERA_SERIAL_GLOBAL = '031422250511'
 _DEFAULT_CAMERA_SERIAL_WRIST  = '841512070635'
 
@@ -648,6 +605,12 @@ class RobotDeployment:
             pwm_raw = pwm_raw + np.array([0, 1, 0])
         # if op_mode_pred[1] == 1:
         #     pwm_raw = pwm_raw + np.array([4, 7, -1])
+
+        # Grip-anchor floor (see GRIP_FLOOR_CH0 above) -- applied after the
+        # offset table so it's a final safety net regardless of what that
+        # table produced.
+        if op_mode_pred[1] == 1:
+            pwm_raw[0] = max(pwm_raw[0], GRIP_FLOOR_CH0)
 
         pwm_int    = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
 
