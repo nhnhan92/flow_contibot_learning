@@ -120,7 +120,7 @@ def extract_images(
     as_video=False,
     fps=10,
     preprocessed=True,
-    image_size=(216, 288),
+    image_size=(212, 288),
     crop_scale=1.5,
     crop_x=0.5,
     crop_y=0.5,
