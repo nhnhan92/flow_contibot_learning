@@ -267,7 +267,9 @@ class RobotDeployment:
         arm: str = 'ur5',
         flowbot_port: str = '/dev/ttyACM0',
         flowbot_baud: int = 115200,
-        image_size: tuple = (216, 288),
+        image_size: tuple = None,  # None -> read from the checkpoint's config (see below).
+                                    # Deliberately not CLI-overridable, like crop_scale/crop_x/
+                                    # crop_y/wrist_* below -- these must match training exactly.
         device: str = 'cuda',
         verbose: bool = True,
         camera_height: int = 480,
