@@ -13,11 +13,11 @@ Usage:
     # Raw frames (original 480x640)
     python system_verification/extract_images.py --dataset Task0 --output /tmp/frames
 
-    # Preprocessed frames — same center-crop + resize as training (216x288 by default)
+    # Preprocessed frames — same center-crop + resize as training (212x228 by default)
     python system_verification/extract_images.py --dataset Task0 --output /tmp/frames --preprocessed
 
     # Custom target size (must match config image_size)
-    python system_verification/extract_images.py --dataset Task0 --output /tmp/frames --preprocessed --image_size 216 288
+    python system_verification/extract_images.py --dataset Task0 --output /tmp/frames --preprocessed --image_size 212 228
 
     # Wrist camera with its own crop settings (must match config wrist_*)
     python system_verification/extract_images.py --dataset Task0 --output /tmp/frames --preprocessed \
@@ -120,7 +120,7 @@ def extract_images(
     as_video=False,
     fps=10,
     preprocessed=True,
-    image_size=(216, 288),
+    image_size=(212, 228),
     crop_scale=1.5,
     crop_x=0.5,
     crop_y=0.5,
@@ -210,10 +210,11 @@ def main():
                         help='FPS for video output (default: 10)')
     parser.add_argument('--preprocessed', default=True, action='store_true',
                         help='Apply training preprocessing: center-crop then resize to image_size')
-    parser.add_argument('--image_size', type=int, nargs=2, default=[216, 288],
+    parser.add_argument('--image_size', type=int, nargs=2, default=[212, 228],
                         metavar=('H', 'W'),
-                        help='Target image size after preprocessing (default: 216 288). '
-                             'Must match config image_size used during training.')
+                        help='Target image size after preprocessing (default: 212 228, matching '
+                             'config_train_flowbot_ur5.yaml). Must match config image_size used '
+                             'during training -- override if a different checkpoint used a different size.')
     parser.add_argument('--crop_scale', type=float, default=1.5,
                         help='Crop window size as a multiple of image_size (default: 1.5). '
                              'Must match config crop_scale used during training.')
