@@ -651,10 +651,6 @@ class RobotDeployment:
 
         pwm_int    = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
 
-        # Drop protection: if any channel decreases vs last sent PWM, hold previous value
-        if np.any(pwm_int < self.current_pwm):
-            pwm_int = self.current_pwm.copy()
-
         if execute_arm and op_mode_pred[0] == 1:
             if franka_joint_vel:
                 # Safety clamp: cap each joint's speed to FRANKA_MAX_JOINT_VEL
