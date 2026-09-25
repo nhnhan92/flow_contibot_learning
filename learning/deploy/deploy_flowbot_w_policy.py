@@ -75,8 +75,6 @@ from hardware.image_utils import crop_and_resize
 PWM_MIN = 0   # 0 = fully deflated (release); model must be able to command this
 PWM_MAX = 26
 
-GRIP_FLOOR_CH0 = 8
-
 _DEFAULT_ROBOT_IP = {"ur5": "150.65.146.87", "franka": "172.16.0.2"}
 
 # DEFAULT_START_POSE = [0.115, -0.31, 0.45, 0.917, -3.0, 0.0]
@@ -597,20 +595,17 @@ class RobotDeployment:
         op_mode_pred = np.clip(np.round(action[d+3:d+5]), 0, 1).astype(int)
 
         # PWM offset, flowbot-active steps only.
-        if op_mode_pred[1] == 1 and np.all(pwm_raw<5):
-            pwm_raw = np.array([2, 5, 0])
-        elif op_mode_pred[1] == 1 and np.any(5<=pwm_raw) and np.all(pwm_raw<18):
-            pwm_raw = pwm_raw + np.array([1, 2, 0])
-        elif op_mode_pred[1] == 1 and np.any(18<=pwm_raw) :
-            pwm_raw = pwm_raw + np.array([0, 1, 0])
+        # if op_mode_pred[1] == 1 and np.all(pwm_raw<5):
+        #     pwm_raw = np.array([2, 5, 0])
+        # elif op_mode_pred[1] == 1 and np.any(5<=pwm_raw) and np.all(pwm_raw<18):
+        #     pwm_raw = pwm_raw + np.array([1, 2, 0])
+        # elif op_mode_pred[1] == 1 and np.any(18<=pwm_raw) :
+        #     pwm_raw = pwm_raw + np.array([0, 1, 0])
         # if op_mode_pred[1] == 1:
         #     pwm_raw = pwm_raw + np.array([4, 7, -1])
 
-        # Grip-anchor floor (see GRIP_FLOOR_CH0 above) -- applied after the
-        # offset table so it's a final safety net regardless of what that
-        # table produced.
-        if op_mode_pred[1] == 1:
-            pwm_raw[0] = max(pwm_raw[0], GRIP_FLOOR_CH0)
+        if op_mode_pred[1] == 1 and np.any(pwm_raw>=1):
+            self.fb.suction()
 
         pwm_int    = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
 

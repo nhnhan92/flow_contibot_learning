@@ -444,4 +444,13 @@ class flowbot:
             print("Serial write failed:", e)
         time.sleep(0.1)
 
+    def suction(self):
+    
+        cmd = "sf\n"
+        try:
+            self.ser.write(cmd.encode("ascii"))
+        except Exception as e:
+            print("Serial write failed:", e)
+        time.sleep(0.1)
+
 

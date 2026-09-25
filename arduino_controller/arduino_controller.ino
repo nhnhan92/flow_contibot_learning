@@ -3,6 +3,7 @@
 #define VALVE2_PIN 10  // Arduino digital pin 9 (PWM)
 #define VALVE3_PIN 3  // Arduino digital pin 9 (PWM)
 #define SUCTION_RELEASE 12  
+#define SUCTION_FORCE 7  
 void serialEvent();
 const int FLOW_SENSOR_MODULE1   = A0;  // PF2M711-C8 analog output (1–5 V)
 const int FLOW_SENSOR_MODULE2   = A1;  // PF2M711-C8 analog output (1–5 V)
@@ -167,6 +168,7 @@ void setup() {
   pinMode(VALVE2_PIN, OUTPUT);
   pinMode(VALVE3_PIN, OUTPUT);
   pinMode(SUCTION_RELEASE, OUTPUT);
+  pinMode(SUCTION_FORCE, OUTPUT);
 
   Serial.begin(115200);
   Serial.setTimeout(50);  // for readStringUntil
@@ -179,6 +181,7 @@ void setup() {
   // pwm3_target = pww_init3;
   applyPwm();
   digitalWrite(SUCTION_RELEASE, LOW);
+  digitalWrite(SUCTION_FORCE, LOW);
   lastSampleMs = millis();
   lastRampMs   = millis();
 }
@@ -189,52 +192,57 @@ void loop() {
     String line = Serial.readStringUntil('\n');
     line.trim();
     if (line.length() > 0 && line.charAt(0) != '#') {
-      parsePwmCommand(line);
-    }
-    if (line.equalsIgnoreCase("r")|| line.equalsIgnoreCase("release")){
-      Serial.println("SUCTION: OFF");
-      digitalWrite(SUCTION_RELEASE, HIGH);
-      delay(100);
-    }
-    if (line.equalsIgnoreCase("q")|| line.equalsIgnoreCase("quit")){
-      Serial.println("RESETTING");
-      pwm1_target = 0;
-      pwm2_target = 0;
-      pwm3_target = 0;
-      updatePwmRamps();
-      digitalWrite(SUCTION_RELEASE, HIGH);
-      delay(1000);
-    }
-    // "e N" command to set pwm_init_extra
-    if (line.charAt(0) == 'e' || line.charAt(0) == 'E') {
-      int extra;
-      // skip the first character ('e') and parse the rest
-      if (sscanf(line.c_str() + 1, "%d", &extra) == 1) {
-        pwm_init_extra = extra;
-        Serial.print("# pwm_init_extra updated to ");
-        Serial.println(pwm_init_extra);
-        pww_init1 = base1 + pwm_init_extra;
-        pww_init2 = base2 + pwm_init_extra;
-        pww_init3 = base3 + pwm_init_extra;
 
-        pwm1_target = constrain(pww_init1, 0, 255);
-        pwm2_target = constrain(pww_init2, 0, 255);
-        pwm3_target = constrain(pww_init3, 0, 255);
-        }}
-    if (line.charAt(0) == 'i' || line.charAt(0) == 'I') {
-      int init_1, init_2, init_3;
-      if (sscanf(line.c_str() + 1, "%d %d %d", &init_1, &init_2, &init_3) == 3) {
+      if (line.equalsIgnoreCase("r")|| line.equalsIgnoreCase("release")){
+        Serial.println("SUCTION: OFF");
+        digitalWrite(SUCTION_RELEASE, HIGH);
+        digitalWrite(SUCTION_FORCE, LOW);
+        delay(100);
+      } else if (line.equalsIgnoreCase("sf")|| line.equalsIgnoreCase("suction_force_on")){
+        Serial.println("SUCTION: ON - FORCED");
+        digitalWrite(SUCTION_FORCE, HIGH);
+      } else if (line.equalsIgnoreCase("q")|| line.equalsIgnoreCase("quit")){
+        Serial.println("RESETTING");
+        pwm1_target = 0;
+        pwm2_target = 0;
+        pwm3_target = 0;
+        updatePwmRamps();
+        digitalWrite(SUCTION_RELEASE, HIGH);
+        delay(1000);
+      } else if (line.charAt(0) == 'e' || line.charAt(0) == 'E') {
+        // "e N" command to set pwm_init_extra
+        int extra;
+        // skip the first character ('e') and parse the rest
+        if (sscanf(line.c_str() + 1, "%d", &extra) == 1) {
+          pwm_init_extra = extra;
+          Serial.print("# pwm_init_extra updated to ");
+          Serial.println(pwm_init_extra);
+          pww_init1 = base1 + pwm_init_extra;
+          pww_init2 = base2 + pwm_init_extra;
+          pww_init3 = base3 + pwm_init_extra;
 
-        base1 = init_1;
-        base2 = init_2;
-        base3 = init_3;
-        pww_init1 = base1 + pwm_init_extra;
-        pww_init2 = base2 + pwm_init_extra;
-        pww_init3 = base3 + pwm_init_extra;
-        pwm1_target = constrain(base1, 0, 255);
-        pwm2_target = constrain(base2, 0, 255);
-        pwm3_target = constrain(base3, 0, 255);
-        }}
+          pwm1_target = constrain(pww_init1, 0, 255);
+          pwm2_target = constrain(pww_init2, 0, 255);
+          pwm3_target = constrain(pww_init3, 0, 255);
+          }
+      } else if (line.charAt(0) == 'i' || line.charAt(0) == 'I') {
+        int init_1, init_2, init_3;
+        if (sscanf(line.c_str() + 1, "%d %d %d", &init_1, &init_2, &init_3) == 3) {
+
+          base1 = init_1;
+          base2 = init_2;
+          base3 = init_3;
+          pww_init1 = base1 + pwm_init_extra;
+          pww_init2 = base2 + pwm_init_extra;
+          pww_init3 = base3 + pwm_init_extra;
+          pwm1_target = constrain(base1, 0, 255);
+          pwm2_target = constrain(base2, 0, 255);
+          pwm3_target = constrain(base3, 0, 255);
+          }
+      } else {
+        parsePwmCommand(line);
+      }
+    }
         }
   // ---- 2) Ramp PWM toward target each loop ----
   if (now - lastRampMs >= RAMP_PERIOD_MS) {
