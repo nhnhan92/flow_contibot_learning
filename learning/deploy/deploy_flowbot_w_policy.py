@@ -596,21 +596,16 @@ class RobotDeployment:
 
         # PWM offset, flowbot-active steps only.
         # if op_mode_pred[1] == 1 and np.all(pwm_raw<5):
-        #     pwm_raw = np.array([1, 1, 1])
+        #     pwm_raw = np.array([2, 5, 0])
         # elif op_mode_pred[1] == 1 and np.any(5<=pwm_raw) and np.all(pwm_raw<18):
-        #     pwm_raw = pwm_raw + np.array([1, 1, 0])
+        #     pwm_raw = pwm_raw + np.array([1, 2, 0])
         # elif op_mode_pred[1] == 1 and np.any(18<=pwm_raw) :
         #     pwm_raw = pwm_raw + np.array([0, 1, 0])
         # if op_mode_pred[1] == 1:
         #     pwm_raw = pwm_raw + np.array([4, 7, -1])
 
-        # Grip-anchor floor (see GRIP_FLOOR_CH0 above) -- applied after the
-        # offset table so it's a final safety net regardless of what that
-        # table produced.
-        GRIP_FLOOR_CH0 = 16
-
-        if op_mode_pred[1] == 1 and steps > 150:
-            pwm_raw[0] = max(pwm_raw[0], GRIP_FLOOR_CH0)
+        if op_mode_pred[1] == 1 and np.any(pwm_raw>=1):
+            self.fb.suction()
 
         pwm_int    = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
 

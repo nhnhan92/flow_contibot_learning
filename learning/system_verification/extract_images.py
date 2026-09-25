@@ -141,21 +141,8 @@ def extract_images(
     # collected with camera_mode='both' (see demo_collect.py) -- extract it
     # alongside camera_0, under its own crop settings, only when it exists.
     # Any --wrist_* left unset falls back to the global camera's value,
-    # matching dataset.py's identical global/wrist split -- but unlike
-    # deploy_flowbot_w_policy.py (which reads wrist_* from the checkpoint),
-    # this script has no checkpoint to read from, so a silent fallback here
-    # is a real footgun: the wrist camera's correct crop is often very
-    # different from the global camera's (e.g. corner-anchored vs centered),
-    # so falling back silently can produce a wrist crop that looks visibly
-    # wrong with no indication why. Warn loudly instead.
+    # matching dataset.py's identical global/wrist split.
     has_wrist = 'camera_1' in z['data']
-    _wrist_args_given = any(v is not None for v in (wrist_image_size, wrist_crop_scale, wrist_crop_x, wrist_crop_y))
-    if has_wrist and not _wrist_args_given:
-        print("⚠️  Dataset has a wrist camera (data/camera_1), but no --wrist_image_size/"
-              "--wrist_crop_scale/--wrist_crop_x/--wrist_crop_y was given -- falling back to "
-              "the GLOBAL camera's crop settings for the wrist image too. The wrist camera's "
-              "correct crop is usually different (check the training config's wrist_* values) -- "
-              "pass them explicitly to get a correct wrist preview.")
     wrist_image_size = tuple(wrist_image_size) if wrist_image_size is not None else image_size
     wrist_crop_scale = wrist_crop_scale if wrist_crop_scale is not None else crop_scale
     wrist_crop_x     = wrist_crop_x     if wrist_crop_x     is not None else crop_x
