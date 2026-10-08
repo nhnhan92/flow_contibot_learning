@@ -27,11 +27,12 @@ except ImportError:
     _OPTI_AVAILABLE   = False
 
 BAUD_RATE = 115200
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_CSV  = f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
 MAX_POINTS = 1000
 
-def reader_logger(ser, writer, buffers, stop_flag):
+def reader_logger(ser, writer, buffers, stop_flag, done_event=None):
     """
     Pure serial reader — runs in a background thread.
     Reads lines from Arduino, writes CSV, fills shared buffers.
@@ -40,6 +41,11 @@ def reader_logger(ser, writer, buffers, stop_flag):
     Arduino CSV column order:
       t_ms, rawFlow1, proc_flow1, rawFlow2, proc_flow2,
       rawFlow3, proc_flow3, rawPress, pressMPa, pwm1, pwm2, pwm3
+
+    done_event : set() whenever a "DONE" line arrives (arduino_controller.ino
+                 prints this once a PWM command's ramp has actually reached
+                 its target -- see replay_pwm_csv, which waits on it instead
+                 of a fixed delay).
     """
     header_line = ser.readline().decode("utf-8", errors="ignore").strip()
     print("Header:", header_line)
@@ -55,6 +61,10 @@ def reader_logger(ser, writer, buffers, stop_flag):
     while not stop_flag["stop"]:
         raw_line = ser.readline().decode("utf-8", errors="ignore").strip()
         if not raw_line:
+            continue
+        if raw_line == "DONE":
+            if done_event is not None:
+                done_event.set()
             continue
         current_time = datetime.now().strftime("%H:%M:%S.%f")
         parts = raw_line.split(",")
@@ -96,7 +106,91 @@ def reader_logger(ser, writer, buffers, stop_flag):
                 b[:] = b[-MAX_POINTS:]
 
 
-def run_live_plot(buffers, stop_flag, save_fig, name,
+def replay_pwm_csv(ser, csv_path, settle_s, output_path, buffers, done_event,
+                   max_wait_s=3.0, poll_s=0.01, opti=None, opti_origin=None):
+    """
+    Send each (pwm1, pwm2, pwm3) row of csv_path to the Arduino in turn.
+
+    Instead of a fixed wait, each set now waits for the Arduino's "DONE"
+    feedback (arduino_controller.ino prints this once that set's PWM ramp
+    has actually reached its target -- see reader_logger/done_event), capped
+    at max_wait_s as a safety fallback in case a DONE is missed (e.g. a
+    dropped line). After DONE (or the timeout), an extra settle_s dwell
+    follows so the sensors can stabilize at the now-steady-state PWM.
+
+    Every new sensor sample from the serial reader (buffers) is written as
+    one row labelled with that set's commanded PWM, throughout both phases.
+    Ends by commanding 0 0 0.
+
+    opti, opti_origin : optional MotiveNatNetReader + origin (m), as set up
+                         by the "csv" input-loop branch -- when given, each
+                         logged row also includes the rigid body's manip-
+                         frame position (mm, via opti.opti_to_manip), same
+                         convention as the "elongation" command's opti_*_mm
+                         columns. Left as NaN when opti is None/no sample.
+    """
+    with open(csv_path, "r", newline="") as fcsv:
+        rows = [(int(float(r["pwm1"])), int(float(r["pwm2"])), int(float(r["pwm3"])))
+                for r in csv.DictReader(fcsv)]
+    print(f"[csv] Replaying {len(rows)} PWM sets from {csv_path} "
+          f"(wait for DONE, max {max_wait_s}s, then settle {settle_s}s)")
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w", newline="") as fout:
+        wo = csv.writer(fout)
+        wo.writerow(["current_time", "set_idx", "cmd_pwm1", "cmd_pwm2", "cmd_pwm3",
+                     "t_s", "raw_flow1", "raw_flow2", "raw_flow3",
+                     "proc_flow1", "proc_flow2", "proc_flow3", "press_MPa",
+                     "opti_x_mm", "opti_y_mm", "opti_z_mm"])
+        last_t = [None]
+
+        def _log_new_sample(i, p):
+            if buffers["t"] and buffers["t"][-1] != last_t[0]:
+                last_t[0] = buffers["t"][-1]
+                press = buffers["press"][-1] if buffers["press"] else float("nan")
+                ox = oy = oz = float("nan")
+                if opti is not None:
+                    sp = opti.get_latest()
+                    if sp is not None:
+                        mm = opti.opti_to_manip(
+                            np.array(sp.pos_xyz, dtype=float),
+                            opti_origin if opti_origin is not None else np.zeros(3))
+                        ox, oy, oz = float(mm[0]), float(mm[1]), float(mm[2])
+                wo.writerow([datetime.now().strftime("%H:%M:%S.%f"), i, *p,
+                             f"{last_t[0]:.4f}",
+                             f"{buffers['r1'][-1]:.4f}", f"{buffers['r2'][-1]:.4f}",
+                             f"{buffers['r3'][-1]:.4f}",
+                             f"{buffers['p1'][-1]:.4f}", f"{buffers['p2'][-1]:.4f}",
+                             f"{buffers['p3'][-1]:.4f}", f"{press:.5f}",
+                             f"{ox:.3f}", f"{oy:.3f}", f"{oz:.3f}"])
+
+        for i, p in enumerate(rows):
+            done_event.clear()
+            ser.write(f"{p[0]} {p[1]} {p[2]}\n".encode("ascii"))
+            print(f"[csv] {i + 1}/{len(rows)} Sent: {p[0]} {p[1]} {p[2]}")
+
+            # Phase 1: wait for the ramp to actually reach this set's target.
+            wait_deadline = time.perf_counter() + max_wait_s
+            while not done_event.is_set() and time.perf_counter() < wait_deadline:
+                _log_new_sample(i, p)
+                time.sleep(poll_s)
+            if done_event.is_set():
+                print(f"  reached target")
+            else:
+                print(f"  ⚠️  no DONE within {max_wait_s}s -- continuing anyway")
+
+            # Phase 2: extra settle dwell at steady state.
+            settle_deadline = time.perf_counter() + settle_s
+            while time.perf_counter() < settle_deadline:
+                _log_new_sample(i, p)
+                time.sleep(poll_s)
+            fout.flush()
+    ser.write(b"0 0 0\n")
+    ser.write(b"r\n")  # stop flow sensor logging (arduino_controller.ino)
+    print(f"[csv] Replay done, sent 0 0 0. Saved: {output_path}")
+
+
+def run_live_plot(buffers, stop_flag, save_fig, name, file_type="eps",
                   record_path=None, record_fps=15.0, record_fig="proc"):
     """
     Live plot — runs on the main thread using FuncAnimation.
@@ -111,7 +205,7 @@ def run_live_plot(buffers, stop_flag, save_fig, name,
     lr1, = ax_raw.plot([], [], label="Module 1 (A0)")
     lr2, = ax_raw.plot([], [], label="Module 2 (A1)")
     lr3, = ax_raw.plot([], [], label="Module 3 (A2)")
-    ax_raw.set_ylabel("Raw ADC count")
+    ax_raw.set_ylabel("Flow [L/min]")
     ax_raw.set_xlabel("Time [s]")
     ax_raw.set_title("Raw Flow — Module 1 / 2 / 3")
     ax_raw.legend()
@@ -183,9 +277,9 @@ def run_live_plot(buffers, stop_flag, save_fig, name,
         recorder.close()
 
     if save_fig:
-        fig1.savefig(f"{name}_raw_flow.png",  dpi=300, bbox_inches="tight")
-        fig2.savefig(f"{name}_proc_flow.png", dpi=300, bbox_inches="tight")
-        print(f"Figures saved: {name}_raw_flow.png, {name}_proc_flow.png")
+        fig1.savefig(f"{name}_raw_flow.{file_type}",  dpi=300, bbox_inches="tight")
+        fig2.savefig(f"{name}_proc_flow.{file_type}", dpi=300, bbox_inches="tight")
+        print(f"Figures saved: {name}_raw_flow.{file_type}, {name}_proc_flow.{file_type}")
     
 
 def main():
@@ -216,10 +310,22 @@ def main():
     parser.add_argument('--opti_ip',    default='150.65.146.84')
     parser.add_argument('--local_ip',   default='150.65.146.84')
     parser.add_argument('--opti_id',    type=int, default=1)
-    parser.add_argument('--opti_alpha', type=float, default=-30.0,
+    parser.add_argument('--opti_alpha', type=float, default=-178.30969800115128,
                         help='OptiTrack-to-manipulator rotation angle in degrees (default -30)')
     parser.add_argument('--no_optitrack', action='store_true',
                         help='Disable OptiTrack for elongation command (opti columns will be NaN)')
+    parser.add_argument('--file_type', type=str, default='eps',
+                        help='File type for saving figures (default eps)')
+    # ── csv replay options ──────────────────────────────────────────────────────
+    parser.add_argument('--replay_csv', type=str, default='data/TROpaper_data/perception/testrun_4_perception.csv',
+                        help="PWM sets (pwm1,pwm2,pwm3 columns) replayed by typing 'csv' "
+                             "(relative paths resolve against the program folder)")
+    parser.add_argument('--replay_delay', type=float, default=2.0,
+                        help="Extra settle time (s) after Arduino confirms each PWM set has "
+                             "reached target, in 'csv' replay (default 1.0)")
+    parser.add_argument('--replay_max_wait', type=float, default=5.0,
+                        help="Safety timeout (s) to wait for Arduino's DONE feedback per PWM "
+                             "set in 'csv' replay, in case it's missed (default 3.0)")
 
     args = parser.parse_args()
     mode = args.mode
@@ -244,12 +350,13 @@ def main():
     buffers = {"t": [], "r1": [], "r2": [], "r3": [], "p1": [], "p2": [], "p3": [], "press": []}
     stop_flag = {"stop": False}
     save_fig = True
+    done_event = threading.Event()  # set by reader_logger on "DONE" -- see replay_pwm_csv
 
     opti = None
     opti_origin = np.zeros(3)
 
     reader_thread = threading.Thread(target=reader_logger,
-                                     args=(ser, writer, buffers, stop_flag),
+                                     args=(ser, writer, buffers, stop_flag, done_event),
                                      daemon=True)
     reader_thread.start()
 
@@ -412,39 +519,39 @@ def main():
                     stop_flag["stop"] = True
                     break
 
-                elif text.lower() in ("triple", "t"):
-                    fn3 = f"log_module{mode}_{ts}"
-                    pairs = [(m1, m2, m3)
-                             for m1 in range(1, 26)
-                             for m2 in range(1, 26)
-                             for m3 in range(m2, 26)]
-                    count = 20
-                    n_full = len(pairs) // count
-                    TIME_STAMP = f"data/{mode}/{fn3}_timestamp_0.csv"
-                    f_timestamp = open(TIME_STAMP, "w", newline="")
-                    writer_timestamp = csv.writer(f_timestamp)
-                    writer_timestamp.writerow(["current_time", "pwm_incr_module1",
-                                               "pwm_incr_module2", "pwm_incr_module3"])
-                    for i in range(n_full):
-                        for j in range(count):
-                            p = pairs[count * i + j]
-                            current_time = datetime.now().strftime("%H:%M:%S")
-                            ser.write(f"{p[0]} {p[1]} {p[2]}\n".encode("ascii"))
-                            print("[PYTHON] Sent:", f"{p[0]} {p[1]} {p[2]}")
-                            time.sleep(1.5)
-                            writer_timestamp.writerow([current_time, *p])
-                        ser.write(b"0 0 0\n")
-                        time.sleep(4)
-                    for p in pairs[count * n_full:count * n_full + 25]:
-                        current_time = datetime.now().strftime("%H:%M:%S")
-                        ser.write(f"{p[0]} {p[1]} {p[2]}\n".encode("ascii"))
-                        time.sleep(1.5)
-                        writer_timestamp.writerow([current_time, *p])
-                    ser.write(b"0 0 0\n")
-                    time.sleep(4)
-                    f_timestamp.close()
-                    stop_flag["stop"] = True
-                    break
+                elif text.lower() == "csv":
+                    if opti is None and not args.no_optitrack and MotiveNatNetReader is not None:
+                        print(f"[optitrack] Connecting to {args.opti_ip} ...")
+                        opti = MotiveNatNetReader(
+                            server_ip=args.opti_ip,
+                            local_ip=args.local_ip,
+                            use_multicast=False,
+                            rigid_body_id=args.opti_id,
+                            alpha=np.deg2rad(args.opti_alpha),
+                        )
+                        opti.start()
+                        time.sleep(1.0)
+                        sp = opti.get_latest()
+                        if sp is not None:
+                            opti_origin[:] = np.array(sp.pos_xyz, dtype=float)
+                            print(f"[optitrack] Rest origin: {opti_origin} m")
+                        else:
+                            print("[optitrack] WARNING: no sample — origin stays [0,0,0].")
+                    csv_path = args.replay_csv
+                    if not os.path.isabs(csv_path):
+                        csv_path = os.path.join(PROJECT_DIR, csv_path)
+                    if not os.path.exists(csv_path):
+                        print(f"[csv] File not found: {csv_path}")
+                        continue
+                    ser.write(f"{8} {8} {8}\n".encode("ascii"))
+                    ser.write(b"sf\n")
+                    input("Press Enter to go next...")
+                    replay_pwm_csv(
+                        ser, csv_path, args.replay_delay,
+                        f"data/TROpaper_data/perception/csv_replay_{ts}.csv",
+                        buffers, done_event, max_wait_s=args.replay_max_wait,
+                        opti=opti, opti_origin=opti_origin,
+                    )
         except KeyboardInterrupt:
             stop_flag["stop"] = True
 
@@ -469,7 +576,7 @@ def main():
         rec_path = f"data/{mode}/{plot_file_name}.mp4"
     run_live_plot(buffers, stop_flag, save_fig, plot_file_name,
                   record_path=rec_path, record_fps=args.record_fps,
-                  record_fig=args.record_fig)
+                  record_fig=args.record_fig, file_type=args.file_type)
 
     if camera_rec is not None:
         camera_rec.stop()
@@ -479,6 +586,7 @@ def main():
     f.flush()
     f.close()
     ser.write(b"0 0 0\n")
+    ser.write(b"r\n")
     ser.close()
     if opti is not None:
         opti.stop()

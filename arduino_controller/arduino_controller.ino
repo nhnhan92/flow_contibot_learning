@@ -81,6 +81,14 @@ int pww_init2 = base2 + pwm_init_extra;
 int pww_init3 = base3 + pwm_init_extra;
 int init_min = 140;
 
+// True once the ramp has stopped changing for the current command (see
+// updatePwmRamps). Starts true (nothing commanded yet, already "reached"
+// at rest) so no spurious DONE fires before the first real command;
+// parsePwmCommand resets it to false on every new command so the ramp's
+// completion gets signalled exactly once per command, even one that
+// resolves in a single tick (e.g. snapping straight to 0).
+bool pwmReached = true;
+
 void applyPwm() {
   analogWrite(VALVE1_PIN, pwm1_cur);
   analogWrite(VALVE2_PIN, pwm2_cur);
@@ -121,8 +129,19 @@ void updatePwmRamps() {
   pwm2_cur = rampPwm(pwm2_cur, pwm2_target,pww_init2);
   pwm3_cur = rampPwm(pwm3_cur, pwm3_target,pww_init3);
 
-  if (pwm1_cur != old1 || pwm2_cur != old2 || pwm3_cur != old3) {
+  bool changed = (pwm1_cur != old1) || (pwm2_cur != old2) || (pwm3_cur != old3);
+  if (changed) {
     applyPwm();
+  }
+
+  // Signal ramp completion once per command: fires the first tick nothing
+  // moved. Deliberately NOT "pwm*_cur == pwm*_target" -- rampPwm's low-end
+  // special case (target <= init) snaps cur to 0 while target stays at
+  // init+a, so cur never equals target there; "stopped changing" is the
+  // signal that actually generalizes to every rampPwm branch.
+  if (!changed && !pwmReached) {
+    Serial.println("DONE");
+    pwmReached = true;
   }
 
   digitalWrite(SUCTION_RELEASE, LOW);
@@ -148,6 +167,7 @@ void parsePwmCommand(const String &line) {
     pwm1_target = a + pww_init1;
     pwm2_target = b + pww_init2;
     pwm3_target = c + pww_init3;
+    pwmReached = false;  // a new target is live -- updatePwmRamps will signal DONE once reached
 
     // ACK echoes the original requested values (a, b, c) so Python can verify receipt.
     // Format matches what _serial_reader_thread expects: "ACK p1 p2 p3\n"
@@ -206,6 +226,7 @@ void loop() {
         pwm1_target = 0;
         pwm2_target = 0;
         pwm3_target = 0;
+        pwmReached = false;
         updatePwmRamps();
         digitalWrite(SUCTION_RELEASE, HIGH);
         delay(1000);
@@ -224,6 +245,7 @@ void loop() {
           pwm1_target = constrain(pww_init1, 0, 255);
           pwm2_target = constrain(pww_init2, 0, 255);
           pwm3_target = constrain(pww_init3, 0, 255);
+          pwmReached = false;
           }
       } else if (line.charAt(0) == 'i' || line.charAt(0) == 'I') {
         int init_1, init_2, init_3;
@@ -238,6 +260,7 @@ void loop() {
           pwm1_target = constrain(base1, 0, 255);
           pwm2_target = constrain(base2, 0, 255);
           pwm3_target = constrain(base3, 0, 255);
+          pwmReached = false;
           }
       } else {
         parsePwmCommand(line);
@@ -284,11 +307,11 @@ void loop() {
 
       // Print CSV line (note: we log CURRENT PWM values)
       Serial.print(now);         Serial.print(",");
-      Serial.print(rawFlow1);     Serial.print(",");
+      Serial.print(raw1_lpm);     Serial.print(",");
       Serial.print(processed_flow1, 3);  Serial.print(",");
-      Serial.print(rawFlow2);     Serial.print(",");
+      Serial.print(raw2_lpm);     Serial.print(",");
       Serial.print(processed_flow2, 3);  Serial.print(",");
-      Serial.print(rawFlow3);     Serial.print(",");
+      Serial.print(raw3_lpm);     Serial.print(",");
       Serial.print(processed_flow3, 3);  Serial.print(",");
       Serial.print(rawPress);           Serial.print(",");
       Serial.print(processed_press, 5); Serial.print(",");

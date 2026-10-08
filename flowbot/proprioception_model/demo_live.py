@@ -140,7 +140,7 @@ def main():
     parser.add_argument("--opti_ip",    default="150.65.146.84")
     parser.add_argument("--local_ip",   default="150.65.146.84")
     parser.add_argument("--opti_id",    type=int, default=1)
-    parser.add_argument("--opti_alpha", type=float, default=-30.0)
+    parser.add_argument("--opti_alpha", type=float, default=-178.30969800115128)
     parser.add_argument("--record",     action="store_true")
     parser.add_argument("--csv_run",    default=None)
     parser.add_argument("--csv_delay",  type=float, default=1.5,
