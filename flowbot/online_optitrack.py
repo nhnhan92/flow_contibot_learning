@@ -86,32 +86,6 @@ def build_ring_marker_positions(
         out[mid] = (radius_m * np.cos(a), radius_m * np.sin(a), z_offset_m)
     return out
 
-
-# Flowbot distal-tip marker layout, keyed by marker index 1-6 (matching the
-# physical layout diagram) -- this must match whatever key
-# get_latest_markers() reports live for each marker (see its docstring).
-#
-# Built DIRECTLY from a real diagnose_marker_layout() run on the actual rig,
-# rather than from the hand-drawn picture's angles -- the picture-derived
-# angles (pairs 48.4deg apart, bisectors 120deg apart, radius=half of
-# "122.23mm" which turned out to be a diameter not a radius) produced an
-# error pattern against live data that was NOT a clean single-marker-swap or
-# global-handedness-flip signature (4 markers at -45..-49deg error, marker 5
-# at -94deg) -- i.e. still wrong in some way not worth further guessing.
-# marker_angles_deg here are the LIVE MEASURED angles from the --diagnose
-# table, shifted so 0deg = the {1,5} pair's bisector -- i.e. true local +X,
-# per the original design (one axis per actuator, bisecting its marker
-# pair) -- NOT marker #1's own position. A first attempt used marker #1
-# itself as the 0deg reference; that gave a near-perfect shape fit
-# (fit_rms_m dropped from ~60-90mm to 0.4mm) but alpha came out ~159deg
-# instead of the expected ~+/-90deg, because marker #1 sits ~22.76deg off
-# the true +X axis -- confirmed by checking that all three pair bisectors
-# ({1,5}, {2,6}, {4,3}) are ~120deg apart in the raw data (within 0.6deg),
-# so re-centering on the {1,5} bisector is the physically correct 0deg.
-# radius_m is the live measured average radius (~61.2mm, confirming
-# "122.23mm" was indeed a diameter: 122.23/2 = 61.115, matches within noise).
-# z_offset_m=96.3mm is kept as given directly (not something this ring-plane
-# diagnostic measures).
 FLOWBOT_MARKER_POSITIONS_M: Dict[int, Tuple[float, float, float]] = build_ring_marker_positions(
     marker_angles_deg={
         1: 22.763,
@@ -182,13 +156,6 @@ class MotiveNatNetReader:
     def _on_frame(self, data_frame):
         t_arrival = time.perf_counter()
 
-        # Labeled markers belonging to our rigid body, keyed by marker_id (the
-        # stable 1-6 per-asset marker index: id_num = model_id<<16 | marker_id,
-        # confirmed against this project's actual hardware -- model_id equals
-        # rigid_body_id, marker_id is 1-6, tied to the asset definition, not
-        # reshuffled per-frame). Processed independently of the rigid-body pose
-        # below (RigidBody.markers is None on modern NatNet protocols -- marker
-        # data only comes via DataFrame.labeled_markers, not per-rigid-body).
         labeled = getattr(data_frame, "labeled_markers", None)
         if labeled:
             markers = {m.marker_id: np.array(m.pos, dtype=float)
@@ -229,13 +196,20 @@ class MotiveNatNetReader:
         with self._lock:
             self._latest = sample
 
-    def start(self) -> None:
+    def start(self, auto_calibrate: bool = True) -> None:
         # Connect and run async receiving threads
         self._client.connect()
         # Request model definitions (optional but useful for debugging IDs/names)
         self._client.request_modeldef()
         self._client.run_async()
         print(f"Started NatNet client. Server: {self.server_ip}, Local: {self.local_ip}, Multicast: {self.use_multicast}, RigidBody ID: {self.rigid_body_id}")
+        if auto_calibrate and self.local_marker_positions_m:
+            try:
+                self.calibrate_alpha_from_markers(apply=True)
+            except Exception as e:
+                print(f"[start] auto-calibration failed ({e}) -- keeping alpha="
+                      f"{self.alpha:.6f} rad ({np.degrees(self.alpha):.3f} deg) as given "
+                      f"at construction.")
 
     def stop(self) -> None:
         try:
@@ -553,7 +527,10 @@ def main():
         rigid_body_id=args.rigid_body_id,
         local_marker_positions_m=FLOWBOT_MARKER_POSITIONS_M,
     )
-    motive.start()
+    # --calibrate/--diagnose run their own explicit calibration below, so skip
+    # start()'s automatic one here to avoid doing it twice; the default live
+    # loop (neither flag) benefits from the automatic one as normal.
+    motive.start(auto_calibrate=not (args.calibrate or args.diagnose))
 
     if args.calibrate:
         try:

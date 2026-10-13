@@ -429,6 +429,7 @@ class ResNet18VisionEncoder(nn.Module):
         use_spatial_softmax=False,
         num_keypoints=32,
         crop_pad=0,
+        spatial_softmax_proj=False,
     ):
         super().__init__()
         self.obs_horizon = obs_horizon
@@ -444,7 +445,21 @@ class ResNet18VisionEncoder(nn.Module):
 
         # ── Spatial pooling ───────────────────────────────────────────────────
         if use_spatial_softmax:
-            self.pool = SpatialSoftmax(num_keypoints=num_keypoints)
+            if spatial_softmax_proj:
+                # Learned 1x1 conv projects the 512 backbone channels down to
+                # num_keypoints BEFORE the spatial softmax, so the network
+                # chooses which spatial features to track (standard Finn et
+                # al. spatial-softmax) -- adds its own trainable parameters
+                # (pool.0.*), so this is a different architecture from the
+                # default below, not just a different hyperparameter.
+                self.pool = nn.Sequential(
+                    nn.Conv2d(resnet.fc.in_features, num_keypoints, kernel_size=1),
+                    SpatialSoftmax(num_keypoints=num_keypoints),
+                )
+            else:
+                # Default: SpatialSoftmax directly on the first num_keypoints
+                # of the 512 raw backbone channels, no learned projection.
+                self.pool = SpatialSoftmax(num_keypoints=num_keypoints)
             feat_per_frame = num_keypoints * 2   # e.g. 32 kp → 64-D
         else:
             self.pool = nn.AdaptiveAvgPool2d((1, 1))
@@ -543,6 +558,7 @@ class DiffusionPolicy(nn.Module):
         num_keypoints=32,           # SpatialSoftmax keypoints (Stanford default: 32)
         crop_pad=0,                 # Random crop padding pixels (0 = disabled)
         num_cameras=1,              # 1 = camera_0 (global) only, 2 = + camera_1 (wrist)
+        spatial_softmax_proj=False, # True → learned 1x1-conv channel projection before SpatialSoftmax
     ):
         super().__init__()
 
@@ -575,6 +591,7 @@ class DiffusionPolicy(nn.Module):
                     use_spatial_softmax=use_spatial_softmax,
                     num_keypoints=num_keypoints,
                     crop_pad=crop_pad,
+                    spatial_softmax_proj=spatial_softmax_proj,
                 )
             return VisionEncoder(obs_horizon, vision_feature_dim)
 

@@ -20,10 +20,11 @@ except ImportError:
     _CV2_AVAILABLE   = False
 
 try:
-    from flowbot.online_optitrack import MotiveNatNetReader
+    from flowbot.online_optitrack import MotiveNatNetReader, FLOWBOT_MARKER_POSITIONS_M
     _OPTI_AVAILABLE = True
 except ImportError:
     MotiveNatNetReader = None
+    FLOWBOT_MARKER_POSITIONS_M = None
     _OPTI_AVAILABLE   = False
 
 BAUD_RATE = 115200
@@ -311,7 +312,10 @@ def main():
     parser.add_argument('--local_ip',   default='150.65.146.84')
     parser.add_argument('--opti_id',    type=int, default=1)
     parser.add_argument('--opti_alpha', type=float, default=-178.30969800115128,
-                        help='OptiTrack-to-manipulator rotation angle in degrees (default -30)')
+                        help='Fallback OptiTrack-to-manipulator rotation angle in degrees, used only '
+                             'if MotiveNatNetReader.start()\'s automatic marker-based calibration fails '
+                             '(e.g. rig/markers not in view yet) -- normally irrelevant since alpha is '
+                             're-derived fresh from the 6 markers every time.')
     parser.add_argument('--no_optitrack', action='store_true',
                         help='Disable OptiTrack for elongation command (opti columns will be NaN)')
     parser.add_argument('--file_type', type=str, default='eps',
@@ -431,9 +435,10 @@ def main():
                             local_ip=args.local_ip,
                             use_multicast=False,
                             rigid_body_id=args.opti_id,
-                            alpha=np.deg2rad(args.opti_alpha),
+                            alpha=np.deg2rad(args.opti_alpha),  # fallback only -- start() auto-calibrates below
+                            local_marker_positions_m=FLOWBOT_MARKER_POSITIONS_M,
                         )
-                        opti.start()
+                        opti.start()  # auto-calibrates alpha from the 6 markers, no manual paste needed
                         time.sleep(1.0)
                         sp = opti.get_latest()
                         if sp is not None:
@@ -527,9 +532,10 @@ def main():
                             local_ip=args.local_ip,
                             use_multicast=False,
                             rigid_body_id=args.opti_id,
-                            alpha=np.deg2rad(args.opti_alpha),
+                            alpha=np.deg2rad(args.opti_alpha),  # fallback only -- start() auto-calibrates below
+                            local_marker_positions_m=FLOWBOT_MARKER_POSITIONS_M,
                         )
-                        opti.start()
+                        opti.start()  # auto-calibrates alpha from the 6 markers, no manual paste needed
                         time.sleep(1.0)
                         sp = opti.get_latest()
                         if sp is not None:

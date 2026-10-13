@@ -63,6 +63,7 @@ class DiffusionPolicyInference:
             film_kernel_size=self.config.get('film_kernel_size', 5),
             use_spatial_softmax=self.config.get('use_spatial_softmax', None),
             num_keypoints=self.config.get('num_keypoints', 32),
+            spatial_softmax_proj=self.config.get('spatial_softmax_proj', False),
             crop_pad=self.config.get('random_crop_pad', 0),  # disabled at eval time automatically
             num_cameras=self.num_cameras,
         ).to(self.device)
