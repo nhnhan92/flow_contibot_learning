@@ -45,8 +45,8 @@ class flowbot:
     from flowbot.plot_helper import plot_helper
     def __init__(self,serial_port: str = "/dev/ttyACM0",
                  baud: int = 115200,
-                 pwm_min: int = 1,
-                 pwm_max: int = 25,
+                 pwm_min: int = 0,
+                 pwm_max: int = 26,
                  enable_plot: bool = False,
                 frequency: float = 30.0,
                 max_pos_speed: float = 150.0,
@@ -438,6 +438,15 @@ class flowbot:
     def release(self):
 
         cmd = "r\n"
+        try:
+            self.ser.write(cmd.encode("ascii"))
+        except Exception as e:
+            print("Serial write failed:", e)
+        time.sleep(0.1)
+
+    def suction(self):
+    
+        cmd = "sf\n"
         try:
             self.ser.write(cmd.encode("ascii"))
         except Exception as e:

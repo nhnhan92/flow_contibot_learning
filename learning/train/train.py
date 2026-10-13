@@ -215,9 +215,11 @@ def main():
     use_film = config.get('use_film_unet', True)
     use_ss   = config.get('use_spatial_softmax', None)   # None → auto
     n_kp     = config.get('num_keypoints', 32)
+    ss_proj  = config.get('spatial_softmax_proj', False)  # True → learned conv projection before SpatialSoftmax
     pool_name = 'SpatialSoftmax' if (use_ss or (use_ss is None and use_film)) else 'AvgPool'
     print(f"UNet variant  : {'FiLM (ConditionalUNet1D)' if use_film else 'Simple (DiffusionUNet1D)'}")
-    print(f"Vision pooling: {pool_name}" + (f" ({n_kp} kp → {n_kp*2}D/frame)" if 'Spatial' in pool_name else ''))
+    print(f"Vision pooling: {pool_name}" + (f" ({n_kp} kp → {n_kp*2}D/frame"
+          f"{', learned conv proj' if ss_proj else ''})" if 'Spatial' in pool_name else ''))
     num_cameras = 2 if camera_mode == 'both' else 1
     cam_desc = {'global': 'global only', 'wrist': 'wrist only', 'both': 'global + wrist'}[camera_mode]
     print(f"Cameras       : {num_cameras} ({cam_desc})")
@@ -237,6 +239,7 @@ def main():
         film_kernel_size=config.get('film_kernel_size', 5),
         use_spatial_softmax=use_ss,
         num_keypoints=n_kp,
+        spatial_softmax_proj=ss_proj,
         crop_pad=config.get('random_crop_pad', 0),
         num_cameras=num_cameras,
     ).to(device)

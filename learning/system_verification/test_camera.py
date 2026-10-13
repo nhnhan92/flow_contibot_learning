@@ -499,15 +499,18 @@ def test_dual_streams(
 @click.option('--target-height', '-h', default=212, help='Target resize height for training '
               '(single-camera mode; global camera in --dual mode)')
 @click.option('--rgb-only', is_flag=True, help='Only test RGB stream (no depth)')
-@click.option('--crop-scale', default=2.0, help='Crop window size as a multiple of target size '
-              '(single-camera mode; global camera in --dual mode)')
-@click.option('--crop-x', default=0.42, help='Crop anchor x in [0,1]: 0=left, 0.5=center, 1=right '
-              '(single-camera mode; global camera in --dual mode)')
+@click.option('--crop-scale', default=1.5, help='Crop window size as a multiple of target size '
+              '(single-camera mode; global camera in --dual mode). Default matches '
+              'config_train_flowbot_ur5.yaml -- override to try a different crop for a new config.')
+@click.option('--crop-x', default=0.5, help='Crop anchor x in [0,1]: 0=left, 0.5=center, 1=right '
+              '(single-camera mode; global camera in --dual mode). Default matches '
+              'config_train_flowbot_ur5.yaml.')
 @click.option('--crop-y', default=0.5, help='Crop anchor y in [0,1]: 0=top, 0.5=center, 1=bottom '
               '(single-camera mode; global camera in --dual mode)')
 @click.option('--wrist-target-width', default=228, help='Wrist camera target resize width (--dual mode only)')
 @click.option('--wrist-target-height', default=212, help='Wrist camera target resize height (--dual mode only)')
-@click.option('--wrist-crop-scale', default=2.5, help='Wrist camera crop window size as a multiple of target size (--dual mode only)')
+@click.option('--wrist-crop-scale', default=2.0, help='Wrist camera crop window size as a multiple of target size '
+              '(--dual mode only). Default matches config_train_flowbot_ur5.yaml.')
 @click.option('--wrist-crop-x', default=1, help='Wrist camera crop anchor x in [0,1] (--dual mode only)')
 @click.option('--wrist-crop-y', default=1, help='Wrist camera crop anchor y in [0,1] (--dual mode only)')
 @click.option('--dual', is_flag=True, help='Test the global + wrist cameras together '
