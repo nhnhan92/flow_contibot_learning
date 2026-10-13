@@ -272,7 +272,8 @@ if __name__ == "__main__":
     parser.add_argument("--lr",            type=float, default=1e-3)
     parser.add_argument("--patience",      type=int,   default=100,
                         help="Early-stopping patience (epochs without val improvement)")
-    parser.add_argument("--no_plot",       action="store_true",
+    parser.add_argument("--no_plo" \
+    "t",       action="store_true",
                         help="Disable live loss plot (useful for headless/remote runs)")
 
     main(parser.parse_args())
