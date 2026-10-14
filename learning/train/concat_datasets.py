@@ -24,6 +24,21 @@ Usage:
         data/session1/dataset.zarr \\
         data/session2/dataset.zarr \\
         --output data/combined/dataset.zarr --dry_run
+
+    # If each source is a separate per-object collection session (e.g.
+    # session1 = all ObjectA episodes, session2 = all ObjectB episodes),
+    # label them in the SAME merge step with --object_names -- one name per
+    # source, same order -- instead of a separate label_object_id.py pass:
+    python concat_datasets.py \\
+        data/session_objectA/dataset.zarr \\
+        data/session_objectB/dataset.zarr \\
+        --output data/combined/dataset.zarr \\
+        --object_names ObjectA ObjectB
+    # This writes meta/object_names + meta/episode_object_id directly --
+    # see dataset.py's 'object_id' state_keys component. If your sources
+    # DON'T cleanly map one-to-one to objects (e.g. a session mixed several
+    # objects, or you built the combined dataset some other way), use
+    # label_object_id.py on the combined output instead.
 """
 
 import sys
@@ -32,7 +47,7 @@ import shutil
 import numpy as np
 import zarr
 from pathlib import Path
-from zarr.codecs.numcodecs import Blosc
+from zarr.codecs.numcodecs import Blosc, VLenUTF8
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -67,7 +82,7 @@ def _print_summary(sources):
 # ── Core ──────────────────────────────────────────────────────────────────────
 
 def concat_datasets(source_paths, output_path, chunk_size=100, overwrite=False,
-                    dry_run=False):
+                    dry_run=False, object_names=None):
     """
     Concatenate zarr datasets in the given order.
 
@@ -77,8 +92,20 @@ def concat_datasets(source_paths, output_path, chunk_size=100, overwrite=False,
         chunk_size   : int               frames per I/O chunk (tune for RAM)
         overwrite    : bool              delete existing output if present
         dry_run      : bool              scan and validate only; write nothing
+        object_names : list[str] | None  one object name per source_paths entry,
+                       same order -- if given, every episode from source i is
+                       labeled object_names[i], written as meta/object_names +
+                       meta/episode_object_id (see dataset.py's 'object_id'
+                       state_keys component). Must be len(source_paths); repeat
+                       a name if two sources are the same object.
     """
     output_path = Path(output_path)
+    if object_names is not None and len(object_names) != len(source_paths):
+        raise ValueError(
+            f"--object_names has {len(object_names)} entries but there are "
+            f"{len(source_paths)} source datasets -- need exactly one name per source "
+            f"(repeat a name if two sources share an object)."
+        )
 
     # ── 1. Scan ───────────────────────────────────────────────────────────────
     print("Scanning source datasets ...")
@@ -161,6 +188,7 @@ def concat_datasets(source_paths, output_path, chunk_size=100, overwrite=False,
     # ── 5. Copy data ──────────────────────────────────────────────────────────
     offset       = 0
     all_ep_ends  = []
+    all_ep_object_names = []  # one entry per episode, only used if object_names given
 
     for src_i, src in enumerate(sources):
         n = src['n_frames']
@@ -169,6 +197,8 @@ def concat_datasets(source_paths, output_path, chunk_size=100, overwrite=False,
 
         # Update episode_ends with cumulative offset
         all_ep_ends.extend((src['ep_ends'] + offset).tolist())
+        if object_names is not None:
+            all_ep_object_names.extend([object_names[src_i]] * src['n_eps'])
 
         # Copy each key in chunks
         for key in sorted(common_keys):
@@ -194,6 +224,21 @@ def concat_datasets(source_paths, output_path, chunk_size=100, overwrite=False,
         chunks=(max(1, len(ep_ends_arr)),),
     )
     ep_ends_ds[:] = ep_ends_arr
+
+    # ── 6b. Write object labels, if requested ─────────────────────────────────
+    if object_names is not None:
+        unique_names = sorted(set(object_names))   # stable, alphabetical -> deterministic indices
+        name_to_id = {name: i for i, name in enumerate(unique_names)}
+        episode_object_id = np.array([name_to_id[n] for n in all_ep_object_names], dtype=np.int64)
+        meta_group.create_array('episode_object_id', shape=episode_object_id.shape, dtype=np.int64)
+        meta_group['episode_object_id'][:] = episode_object_id
+        meta_group.create_array('object_names', shape=(len(unique_names),), dtype=object,
+                                object_codec=VLenUTF8())
+        meta_group['object_names'][:] = unique_names
+        counts = np.bincount(episode_object_id, minlength=len(unique_names))
+        print(f"\nLabeled {total_eps} episodes -> {len(unique_names)} objects: {unique_names}")
+        for name, count in zip(unique_names, counts):
+            print(f"  {name}: {count} episodes")
 
     # ── 7. Copy metadata (camera_info etc.) from first source if present ──────
     for group_name in ('camera_info',):
@@ -230,6 +275,11 @@ def main():
                         help='Overwrite output if it already exists')
     parser.add_argument('--dry_run', action='store_true',
                         help='Scan and validate only; do not write anything')
+    parser.add_argument('--object_names', nargs='+', default=None, metavar='NAME',
+                        help='One object name per SOURCE, same order/count -- labels every '
+                             'episode from that source with that object (see dataset.py\'s '
+                             "'object_id' state_keys component). Omit if sources don't map "
+                             'one-to-one to objects (use label_object_id.py on the output instead).')
     args = parser.parse_args()
 
     ok = concat_datasets(
@@ -238,6 +288,7 @@ def main():
         chunk_size=args.chunk_size,
         overwrite=args.overwrite,
         dry_run=args.dry_run,
+        object_names=args.object_names,
     )
     return 0 if ok else 1
 
