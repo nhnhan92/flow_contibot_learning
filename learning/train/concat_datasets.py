@@ -47,7 +47,7 @@ import shutil
 import numpy as np
 import zarr
 from pathlib import Path
-from zarr.codecs.numcodecs import Blosc, VLenUTF8
+from zarr.codecs.numcodecs import Blosc
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -232,9 +232,12 @@ def concat_datasets(source_paths, output_path, chunk_size=100, overwrite=False,
         episode_object_id = np.array([name_to_id[n] for n in all_ep_object_names], dtype=np.int64)
         meta_group.create_array('episode_object_id', shape=episode_object_id.shape, dtype=np.int64)
         meta_group['episode_object_id'][:] = episode_object_id
-        meta_group.create_array('object_names', shape=(len(unique_names),), dtype=object,
-                                object_codec=VLenUTF8())
-        meta_group['object_names'][:] = unique_names
+        # Fixed-width unicode (not variable-length/object dtype) -- a plain
+        # native numpy dtype, needs no special codec, works the same in
+        # zarr v2 and v3 without chasing the exact VLenUTF8 import path.
+        names_arr = np.array(unique_names, dtype=f'<U{max(len(n) for n in unique_names)}')
+        meta_group.create_array('object_names', shape=names_arr.shape, dtype=names_arr.dtype)
+        meta_group['object_names'][:] = names_arr
         counts = np.bincount(episode_object_id, minlength=len(unique_names))
         print(f"\nLabeled {total_eps} episodes -> {len(unique_names)} objects: {unique_names}")
         for name, count in zip(unique_names, counts):
