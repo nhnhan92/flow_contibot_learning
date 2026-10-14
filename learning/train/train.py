@@ -376,6 +376,7 @@ def main():
                 'action_min': dataset.action_min,
                 'action_max': dataset.action_max,
                 'action_range': dataset.action_range,
+                'object_names': dataset.object_names,  # None unless 'object_id' in state_keys
             }, checkpoint_path)
             print(f"  Saved: {checkpoint_path}")
 
@@ -400,6 +401,7 @@ def main():
                 'action_min': dataset.action_min,
                 'action_max': dataset.action_max,
                 'action_range': dataset.action_range,
+                'object_names': dataset.object_names,  # None unless 'object_id' in state_keys
             }, best_path)
             print(f"  ✅ New best! Saved: {best_path} (improved by {improvement:.6f})")
         else:
@@ -430,6 +432,7 @@ def main():
         'action_min': dataset.action_min,
         'action_max': dataset.action_max,
         'action_range': dataset.action_range,
+        'object_names': dataset.object_names,  # None unless 'object_id' in state_keys
     }, final_path)
     print(f"\n✅ Training complete! Final model: {final_path}")
 
