@@ -78,10 +78,11 @@ film_kernel_size: 5       # Conv kernel size for FiLM UNet (Stanford: 5)
 
 # Vision pooling (auto: SpatialSoftmax when use_film_unet=true)
 use_spatial_softmax: true # null = auto (true if use_film_unet else false); or override explicitly
+spatial_softmax_proj: true
 num_keypoints: 32         # SpatialSoftmax keypoints → 64-D per frame (Stanford default)
 
 # Training
-num_epochs: 200
+num_epochs: 500
 batch_size: 128
 learning_rate: 5.0e-5  # Peak LR reached after warmup
 weight_decay: 1.0e-5   # AdamW weight decay
@@ -101,4 +102,4 @@ early_stopping_patience: 25  # Stop if no improvement for N post-warmup epochs (
 
 # Checkpointing
 output_dir: "/media/protac/Desk SSD/Nhan/trained_models_franka"
-save_every: 25       # Save checkpoint every N epochs
+save_every: 100       # Save checkpoint every N epochs
