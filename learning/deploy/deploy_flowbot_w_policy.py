@@ -595,16 +595,17 @@ class RobotDeployment:
         op_mode_pred = np.clip(np.round(action[d+3:d+5]), 0, 1).astype(int)
 
         # PWM offset, flowbot-active steps only.
-        if op_mode_pred[1] == 1 and np.all(pwm_raw<5):
-            pwm_raw = np.array([2, 5, 0])
-        elif op_mode_pred[1] == 1 and np.any(5<=pwm_raw) and np.all(pwm_raw<18):
-            pwm_raw = pwm_raw + np.array([1, 2, 0])
+        # if op_mode_pred[1] == 1 and np.all(pwm_raw<5):
+        #     pwm_raw = np.array([2, 5, 0])
+        # elif op_mode_pred[1] == 1 and np.any(5<=pwm_raw) and np.all(pwm_raw<18):
+        #     pwm_raw = pwm_raw + np.array([1, 2, 0])
         # elif op_mode_pred[1] == 1 and np.any(18<=pwm_raw) :
         #     pwm_raw = pwm_raw + np.array([0, 1, 0])
-        # if op_mode_pred[1] == 1:
-        #     pwm_raw = pwm_raw + np.array([4, 7, -1])
+        # if op_mode_pred[1] == 1 and pwm_raw[0]>=10:
+        #     pwm_raw = pwm_raw + np.array([-2, 0, 0])
         GROUND_FLOOR = 17
-        if op_mode_pred[1] == 1 and np.any(pwm_raw>=GROUND_FLOOR):
+        if op_mode_pred[1] == 1 and 0< pwm_raw[0] < 2:
+            print("check")
             self.fb.suction()
 
         pwm_int    = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)

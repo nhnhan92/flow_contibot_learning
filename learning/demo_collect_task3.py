@@ -369,10 +369,10 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--release_frames', default=1, type=int,
               help='Frames to record after release (both-button press). '
                    'At 10 Hz the default of 10 gives 1 s of released state.')
-@click.option('--target_pc_a', default=(11.05142857, 39.2857143, 103.45428571), type=(float, float, float),
+@click.option('--target_pc_a', default=(4.77428571, 39.83, 102.18142857), type=(float, float, float),
               help='First flowbot target point (x, y, z) in mm. Selected by pushing the SpaceMouse '
                    'forward on its z-axis (cmd_sm[2] > 0) while holding the right button.')
-@click.option('--target_pc_b', default=(10.05142857, -39.2857143, 103.45428571), type=(float, float, float),
+@click.option('--target_pc_b', default=(-4.77428571, -37.83, 102.18142857), type=(float, float, float),
               help='Second flowbot target point (x, y, z) in mm. Selected by pushing the SpaceMouse '
                    'backward on its z-axis (cmd_sm[2] < 0) while holding the right button. Required '
                    '(task3 always has two candidate targets -- no sensible default).')
@@ -643,6 +643,8 @@ def main(output, arm, robot_ip, camera_serial_global, camera_serial_wrist, no_ca
                         step_scale = min(1.0, dist / (fb.max_pos_speed * fb.dt + 1e-12))
                         direction  = (d / dist) * step_scale
                         pwm        = fb.step(direction)
+                        if 0< pwm[0] < 2:
+                            fb.suction()
                         fb.update_plot()
 
 
