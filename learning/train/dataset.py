@@ -20,18 +20,24 @@ from hardware.image_utils import crop_and_resize
 # state_keys component name -> zarr dataset key. 'tcp' additionally gets
 # sliced to :tcp_dims (its width varies with tcp_dims); the others are used
 # in full at their fixed width below. See DiffusionDataset's docstring.
+# 'object_id' is special: unlike the others it's a META (per-EPISODE, not
+# per-frame) field -- see label_object_id.py / concat_datasets.py's
+# --object_names, which write meta/episode_object_id + meta/object_names.
 STATE_COMPONENT_ZARR_KEY = {
-    'tcp':      'data/robot_eef_pose',
-    'pwm':      'data/pwm_signals',
-    'flowrate': 'data/flowrate',
-    'op_mode':  'data/operation_mode',
+    'tcp':       'data/robot_eef_pose',
+    'pwm':       'data/pwm_signals',
+    'flowrate':  'data/flowrate',
+    'op_mode':   'data/operation_mode',
+    'object_id': 'meta/episode_object_id',
 }
-STATE_COMPONENT_WIDTH = {'pwm': 3, 'flowrate': 3, 'op_mode': 2}  # 'tcp' width = tcp_dims
+STATE_COMPONENT_WIDTH = {'pwm': 3, 'flowrate': 3, 'op_mode': 2}  # 'tcp' width = tcp_dims, 'object_id' width = num_objects
 # Components whose normalization range is fixed, not derived from the data:
 # op_mode is always exactly {0, 1} per dim -- deriving min/max from data
 # would risk a degenerate (zero-width) range if a given dataset only ever
-# visited one op_mode value.
-STATE_COMPONENT_HARDCODED_STATS = {'op_mode'}
+# visited one op_mode value. object_id (one-hot) is always {0, 1} too, for
+# the same reason, and additionally because its width varies per dataset so
+# there's no fixed data-derived statistic to compute anyway.
+STATE_COMPONENT_HARDCODED_STATS = {'op_mode', 'object_id'}
 
 
 class DiffusionDataset(Dataset):
@@ -62,13 +68,24 @@ class DiffusionDataset(Dataset):
                      recording and doesn't have data/flowrate
         'op_mode'  : operation_mode              (width 2) -- always a fixed
                      {0,1} range (see _compute_stats), never data-derived
+        'object_id': one-hot object identity     (width num_objects) -- a
+                     PER-EPISODE (not per-frame) label, broadcast across the
+                     whole obs_horizon window; requires meta/episode_object_id
+                     + meta/object_names in the zarr (see label_object_id.py
+                     or concat_datasets.py's --object_names). num_objects is
+                     inferred from len(meta/object_names), not configured.
+                     Raises a clear error at load time if this dataset
+                     hasn't been labeled. Always a fixed {0,1} range, like
+                     op_mode.
     Default state_keys=('tcp', 'pwm', 'op_mode') reproduces the original
     fixed tcp_dims+5 composition exactly. Examples from the class's actual
     use: state_keys=('tcp', 'flowrate', 'op_mode') swaps pwm for flowrate
     (tcp_dims+5 D); state_keys=('tcp', 'pwm', 'flowrate', 'op_mode') uses
-    all four (tcp_dims+8 D). Set via config key 'state_keys'. Always the
-    Cartesian TCP pose for 'tcp', regardless of `arm` -- only the ACTION
-    space differs per arm (below), which is NOT affected by state_keys.
+    all four (tcp_dims+8 D); state_keys=('tcp', 'pwm', 'op_mode', 'object_id')
+    adds the per-episode object-identity conditioning (tcp_dims+5+num_objects D).
+    Set via config key 'state_keys'. Always the Cartesian TCP pose for 'tcp',
+    regardless of `arm` -- only the ACTION space differs per arm (below),
+    which is NOT affected by state_keys.
 
     Action, depends on `arm` and (Franka only) `franka_action_space`:
         UR5e             (tcp_dims+5 D): target TCP[:tcp_dims] from data/action
@@ -175,10 +192,9 @@ class DiffusionDataset(Dataset):
                 f"Unknown state_keys entry/entries {sorted(_unknown)}. "
                 f"Valid: {sorted(STATE_COMPONENT_ZARR_KEY)}."
             )
-        self.state_dim = sum(
-            self.tcp_dims if key == 'tcp' else STATE_COMPONENT_WIDTH[key]
-            for key in self.state_keys
-        )
+        # self.state_dim is computed further below, after the zarr is opened --
+        # 'object_id' (if used) needs num_objects, only known once
+        # meta/object_names has been read (see _component_width).
         self.crop_scale = crop_scale
         self.crop_x = crop_x
         self.crop_y = crop_y
@@ -261,6 +277,8 @@ class DiffusionDataset(Dataset):
                 "recollect with the wrist camera connected, or use camera_mode='global'."
             )
         for key in self.state_keys:
+            if key == 'object_id':
+                continue  # a meta/ (per-episode) field, validated separately below
             zarr_key = STATE_COMPONENT_ZARR_KEY[key]
             if zarr_key.split('/', 1)[1] not in self.zarr_root['data']:
                 raise ValueError(
@@ -283,6 +301,35 @@ class DiffusionDataset(Dataset):
         # Get episode boundaries
         self.episode_ends = self.zarr_root['meta/episode_ends'][:]
         self.n_episodes = len(self.episode_ends)
+
+        # object_id: per-episode one-hot, precomputed once here (not per
+        # __getitem__ call) and broadcast across obs_horizon in __getitem__.
+        # num_objects is INFERRED from meta/object_names, never configured,
+        # so it can never drift out of sync with how the dataset was labeled.
+        self.num_objects = None
+        self.object_names = None
+        if 'object_id' in self.state_keys:
+            if 'meta' not in self.zarr_root or 'episode_object_id' not in self.zarr_root['meta'] \
+                    or 'object_names' not in self.zarr_root['meta']:
+                raise ValueError(
+                    f"state_keys includes 'object_id', but {self.dataset_path} has no "
+                    f"meta/episode_object_id or meta/object_names -- label this dataset first "
+                    f"with learning/train/label_object_id.py (or concat_datasets.py's "
+                    f"--object_names if you built it with that script), or remove 'object_id' "
+                    f"from state_keys."
+                )
+            episode_object_id = np.asarray(self.zarr_root['meta/episode_object_id'][:], dtype=np.int64)
+            self.object_names = [str(n) for n in self.zarr_root['meta/object_names'][:]]
+            self.num_objects = len(self.object_names)
+            if len(episode_object_id) != self.n_episodes:
+                raise ValueError(
+                    f"meta/episode_object_id has {len(episode_object_id)} entries but this "
+                    f"dataset has {self.n_episodes} episodes (meta/episode_ends) -- labeling "
+                    f"is out of sync with the data, re-run the labeling step."
+                )
+            self.episode_object_onehot = np.eye(self.num_objects, dtype=np.float32)[episode_object_id]
+
+        self.state_dim = sum(self._component_width(key) for key in self.state_keys)
 
         # Calculate valid samples (need enough frames for obs + pred)
         self.samples = []
@@ -317,6 +364,8 @@ class DiffusionDataset(Dataset):
                   f"{len(self.samples)} samples")
         else:
             print(f"Loaded {self.n_episodes} episodes, {len(self.samples)} samples")
+        if self.num_objects is not None:
+            print(f"  object_id: {self.num_objects} objects {self.object_names}")
 
         # Compute normalization stats
         if self.normalize:
@@ -336,6 +385,16 @@ class DiffusionDataset(Dataset):
                     'data/camera_1', self.wrist_image_size,
                     self.wrist_crop_scale, self.wrist_crop_x, self.wrist_crop_y,
                 )
+
+    def _component_width(self, key):
+        """Width (in dims) of one state_keys component. 'tcp' and
+        'object_id' vary per instance (tcp_dims, num_objects respectively)
+        so aren't in the static STATE_COMPONENT_WIDTH dict."""
+        if key == 'tcp':
+            return self.tcp_dims
+        if key == 'object_id':
+            return self.num_objects
+        return STATE_COMPONENT_WIDTH[key]
 
     def _build_image_cache(self, camera_key, image_size, crop_scale, crop_x, crop_y):
         """Decode + crop + resize every frame of `camera_key` once, up front,
@@ -411,8 +470,8 @@ class DiffusionDataset(Dataset):
         _state_source = {'tcp': robot_states[:, :d], 'pwm': pwm_states, 'flowrate': flowrate_states}
         state_mins, state_maxs = [], []
         for key in self.state_keys:
-            if key in STATE_COMPONENT_HARDCODED_STATS:  # op_mode: always {0,1}, never data-derived
-                width = STATE_COMPONENT_WIDTH[key]
+            if key in STATE_COMPONENT_HARDCODED_STATS:  # op_mode/object_id: always {0,1}, never data-derived
+                width = self._component_width(key)
                 state_mins.append(np.zeros(width))
                 state_maxs.append(np.ones(width))
             else:
@@ -442,7 +501,7 @@ class DiffusionDataset(Dataset):
         print(f"  State composition {self.state_keys} ({self.state_dim}D):")
         offset = 0
         for key in self.state_keys:
-            width = d if key == 'tcp' else STATE_COMPONENT_WIDTH[key]
+            width = self._component_width(key)
             rng_str = ', '.join(
                 f"[{self.state_min[offset+i]:.4f}, {self.state_max[offset+i]:.4f}]"
                 for i in range(width)
@@ -515,6 +574,12 @@ class DiffusionDataset(Dataset):
             _state_raw['flowrate'] = self.zarr_root['data/flowrate'][obs_start:obs_end].astype(np.float32)
         if 'op_mode' in self.state_keys:  # [ur5_active, flowbot_active]
             _state_raw['op_mode'] = self.zarr_root['data/operation_mode'][obs_start:obs_end].astype(np.float32)
+        if 'object_id' in self.state_keys:
+            # Per-EPISODE (not per-frame) one-hot, broadcast across the obs
+            # window -- same value for every frame of a given episode, by
+            # design (see class docstring / label_object_id.py).
+            ep_onehot = self.episode_object_onehot[sample_info['episode_idx']]  # (num_objects,)
+            _state_raw['object_id'] = np.tile(ep_onehot, (self.obs_horizon, 1)).astype(np.float32)
 
         # Combined state (obs_horizon, state_dim): components in self.state_keys order.
         states = np.concatenate([_state_raw[key] for key in self.state_keys], axis=-1)
@@ -590,7 +655,7 @@ class DiffusionDataset(Dataset):
 
     def get_normalizer(self):
         """Get action/state normalizer for inference"""
-        return {
+        normalizer = {
             'action_min':   self.action_min,
             'action_max':   self.action_max,
             'action_range': self.action_range,
@@ -598,6 +663,13 @@ class DiffusionDataset(Dataset):
             'state_max':    self.state_max,
             'state_range':  self.state_range,
         }
+        if self.object_names is not None:
+            # Saved into the checkpoint so deploy can verify the object
+            # classifier's own object_names (same order/indices required)
+            # actually matches what this policy was trained with, instead of
+            # silently misaligning the one-hot if they were labeled differently.
+            normalizer['object_names'] = self.object_names
+        return normalizer
 
 
 def test_dataset():

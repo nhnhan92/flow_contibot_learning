@@ -69,6 +69,7 @@ from hardware.franka_robot import FrankaRobot
 from hardware.flowbot import flowbot
 from hardware.realsense_camera import RealSenseCamera
 from train.eval import DiffusionPolicyInference
+from train.object_classifier import ObjectClassifierInference
 from hardware.image_utils import crop_and_resize
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -128,7 +129,7 @@ class DeploymentLogger:
     """
 
     def __init__(self, log_dir: str, checkpoint_path: str, tcp_dims: int = 3,
-                 state_keys=('tcp', 'pwm', 'op_mode')):
+                 state_keys=('tcp', 'pwm', 'op_mode'), num_objects: int = None):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint_path = str(checkpoint_path)
@@ -138,11 +139,18 @@ class DeploymentLogger:
         # log_step can pull them out for the tcp_poses/pwm_actual log
         # columns regardless of composition/order -- state_raw is no longer
         # guaranteed to be [tcp, pwm, ...] now that state_keys is configurable.
-        _widths = {'pwm': 3, 'flowrate': 3, 'op_mode': 2}
+        # num_objects is required (and only needed) if 'object_id' is in
+        # state_keys, to correctly advance past its (dataset-specific) width.
+        _widths = {'pwm': 3, 'flowrate': 3, 'op_mode': 2, 'object_id': num_objects}
         self._tcp_offset = self._pwm_offset = None
         offset = 0
         for key in state_keys:
             width = tcp_dims if key == 'tcp' else _widths[key]
+            if width is None:
+                raise ValueError(
+                    f"state_keys includes 'object_id' but num_objects wasn't given to "
+                    f"DeploymentLogger -- can't compute its width."
+                )
             if key == 'tcp':
                 self._tcp_offset = offset
             elif key == 'pwm':
@@ -234,6 +242,8 @@ class RobotDeployment:
         position_command_stride: int = 1,
         franka_position_velocity: float = FRANKA_POSITION_VELOCITY,
         franka_position_acceleration: float = FRANKA_POSITION_ACCEL,
+        object_classifier_checkpoint: str = None,
+        object_classify_n_frames: int = 3,
     ):
         self.verbose = verbose
         self.arm = arm.lower()
@@ -262,13 +272,52 @@ class RobotDeployment:
         # fed to the model won't match what it was trained on. Read from the
         # checkpoint's saved config, never hardcoded, for exactly that reason.
         self.state_keys = list(self.config.get('state_keys', ['tcp', 'pwm', 'op_mode']))
-        _unknown_state_keys = set(self.state_keys) - {'tcp', 'pwm', 'flowrate', 'op_mode'}
+        _unknown_state_keys = set(self.state_keys) - {'tcp', 'pwm', 'flowrate', 'op_mode', 'object_id'}
         if _unknown_state_keys:
             raise ValueError(
                 f"Checkpoint config has unknown state_keys entry/entries "
                 f"{sorted(_unknown_state_keys)} (expected any of 'tcp', 'pwm', "
-                f"'flowrate', 'op_mode')"
+                f"'flowrate', 'op_mode', 'object_id')"
             )
+
+        # ── Object-identity classifier (only if this checkpoint was trained
+        # with 'object_id' in state_keys -- see dataset.py / object_classifier.py).
+        # Run ONCE per episode (see run_episode), not every control step --
+        # the cached result is read by _get_raw_observation()'s _state_source.
+        self.object_classifier = None
+        self.object_classify_n_frames = object_classify_n_frames
+        self.cached_object_onehot = None
+        if 'object_id' in self.state_keys:
+            if object_classifier_checkpoint is None:
+                raise ValueError(
+                    "This checkpoint's state_keys includes 'object_id', but no "
+                    "--object_classifier_checkpoint was given -- pass the trained "
+                    "object classifier (see train_object_classifier.py)."
+                )
+            self.object_classifier = ObjectClassifierInference(
+                object_classifier_checkpoint, device=str(device_obj))
+            # Sanity check: the classifier's object_names (and therefore which
+            # one-hot index means what) must match what this policy was
+            # trained with -- otherwise the conditioning is silently wrong
+            # (e.g. index 0 meaning 'ObjectA' to the classifier but 'ObjectB'
+            # to the policy). Only checked if the policy checkpoint saved
+            # object_names (see train.py); older checkpoints predating this
+            # can't be checked and are allowed through with a warning.
+            policy_object_names = self.policy.checkpoint.get('object_names')
+            if policy_object_names is not None and policy_object_names != self.object_classifier.object_names:
+                raise ValueError(
+                    f"Object name mismatch: this policy checkpoint was trained with "
+                    f"object_names={policy_object_names}, but the classifier checkpoint "
+                    f"has object_names={self.object_classifier.object_names}. These must "
+                    f"match EXACTLY (same names, same order) or the one-hot conditioning "
+                    f"will be silently wrong. Make sure both were labeled from the same "
+                    f"zarr meta/object_names."
+                )
+            elif policy_object_names is None:
+                print("      WARNING: this policy checkpoint has no saved object_names "
+                      "(older checkpoint?) -- cannot verify it matches the classifier's "
+                      f"object_names={self.object_classifier.object_names}. Proceeding, but "
+                      "double-check these were labeled consistently.")
         self.franka_action_space = self.config.get('franka_action_space', 'joint_velocity')
         if self.is_franka and self.franka_action_space not in ('joint_velocity', 'position'):
             raise ValueError(
@@ -294,6 +343,9 @@ class RobotDeployment:
         print(f"      obs_horizon={self.obs_horizon}, action_horizon={self.action_horizon}")
         print(f"      tcp_dims={self.tcp_dims}  ({'xyz only' if self.tcp_dims == 3 else 'xyz+rotation'})")
         print(f"      state_keys={self.state_keys}")
+        if self.object_classifier is not None:
+            print(f"      object_classifier: {self.object_classifier.object_names} "
+                  f"(classified once per episode, {self.object_classify_n_frames}-frame majority vote)")
         print(f"      action_dim_arm={self.action_dim_arm} ({'TCP pose' if self.uses_position_action else 'joint velocity'})"
               + (f"  franka_action_space={self.franka_action_space}" if self.is_franka else ""))
         if self.uses_position_action and self.position_command_stride > 1:
@@ -407,6 +459,41 @@ class RobotDeployment:
             crop_scale=self.wrist_crop_scale, crop_x=self.wrist_crop_x, crop_y=self.wrist_crop_y,
         )
 
+    def _classify_object(self):
+        """
+        Run the object-identity classifier ONCE per episode -- a majority
+        vote over object_classify_n_frames consecutive reads of the global
+        camera -- and cache the result in self.cached_object_onehot for the
+        whole rollout. Called from run_episode(), right after the operator
+        confirms the scene is set up and before the observation buffer is
+        filled, so the signal is computed on a clean, settled frame and then
+        held FIXED for every control step after that (see
+        _get_raw_observation()'s _state_source, which just reads the cached
+        value -- it does NOT re-classify every step). Holding it fixed is
+        the whole point: it's what prevents the per-replan mode-switching
+        that caused trajectories to drift toward the wrong object mid-rollout.
+
+        No-op if this checkpoint wasn't trained with 'object_id' conditioning.
+        """
+        if self.object_classifier is None:
+            return
+        if self.camera_mode == 'wrist':
+            raise RuntimeError(
+                "object_id conditioning needs the global camera to classify "
+                "from, but camera_mode='wrist' has no global camera open."
+            )
+        frames = []
+        for _ in range(self.object_classify_n_frames):
+            camera_frame, _ = self.cam.get_frames()
+            if camera_frame is None:
+                raise RuntimeError("Global camera read failed during object classification")
+            frames.append(camera_frame)
+        onehot, class_idx = self.object_classifier.predict_onehot(frames)
+        self.cached_object_onehot = onehot
+        name = self.object_classifier.object_names[class_idx]
+        print(f"  Classified object: {name} (index {class_idx}, "
+              f"{self.object_classify_n_frames}-frame vote)")
+
     def _get_raw_observation(self):
         """
         Read current robot state and camera image(s).
@@ -431,10 +518,13 @@ class RobotDeployment:
         # STATE_COMPONENT_ZARR_KEY for the training-time equivalent (there it's a
         # zarr field; here it's whatever hardware/tracked value corresponds to it).
         _state_source = {
-            'tcp':      tcp_pose[:self.tcp_dims],
-            'pwm':      pwm,
-            'flowrate': self.fb.last_flowrate,
-            'op_mode':  self.current_op_mode,
+            'tcp':       tcp_pose[:self.tcp_dims],
+            'pwm':       pwm,
+            'flowrate':  self.fb.last_flowrate,
+            'op_mode':   self.current_op_mode,
+            # Classified ONCE per episode (see run_episode -> _classify_object)
+            # and held fixed for the whole rollout -- NOT re-inferred here.
+            'object_id': self.cached_object_onehot,
         }
         state_raw = np.concatenate([_state_source[key] for key in self.state_keys])  # (state_dim,)
 
@@ -759,6 +849,11 @@ class RobotDeployment:
         print("Starting episode ...")
         print("="*30)
 
+        # Classify which object this episode is about ONCE, before anything
+        # else -- see _classify_object's docstring for why this must happen
+        # exactly once per episode (not per control step).
+        self._classify_object()
+
         # Fill the observation buffer with obs_horizon initial frames
         print("Filling observation buffer ...")
         self._fill_obs_buffer()
@@ -944,6 +1039,12 @@ def main():
                         help='Franka position mode only: relative_dynamics_factor acceleration '
                              'fraction (0-1) for set_tcp_pose. Same caveats as '
                              '--franka_position_speed.')
+    parser.add_argument('--object_classifier_checkpoint', type=str, default=None,
+                        help="Trained object-identity classifier checkpoint (see "
+                             "train_object_classifier.py) -- REQUIRED if --checkpoint's "
+                             "config has 'object_id' in state_keys, ignored otherwise.")
+    parser.add_argument('--object_classify_n_frames', type=int, default=3,
+                        help='Frames majority-voted to classify the object once per episode (default 3)')
     args = parser.parse_args()
 
     if not os.path.exists(args.checkpoint):
@@ -967,13 +1068,18 @@ def main():
             position_command_stride=args.position_command_stride,
             franka_position_velocity=args.franka_position_speed,
             franka_position_acceleration=args.franka_position_accel,
+            object_classifier_checkpoint=args.object_classifier_checkpoint,
+            object_classify_n_frames=args.object_classify_n_frames,
         )
         if args.log_dir:
             log_dir = Path(args.log_dir)
             if not log_dir.is_absolute():
                 log_dir = Path(DEPLOY_DIR) / 'deploy_logs' / log_dir
-            logger = DeploymentLogger(str(log_dir), args.checkpoint, tcp_dims=robot.tcp_dims,
-                                      state_keys=robot.state_keys)
+            logger = DeploymentLogger(
+                str(log_dir), args.checkpoint, tcp_dims=robot.tcp_dims,
+                state_keys=robot.state_keys,
+                num_objects=robot.object_classifier.num_objects if robot.object_classifier else None,
+            )
             print(f"Logging enabled → {log_dir}")
         else:
             logger = None
