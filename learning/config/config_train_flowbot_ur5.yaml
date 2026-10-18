@@ -5,6 +5,11 @@ obs_horizon: 2        # Number of observation frames
 pred_horizon: 16      # Number of action steps to predict
 action_horizon: 8     # Number of action steps to execute
 exclude_episodes: []  # Episodes to exclude from training (e.g. incomplete)
+# Train on episode starts padded with the first frame (obs window = copies of
+# frame 0), matching how deployment starts every episode. Without it the
+# policy never sees that start and can mistake it for the UR5->flowbot
+# handoff (flowbot moving first) -- see train/diagnose_first_step.py.
+pad_episode_start: true
 
 # Arm: 'franka' selects Franka (dataset.py, model.py, deploy script all
 # branch on this). A checkpoint trained with arm: franka is only valid for

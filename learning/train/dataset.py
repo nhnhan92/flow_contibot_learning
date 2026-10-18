@@ -40,6 +40,13 @@ STATE_COMPONENT_WIDTH = {'pwm': 3, 'flowrate': 3, 'op_mode': 2}  # 'tcp' width =
 STATE_COMPONENT_HARDCODED_STATS = {'op_mode', 'object_id'}
 
 
+def _pad_front(x, n_pad):
+    """Prepend n_pad copies of x[0] along axis 0 (episode-start obs padding)."""
+    if n_pad <= 0:
+        return x
+    return np.concatenate([np.repeat(x[:1], n_pad, axis=0), x], axis=0)
+
+
 class DiffusionDataset(Dataset):
     """
     Dataset for robot demonstrations with Flowbot soft manipulator.
@@ -174,6 +181,16 @@ class DiffusionDataset(Dataset):
         camera_mode='global',  # 'global' (camera_0 only), 'wrist' (camera_1 only), or 'both'
         franka_action_space='joint_velocity',  # Franka only: 'joint_velocity' (7D, data/action) or
                                                 # 'position' (TCP[:tcp_dims], data/robot_eef_pose)
+        pad_episode_start=True,  # Also sample the first obs_horizon-1 steps of each
+                                  # episode, padding the obs window by repeating the
+                                  # episode's first frame (Chi et al.'s pad_before).
+                                  # Deployment always starts with a buffer of
+                                  # obs_horizon copies of one frame (see
+                                  # deploy_flowbot_w_policy.py's _fill_obs_buffer);
+                                  # without this, the model never sees such a start
+                                  # in training and can mistake it for a stationary
+                                  # mid-episode moment (e.g. the UR5->flowbot
+                                  # handoff) -- see diagnose_first_step.py.
     ):
         self.dataset_path = Path(dataset_path)
         self.obs_horizon = obs_horizon
@@ -184,6 +201,7 @@ class DiffusionDataset(Dataset):
         self.cache_images = cache_images
         self.normalize = normalize
         self.exclude_episodes = exclude_episodes if exclude_episodes is not None else []
+        self.pad_episode_start = pad_episode_start
         self.tcp_dims = tcp_dims
         self.state_keys = list(state_keys)
         _unknown = set(self.state_keys) - set(STATE_COMPONENT_ZARR_KEY)
@@ -349,7 +367,10 @@ class DiffusionDataset(Dataset):
             # Franka position mode reading data/robot_eef_pose -- see
             # self._action_index_shift).
             for i in range(episode_length):
-                if i < obs_horizon - 1:
+                # Without padding, the first obs_horizon-1 steps can't fill a
+                # full obs window; with it, they're kept and __getitem__ pads
+                # the window by repeating the episode's first frame.
+                if i < obs_horizon - 1 and not self.pad_episode_start:
                     continue
                 if i + pred_horizon + self._action_index_shift > episode_length:
                     continue
@@ -366,6 +387,10 @@ class DiffusionDataset(Dataset):
             print(f"Loaded {self.n_episodes} episodes, {len(self.samples)} samples")
         if self.num_objects is not None:
             print(f"  object_id: {self.num_objects} objects {self.object_names}")
+        if self.pad_episode_start:
+            print(f"  pad_episode_start: first {obs_horizon - 1} step(s) of each episode "
+                  f"included, obs window padded with the episode's first frame")
+            self._check_episode_start_state()
 
         # Compute normalization stats
         if self.normalize:
@@ -385,6 +410,25 @@ class DiffusionDataset(Dataset):
                     'data/camera_1', self.wrist_image_size,
                     self.wrist_crop_scale, self.wrist_crop_x, self.wrist_crop_y,
                 )
+
+    def _check_episode_start_state(self):
+        """Padding repeats each episode's RECORDED first-frame state, while
+        deployment resets pwm to 0 and op_mode to idle [0,0] at step 0 (see
+        run_episode). Warn if the recorded starts differ, since then the
+        padded start still wouldn't match what deployment feeds."""
+        starts = np.concatenate([[0], self.episode_ends[:-1]]).astype(np.int64)
+        checks = []
+        if 'op_mode' in self.state_keys:
+            checks.append(('op_mode', 'data/operation_mode', 'idle [0,0]'))
+        if 'pwm' in self.state_keys:
+            checks.append(('pwm', 'data/pwm_signals', '0'))
+        for key, zarr_key, expected in checks:
+            vals = np.asarray(self.zarr_root[zarr_key].oindex[starts])
+            n_bad = int(np.any(vals != 0, axis=1).sum())
+            if n_bad:
+                print(f"  WARNING: {n_bad}/{len(starts)} episodes don't start with {key} = {expected}, "
+                      f"but deployment resets {key} to {expected} at step 0 -- those starts still "
+                      f"won't match deployment even with padding.")
 
     def _component_width(self, key):
         """Width (in dims) of one state_keys component. 'tcp' and
@@ -558,12 +602,17 @@ class DiffusionDataset(Dataset):
         sample_info = self.samples[idx]
         sample_idx = sample_info['sample_idx']
 
-        # Observation window indices
+        # Observation window indices. With pad_episode_start, a window that
+        # would reach before the episode's first frame is clamped to it and
+        # front-padded (n_pad copies of that first frame) -- exactly what
+        # deployment's _fill_obs_buffer produces at step 0.
         obs_start = sample_idx - (self.obs_horizon - 1)
         obs_end = sample_idx + 1
+        n_pad = max(0, sample_info['start_idx'] - obs_start)
+        obs_start += n_pad
 
         # Read only the raw zarr components self.state_keys actually needs
-        # (obs_horizon, width) each -- see class docstring / state_keys.
+        # (obs_end - obs_start, width) each -- see class docstring / state_keys.
         _state_raw = {}
         if 'tcp' in self.state_keys:
             _state_raw['tcp'] = self.zarr_root['data/robot_eef_pose'][obs_start:obs_end][:, :self.tcp_dims] \
@@ -579,19 +628,20 @@ class DiffusionDataset(Dataset):
             # window -- same value for every frame of a given episode, by
             # design (see class docstring / label_object_id.py).
             ep_onehot = self.episode_object_onehot[sample_info['episode_idx']]  # (num_objects,)
-            _state_raw['object_id'] = np.tile(ep_onehot, (self.obs_horizon, 1)).astype(np.float32)
+            _state_raw['object_id'] = np.tile(ep_onehot, (obs_end - obs_start, 1)).astype(np.float32)
 
         # Combined state (obs_horizon, state_dim): components in self.state_keys order.
         states = np.concatenate([_state_raw[key] for key in self.state_keys], axis=-1)
+        states = _pad_front(states, n_pad)
         states = self._normalize_state(states)
 
         # Images
         if self.use_images:
-            images = self._load_and_process_images(
+            images = _pad_front(self._load_and_process_images(
                 self._primary_camera_key, obs_start, obs_end,
                 self._primary_image_size, self._primary_crop_scale,
                 self._primary_crop_x, self._primary_crop_y,
-            )
+            ), n_pad)
         else:
             images = np.zeros((self.obs_horizon, 3, *self._primary_image_size), dtype=np.float32)
 
@@ -602,11 +652,11 @@ class DiffusionDataset(Dataset):
 
         if self.camera_mode == 'both':
             if self.use_images:
-                images_wrist = self._load_and_process_images(
+                images_wrist = _pad_front(self._load_and_process_images(
                     'data/camera_1', obs_start, obs_end,
                     self.wrist_image_size, self.wrist_crop_scale,
                     self.wrist_crop_x, self.wrist_crop_y,
-                )
+                ), n_pad)
             else:
                 images_wrist = np.zeros((self.obs_horizon, 3, *self.wrist_image_size), dtype=np.float32)
             sample['obs_image_wrist'] = torch.from_numpy(images_wrist).float()

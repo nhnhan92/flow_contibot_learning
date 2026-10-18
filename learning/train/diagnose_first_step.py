@@ -88,6 +88,9 @@ def build_dataset(policy, dataset_path):
         arm=cfg.get('arm', 'ur5'),
         camera_mode=cfg.get('camera_mode', 'global'),
         franka_action_space=cfg.get('franka_action_space', 'joint_velocity'),
+        # Keep the 'data' variant a REAL two-frame window regardless of how the
+        # checkpoint was trained -- the padded start is what 'deploy' tests.
+        pad_episode_start=False,
     )
     ckpt = policy.checkpoint
     ds.state_min, ds.state_max, ds.state_range = ckpt['state_min'], ckpt['state_max'], ckpt['state_range']
