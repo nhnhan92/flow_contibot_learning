@@ -369,7 +369,7 @@ def move_2_init_pos(arm, start_pose, goal_pose, dt, duration=5.0,
 @click.option('--release_frames', default=1, type=int,
               help='Frames to record after release (both-button press). '
                    'At 10 Hz the default of 10 gives 1 s of released state.')
-@click.option('--target_pc_a', default=(4.77428571, 39.83, 102.18142857), type=(float, float, float),
+@click.option('--target_pc_a', default=(3.97428571, 39.83, 102.18142857), type=(float, float, float),
               help='First flowbot target point (x, y, z) in mm. Selected by pushing the SpaceMouse '
                    'forward on its z-axis (cmd_sm[2] > 0) while holding the right button.')
 @click.option('--target_pc_b', default=(-4.77428571, -37.83, 102.18142857), type=(float, float, float),

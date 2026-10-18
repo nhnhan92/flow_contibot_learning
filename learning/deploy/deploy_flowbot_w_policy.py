@@ -1039,7 +1039,7 @@ def main():
                         help='Franka position mode only: relative_dynamics_factor acceleration '
                              'fraction (0-1) for set_tcp_pose. Same caveats as '
                              '--franka_position_speed.')
-    parser.add_argument('--object_classifier_checkpoint', type=str, default=None,
+    parser.add_argument('--object_classifier_checkpoint', "-classifier", type=str, default=None,
                         help="Trained object-identity classifier checkpoint (see "
                              "train_object_classifier.py) -- REQUIRED if --checkpoint's "
                              "config has 'object_id' in state_keys, ignored otherwise.")

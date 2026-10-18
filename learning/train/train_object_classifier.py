@@ -170,7 +170,7 @@ def main():
     parser.add_argument('--crop_scale', type=float, default=None)
     parser.add_argument('--crop_x', type=float, default=None)
     parser.add_argument('--crop_y', type=float, default=None)
-    parser.add_argument('--output_dir', required=True)
+    parser.add_argument('--output_dir', '-o', required=True)
     parser.add_argument('--frames_per_episode', type=int, default=5,
                         help='Early frames sampled per episode as training images (default 5)')
     parser.add_argument('--val_fraction', type=float, default=0.2)
