@@ -147,6 +147,7 @@ def main():
         arm=arm,
         camera_mode=camera_mode,
         franka_action_space=config.get('franka_action_space', 'joint_velocity'),
+        pad_episode_start=config.get('pad_episode_start', True),
     )
     action_space_str = f", franka_action_space: {dataset.franka_action_space}" if dataset.is_franka else ""
     print(f"Arm: {arm}  |  camera_mode: {camera_mode}{action_space_str}")

@@ -32,7 +32,7 @@ FLOWBOT_FREQ = 10
 
 # Matches demo_collect.py's current init_pose -- see deploy_flowbot_w_policy.py's
 # DEFAULT_START_POSE comment for why this was stale until 2026-09.
-DEFAULT_START_POSE = [0.15, -0.3, 0.45, 0.917, -3.0, 0.0]
+DEFAULT_START_POSE = [0.115, -0.31, 0.45, 0.885, -2.85, -0.044]
 
 
 def return_to_start(
@@ -127,9 +127,9 @@ def main():
                         metavar=('X', 'Y', 'Z', 'RX', 'RY', 'RZ'),
                         help='Target TCP pose [x y z rx ry rz] '
                              '(default: collection start pose)')
-    parser.add_argument('--speed',        type=float, default=0.2,
+    parser.add_argument('--speed',        type=float, default=0.1,
                         help='moveL speed (m/s, default 0.2)')
-    parser.add_argument('--accel',        type=float, default=0.2,
+    parser.add_argument('--accel',        type=float, default=0.1,
                         help='moveL acceleration (m/s^2, default 0.2)')
     parser.add_argument('--flowbot_port', type=str,   default=None,
                         help='Flowbot serial port (e.g. /dev/ttyACM0). '
