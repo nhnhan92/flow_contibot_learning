@@ -265,6 +265,9 @@ def main(arm, robot_ip, frequency, max_pos_speed, max_rot_speed, speed_scale, co
 
             # Get SpaceMouse state
             sm_state = sm.get_motion_state_transformed()
+            cpied_cmd = sm_state.copy()
+            sm_state[0] = -sm_state[1]  # X
+            sm_state[1] = cpied_cmd[0] # Y
             btn_right = sm.is_button_pressed(1)
 
             # Emergency pause if right button pressed

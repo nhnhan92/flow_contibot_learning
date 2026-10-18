@@ -499,10 +499,10 @@ def test_dual_streams(
 @click.option('--target-height', '-h', default=212, help='Target resize height for training '
               '(single-camera mode; global camera in --dual mode)')
 @click.option('--rgb-only', is_flag=True, help='Only test RGB stream (no depth)')
-@click.option('--crop-scale', default=1.5, help='Crop window size as a multiple of target size '
+@click.option('--crop-scale', default=2.0, help='Crop window size as a multiple of target size '
               '(single-camera mode; global camera in --dual mode). Default matches '
               'config_train_flowbot_ur5.yaml -- override to try a different crop for a new config.')
-@click.option('--crop-x', default=0.5, help='Crop anchor x in [0,1]: 0=left, 0.5=center, 1=right '
+@click.option('--crop-x', default=0.42, help='Crop anchor x in [0,1]: 0=left, 0.5=center, 1=right '
               '(single-camera mode; global camera in --dual mode). Default matches '
               'config_train_flowbot_ur5.yaml.')
 @click.option('--crop-y', default=0.5, help='Crop anchor y in [0,1]: 0=top, 0.5=center, 1=bottom '

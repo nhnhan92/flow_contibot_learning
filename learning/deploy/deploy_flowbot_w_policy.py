@@ -634,7 +634,7 @@ class RobotDeployment:
 
     # ── Action execution ──────────────────────────────────────────────────────
 
-    def _execute_action(self, action: np.ndarray, execute_arm: bool = True, steps_covered: int = 1):
+    def _execute_action(self, action: np.ndarray, execute_arm: bool = True, steps_covered: int = 1, steps: int = 0):
         """
         Send one action step to the robot and flowbot, gated by predicted operation mode.
 
@@ -691,10 +691,11 @@ class RobotDeployment:
         #     pwm_raw = pwm_raw + np.array([1, 2, 0])
         # elif op_mode_pred[1] == 1 and np.any(18<=pwm_raw) :
         #     pwm_raw = pwm_raw + np.array([0, 1, 0])
-        # if op_mode_pred[1] == 1:
-        #     pwm_raw = pwm_raw + np.array([4, 7, -1])
-
-        if op_mode_pred[1] == 1 and np.any(pwm_raw>=1):
+        # if op_mode_pred[1] == 1 and pwm_raw[0]>=10:
+        #     pwm_raw = pwm_raw + np.array([-2, 0, 0])
+        GROUND_FLOOR = 17
+        if op_mode_pred[1] == 1 and 0< pwm_raw[0] < 2:
+            print("check")
             self.fb.suction()
 
         pwm_int    = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
@@ -915,7 +916,7 @@ class RobotDeployment:
                     steps_covered = (step_i % stride) + 1
                     try:
                         pwm_int, op_mode_pred = self._execute_action(
-                            action, execute_arm=execute_arm, steps_covered=steps_covered
+                            action, execute_arm=execute_arm, steps_covered=steps_covered, steps = total_steps
                         )
                     except Exception as e:
 
@@ -1038,7 +1039,7 @@ def main():
                         help='Franka position mode only: relative_dynamics_factor acceleration '
                              'fraction (0-1) for set_tcp_pose. Same caveats as '
                              '--franka_position_speed.')
-    parser.add_argument('--object_classifier_checkpoint', type=str, default=None,
+    parser.add_argument('--object_classifier_checkpoint', "-classifier", type=str, default=None,
                         help="Trained object-identity classifier checkpoint (see "
                              "train_object_classifier.py) -- REQUIRED if --checkpoint's "
                              "config has 'object_id' in state_keys, ignored otherwise.")

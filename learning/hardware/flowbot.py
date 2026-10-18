@@ -319,6 +319,7 @@ class flowbot:
         self.last_pwm = pwm
         self.pc = self.pc_init.copy()
         self.serial_sending(pwm)
+        self.release()
 
     def set_compensator(self, compensator) -> None:
         """
