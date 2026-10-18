@@ -55,14 +55,16 @@ wrist_crop_y: 1
 tcp_dims: 3           # 3 → xyz only state (8D); 6 → xyz+rotation state (11D)
 
 # Model architecture
-# state_dim = tcp_dims(3) + flowbot PWM (3) + operation_mode (2) = 8
+# state_dim = tcp_dims(3) + flowbot PWM (3) + operation_mode (2) + object_id (5, one
+# per object -- see meta/object_names in the dataset, NOT configurable here,
+# train.py errors out with the dataset's actual count if this is wrong) = 13
 # action_dim depends on franka_action_space (train.py validates this against
 # the dataset and errors out on a mismatch):
 #   joint_velocity: 7 (joint velocities, rad/s) + pwm (3) + op_mode (2) = 12
 #   position:       tcp_dims(3) + pwm (3) + op_mode (2) = 8   (or 11 if tcp_dims: 6)
 action_dim: 8
-state_keys: ['tcp', 'pwm', 'op_mode']  # 'tcp'/'pwm'/'flowrate'/'op_mode'
-state_dim: 8
+state_keys: ['tcp', 'pwm', 'op_mode', 'object_id']  # 'tcp'/'pwm'/'flowrate'/'op_mode'/'object_id'
+state_dim: 13
 vision_feature_dim: 512
 state_feature_dim: 128
 num_diffusion_iters: 100  # Number of diffusion training steps (DDPM)
