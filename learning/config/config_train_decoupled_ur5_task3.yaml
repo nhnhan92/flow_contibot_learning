@@ -71,7 +71,7 @@ action_dim: 9
 # name the array label_suction_cmd.py wrote (it prints the name, e.g.
 # suction_cmd_k3_j2) -- one training run per jitter level.
 suction_action: true
-suction_key: suction_cmd_k3_j0   # <-- set to the label set you wrote
+suction_key: suction_cmd_k12_j2   # <-- set to the label set you wrote
 state_keys: ['tcp', 'pwm', 'op_mode', 'object_id']  # 'tcp'/'pwm'/'flowrate'/'op_mode'
 state_dim: 13
 vision_feature_dim: 512
