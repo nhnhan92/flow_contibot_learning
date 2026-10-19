@@ -148,6 +148,8 @@ def main():
         camera_mode=camera_mode,
         franka_action_space=config.get('franka_action_space', 'joint_velocity'),
         pad_episode_start=config.get('pad_episode_start', True),
+        suction_action=config.get('suction_action', False),
+        suction_key=config.get('suction_key', 'suction_cmd'),
     )
     action_space_str = f", franka_action_space: {dataset.franka_action_space}" if dataset.is_franka else ""
     print(f"Arm: {arm}  |  camera_mode: {camera_mode}{action_space_str}")
@@ -196,13 +198,14 @@ def main():
     # dataset -- catch a mismatch here (e.g. switching franka_action_space
     # without updating action_dim) with a clear message instead of a cryptic
     # shape error deep in the first training step.
-    expected_action_dim = dataset.action_dim_raw + 5
+    expected_action_dim = dataset.action_dim   # arm + pwm(3) + op_mode(2) [+ suction(1)]
     expected_state_dim = dataset.state_dim
     if config['action_dim'] != expected_action_dim:
         raise ValueError(
             f"config action_dim={config['action_dim']} but this dataset "
             f"(arm={arm}, franka_action_space={dataset.franka_action_space}, "
-            f"tcp_dims={dataset.tcp_dims}) produces {expected_action_dim}D actions. "
+            f"tcp_dims={dataset.tcp_dims}, suction_action={dataset.suction_action}) "
+            f"produces {expected_action_dim}D actions. "
             f"Set action_dim: {expected_action_dim} in the config."
         )
     if config['state_dim'] != expected_state_dim:
