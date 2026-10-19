@@ -61,15 +61,15 @@ tcp_dims: 3           # 3 → xyz only state (8D); 6 → xyz+rotation state (11D
 #   joint_velocity: 7 (joint velocities, rad/s) + pwm (3) + op_mode (2) = 12
 #   position:       tcp_dims(3) + pwm (3) + op_mode (2) = 8   (or 11 if tcp_dims: 6)
 action_dim: 8
-state_keys: ['tcp', 'pwm', 'op_mode']  # 'tcp'/'pwm'/'flowrate'/'op_mode'
-state_dim: 8
+state_keys: ['tcp', 'pwm', 'op_mode', 'object_id']  # 'tcp'/'pwm'/'flowrate'/'op_mode'
+state_dim: 13
 vision_feature_dim: 512
 state_feature_dim: 128
 num_diffusion_iters: 100  # Number of diffusion training steps (DDPM)
 num_inference_steps: 16   # Number of inference steps (DDIM - 6x faster)
 use_resnet: true          # Use ResNet18 encoder (true) or custom CNN (false)
 random_crop_pad: 20       # Random crop padding pixels (0 = disabled); pads by 20px then crops back to original size
-
+pad_episode_start: true
 # UNet variant (FiLM = Stanford-style, recommended)
 use_film_unet: true       # true = ConditionalUNet1D (FiLM), false = DiffusionUNet1D (simple)
 film_step_embed_dim: 256  # Timestep embedding dim for FiLM UNet (Stanford: 256)
@@ -78,12 +78,12 @@ film_kernel_size: 5       # Conv kernel size for FiLM UNet (Stanford: 5)
 
 # Vision pooling (auto: SpatialSoftmax when use_film_unet=true)
 use_spatial_softmax: true # null = auto (true if use_film_unet else false); or override explicitly
-spatial_softmax_proj: false
-num_keypoints: 32         # SpatialSoftmax keypoints → 64-D per frame (Stanford default)
+spatial_softmax_proj: true
+num_keypoints: 32        # SpatialSoftmax keypoints → 64-D per frame (Stanford default)
 
 # Training
 num_epochs: 500
-batch_size: 64
+batch_size: 128
 learning_rate: 5.0e-5  # Peak LR reached after warmup
 weight_decay: 1.0e-5   # AdamW weight decay
 ema_max_value: 0.9999  # EMA adaptive decay upper bound (UNet-only, Stanford default)
@@ -98,7 +98,7 @@ val_ratio: 0.1        # Validation split ratio
 num_workers: 4        # DataLoader workers
 
 # Early stopping
-early_stopping_patience: 25  # Stop if no improvement for N post-warmup epochs (0 = disabled)
+early_stopping_patience: 30  # Stop if no improvement for N post-warmup epochs (0 = disabled)
 
 # Checkpointing
 output_dir: "/media/protac/Desk SSD/Nhan/trained_models_franka"

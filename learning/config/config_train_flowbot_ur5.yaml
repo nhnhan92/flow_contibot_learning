@@ -89,7 +89,7 @@ num_keypoints: 32         # SpatialSoftmax keypoints → 64-D per frame (Stanfor
 
 # Training
 num_epochs: 200
-batch_size: 64
+batch_size: 128
 learning_rate: 5.0e-5  # Peak LR reached after warmup
 weight_decay: 1.0e-5   # AdamW weight decay
 ema_max_value: 0.9999  # EMA adaptive decay upper bound (UNet-only, Stanford default)
@@ -104,8 +104,8 @@ val_ratio: 0.1        # Validation split ratio
 num_workers: 4        # DataLoader workers
 
 # Early stopping
-early_stopping_patience: 25  # Stop if no improvement for N post-warmup epochs (0 = disabled)
+early_stopping_patience: 20  # Stop if no improvement for N post-warmup epochs (0 = disabled)
 
 # Checkpointing
 output_dir: "/media/protac/Desk SSD/Nhan/trained_models_franka"
-save_every: 50       # Save checkpoint every N epochs
+save_every: 20       # Save checkpoint every N epochs

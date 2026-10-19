@@ -158,7 +158,9 @@ def first_step_modes(policy, obs, n_samples, action_horizon):
     actions_norm = policy.predict(batch(obs_state), batch(obs_image), batch(obs_image_wrist)).numpy()
     ckpt = policy.checkpoint
     actions = (actions_norm + 1.0) * 0.5 * ckpt['action_range'] + ckpt['action_min']
-    op = np.clip(np.round(actions[:, :, -2:]), 0, 1).astype(int)    # op_mode = last 2 dims
+    # op_mode sits right after arm + pwm(3); a baseline's suction command (if any) comes after it.
+    d = policy.config['action_dim'] - 5 - (1 if policy.config.get('suction_action', False) else 0)
+    op = np.clip(np.round(actions[:, :, d + 3:d + 5]), 0, 1).astype(int)
     first = [op_mode_name(op[i, 0]) for i in range(n_samples)]
     any_fb = [bool(np.any((op[i, :action_horizon, 0] == 0) & (op[i, :action_horizon, 1] == 1)))
               for i in range(n_samples)]

@@ -191,6 +191,11 @@ class DiffusionDataset(Dataset):
                                   # in training and can mistake it for a stationary
                                   # mid-episode moment (e.g. the UR5->flowbot
                                   # handoff) -- see diagnose_first_step.py.
+        suction_action=False,    # Decoupled-Flowbot baseline: append an explicit
+                                  # suction command as the LAST action dim (after
+                                  # op_mode), read from data/<suction_key> -- see
+                                  # label_suction_cmd.py. Default False = Flowbot.
+        suction_key='suction_cmd',
     ):
         self.dataset_path = Path(dataset_path)
         self.obs_horizon = obs_horizon
@@ -240,6 +245,10 @@ class DiffusionDataset(Dataset):
         # to state). Otherwise (UR5e, or Franka position mode): TCP[:tcp_dims],
         # sliced the same as state.
         self.action_dim_raw = self.tcp_dims if self.uses_position_action else 7
+        # Full action width: arm + pwm (3) + op_mode (2) [+ suction (1), baseline only]
+        self.suction_action = suction_action
+        self.suction_key = suction_key
+        self.action_dim = self.action_dim_raw + 5 + (1 if suction_action else 0)
         # data/action for joint_velocity (a genuine commanded/executed value,
         # see demo_collect.py); data/robot_eef_pose for Franka position mode --
         # there's no commanded position target to record under velocity-control
@@ -315,6 +324,13 @@ class DiffusionDataset(Dataset):
                     f"demo_collect.py that recorded Cartesian velocity (6D) as the Franka "
                     f"action -- recollect with the current demo_collect.py."
                 )
+
+        if self.suction_action and self.suction_key not in self.zarr_root['data']:
+            raise ValueError(
+                f"suction_action=True needs data/{self.suction_key}, but {self.dataset_path} has "
+                f"none -- write it with learning/train/label_suction_cmd.py and set suction_key "
+                f"to the name it prints."
+            )
 
         # Get episode boundaries
         self.episode_ends = self.zarr_root['meta/episode_ends'][:]
@@ -541,6 +557,11 @@ class DiffusionDataset(Dataset):
         self.action_min   = np.concatenate([self.action_min,   op_min])
         self.action_max   = np.concatenate([self.action_max,   op_max])
         self.action_range = np.concatenate([self.action_range, op_range])
+        if self.suction_action:
+            # Suction command (1D, baseline only): always in {0, 1}, same as op_mode
+            self.action_min   = np.concatenate([self.action_min,   [0.0]])
+            self.action_max   = np.concatenate([self.action_max,   [1.0]])
+            self.action_range = np.concatenate([self.action_range, [1.0 + eps]])
 
         print(f"  State composition {self.state_keys} ({self.state_dim}D):")
         offset = 0
@@ -570,6 +591,8 @@ class DiffusionDataset(Dataset):
               f"[{self.action_min[a+1]:.1f}, {self.action_max[a+1]:.1f}], "
               f"[{self.action_min[a+2]:.1f}, {self.action_max[a+2]:.1f}]")
         print(f"  op_mode (action): hardcoded [0,0]→[-1,-1], [1,1]→[+1,+1]")
+        if self.suction_action:
+            print(f"  suction (action, data/{self.suction_key}): hardcoded 0→-1, 1→+1")
 
     def _normalize_state(self, state):
         """Normalize state using Min-Max to [-1, 1]"""
@@ -676,10 +699,14 @@ class DiffusionDataset(Dataset):
         pwm_actions    = self.zarr_root['data/pwm_signals'][action_start:action_end].astype(np.float32)
         op_mode_actions = self.zarr_root['data/operation_mode'][action_start:action_end].astype(np.float32)
 
-        actions = np.concatenate([robot_actions[:, :self.action_dim_raw], pwm_actions, op_mode_actions], axis=-1)
+        action_parts = [robot_actions[:, :self.action_dim_raw], pwm_actions, op_mode_actions]
+        if self.suction_action:   # baseline only: suction command LAST, so pwm/op_mode slices are unchanged
+            action_parts.append(self.zarr_root[f'data/{self.suction_key}'][action_start:action_end]
+                                .astype(np.float32).reshape(-1, 1))
+        actions = np.concatenate(action_parts, axis=-1)
         actions = self._normalize_action(actions)
 
-        sample['actions'] = torch.from_numpy(actions).float()   # (pred_horizon, action_dim_raw+5)
+        sample['actions'] = torch.from_numpy(actions).float()   # (pred_horizon, self.action_dim)
         return sample
 
     def _load_and_process_images(self, camera_key, obs_start, obs_end,
