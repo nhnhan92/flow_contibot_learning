@@ -58,7 +58,7 @@ def visualize_dataset(dataset_path, episode_idx=None, speed=1.0, show_structure=
         episodes = range(n_episodes)
 
     # Initialize Rerun
-    rr.init("PickPlace Dataset Viewer", spawn=True)
+    rr.init("Flowbot Dataset Viewer", spawn=True)
 
     # Visualize each episode
     for ep_idx in episodes:
@@ -69,12 +69,21 @@ def visualize_dataset(dataset_path, episode_idx=None, speed=1.0, show_structure=
 
         print(f"\nEpisode {ep_idx}: {episode_length} steps")
 
-        # Load episode data
-        timestamps = zarr_root['data/timestamp'][start_idx:end_idx]
-        robot_poses = zarr_root['data/robot_eef_pose'][start_idx:end_idx]
-        robot_joints = zarr_root['data/robot_joint'][start_idx:end_idx]
-        gripper_positions = zarr_root['data/gripper_position'][start_idx:end_idx]
-        actions = zarr_root['data/action'][start_idx:end_idx]
+        # Load episode data. Flowbot datasets (demo_collect.py) have pwm_signals /
+        # flowrate / operation_mode instead of the old parallel-gripper
+        # gripper_position; everything beyond timestamp/pose is optional so
+        # older or partial datasets still load.
+        data = zarr_root['data']
+        timestamps = data['timestamp'][start_idx:end_idx]
+        robot_poses = data['robot_eef_pose'][start_idx:end_idx]
+        optional = lambda key: data[key][start_idx:end_idx] if key in data else None
+        robot_joints = optional('robot_joint')
+        actions = optional('action')
+        pwm_signals = optional('pwm_signals')
+        flowrates = optional('flowrate')
+        op_modes = optional('operation_mode')
+        # data/action is a TCP target only for UR5e (6D); Franka stores joint velocities there.
+        log_action_target = actions is not None and actions.shape[1] == 6
 
         # Detect all camera keys automatically
         camera_keys = [key for key in zarr_root['data'].keys() if 'camera' in key.lower()]
@@ -116,42 +125,36 @@ def visualize_dataset(dataset_path, episode_idx=None, speed=1.0, show_structure=
             )
 
             # Log action target position
-            action_pose = actions[i]
-            action_position = action_pose[:3]
-            rr.log(
-                f"episode_{ep_idx}/robot/action_target",
-                rr.Points3D(
-                    positions=[action_position],
-                    radii=[0.015],
-                    colors=[[255, 0, 0]],  # Red
+            if log_action_target:
+                rr.log(
+                    f"episode_{ep_idx}/robot/action_target",
+                    rr.Points3D(
+                        positions=[actions[i][:3]],
+                        radii=[0.015],
+                        colors=[[255, 0, 0]],  # Red
+                    )
                 )
-            )
 
-            # Log gripper state (using Scalars in new API)
-            gripper_value = gripper_positions[i]
-            rr.log(
-                f"episode_{ep_idx}/robot/gripper",
-                rr.Scalars(gripper_value)
-            )
-
-            # Log gripper visual indicator (size based on openness)
-            gripper_size = 0.01 + gripper_value * 0.03  # Scale 0.01 to 0.04
-            rr.log(
-                f"episode_{ep_idx}/robot/gripper_visual",
-                rr.Points3D(
-                    positions=[position + np.array([0, 0, 0.05])],  # Offset above EEF
-                    radii=[gripper_size],
-                    colors=[[255, 255, 0]],  # Yellow
-                )
-            )
+            # Flowbot signals -- each group shares one entity path, so Rerun
+            # shows e.g. all three flow modules together in one time-series view.
+            if flowrates is not None:
+                for k, v in enumerate(flowrates[i]):
+                    rr.log(f"episode_{ep_idx}/flowbot/flowrate/module_{k + 1}", rr.Scalars(float(v)))
+            if pwm_signals is not None:
+                for k, v in enumerate(pwm_signals[i]):
+                    rr.log(f"episode_{ep_idx}/flowbot/pwm/pwm_{k + 1}", rr.Scalars(float(v)))
+            if op_modes is not None:
+                rr.log(f"episode_{ep_idx}/flowbot/op_mode/ur5_active", rr.Scalars(float(op_modes[i][0])))
+                rr.log(f"episode_{ep_idx}/flowbot/op_mode/flowbot_active", rr.Scalars(float(op_modes[i][1])))
 
             # Log joint angles with proper names
-            for j_idx, joint_angle in enumerate(robot_joints[i]):
-                joint_name = JOINT_NAMES[j_idx] if j_idx < len(JOINT_NAMES) else f"joint_{j_idx}"
-                rr.log(
-                    f"episode_{ep_idx}/joints/{joint_name}",
-                    rr.Scalars(joint_angle)
-                )
+            if robot_joints is not None:
+                for j_idx, joint_angle in enumerate(robot_joints[i]):
+                    joint_name = JOINT_NAMES[j_idx] if j_idx < len(JOINT_NAMES) else f"joint_{j_idx}"
+                    rr.log(
+                        f"episode_{ep_idx}/joints/{joint_name}",
+                        rr.Scalars(joint_angle)
+                    )
 
             # Log pose components
             rr.log(f"episode_{ep_idx}/pose/x", rr.Scalars(position[0]))
