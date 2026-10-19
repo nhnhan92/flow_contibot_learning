@@ -54,7 +54,7 @@ def phase_segments(op_mode):
 
 
 def resolve_episodes(root, args):
-    n_episodes = len(root['meta/episode_ends'])
+    n_episodes = root['meta/episode_ends'].shape[0]   # zarr v3 arrays have no len()
     if args.episodes:
         return args.episodes
     if args.object:
