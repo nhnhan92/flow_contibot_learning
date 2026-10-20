@@ -963,7 +963,7 @@ def main():
                              "config has 'object_id' in state_keys, ignored otherwise.")
     parser.add_argument('--object_classify_n_frames', type=int, default=3,
                         help='Frames majority-voted to classify the object once per episode (default 3)')
-    parser.add_argument('--seal_threshold_kpa', type=float, default=None,
+    parser.add_argument('--seal_threshold_kpa', type=float, default=-10.0,
                         help='Vacuum pressure (kPa, negative) at or below which the cup counts as '
                              'sealed in the log. Unset: pressure is still logged, seal computed later.')
     parser.add_argument('--no_wrist_video', action='store_true',
