@@ -436,7 +436,7 @@ def main():
     parser.add_argument('path', type=str, help='A single .npz file or a directory containing them')
     parser.add_argument('-o', '--output_dir', type=str, default=None,
                         help='Where to save PNGs (default: next to each .npz file)')
-    parser.add_argument('--seal_threshold_kpa', type=float, default=-7.0,
+    parser.add_argument('--seal_threshold_kpa', type=float, default=-10.0,
                         help='Seal threshold (kPa, negative) to use instead of the logged one')
     parser.add_argument('--show', action='store_true', help='Also open each figure interactively')
     parser.add_argument('--dpi', type=int, default=130)
