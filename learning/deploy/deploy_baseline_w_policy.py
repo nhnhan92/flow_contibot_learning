@@ -894,8 +894,9 @@ class RobotDeployment:
                         logger.log_step(
                             state_raw, action, pwm_int,
                             op_mode=op_mode_pred,
-                            suction_cmd_raw=float(action[self.action_dim_arm + 5]) if self.suction_action else float('nan'),
-                            suction_on=self.suction_on,
+                            # explicit suction action only (None -> not logged, e.g. a Flowbot checkpoint)
+                            suction_cmd_raw=float(action[self.action_dim_arm + 5]) if self.suction_action else None,
+                            suction_on=self.suction_on if self.suction_action else None,
                             pressure_kpa=self.fb.last_pressure_kpa,
                             wrist_frame=self.last_wrist_frame_raw,
                         )
