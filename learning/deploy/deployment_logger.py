@@ -92,6 +92,11 @@ class DeploymentLogger:
                  state_keys=('tcp', 'pwm', 'op_mode'), num_objects: int = None,
                  system: str = 'flowbot', seal_threshold_kpa: float = None,
                  record_wrist_video: bool = True, video_fps: float = 10.0):
+        if seal_threshold_kpa is not None and seal_threshold_kpa >= 0:
+            raise ValueError(
+                f"seal_threshold_kpa must be negative (vacuum), got {seal_threshold_kpa:g} -- "
+                f"did you mean {-abs(seal_threshold_kpa):g}? (sealed = pressure <= threshold)"
+            )
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint_path = str(checkpoint_path)
