@@ -18,9 +18,11 @@ Per step (T = executed steps):
     executed_actions  (T, A)     full denormalized action executed
     pwm_commanded     (T, 3)     integer PWM sent after clamping
     op_mode           (T, 2)     executed op_mode [ur5_active, flowbot_active]
-    suction_cmd_raw   (T,)       policy's raw suction output (NaN when the
-                                 policy has no suction action, e.g. Flowbot)
-    suction_on        (T,)       suction state ('sf' sent and not yet released)
+    suction_cmd_raw   (T,)       policy's raw suction output    } baselines with an
+    suction_on        (T,)       suction state ('sf' sent and   } explicit suction action
+                                 not yet released)               } only -- absent from
+                                                                   Flowbot/fluxflex logs
+                                                                   (suction is implicit)
     pressure_kpa      (T,)       vacuum pressure (kPa, negative = vacuum)
     sealed            (T,)       pressure_kpa <= seal_threshold_kpa (all False if
                                  no threshold was given -- recompute later)
@@ -180,9 +182,12 @@ class DeploymentLogger:
         self._plan_step_indices.append(step_idx)
 
     def log_step(self, state_raw: np.ndarray, action: np.ndarray, pwm_commanded: np.ndarray,
-                 op_mode=None, suction_cmd_raw: float = float('nan'), suction_on: bool = False,
+                 op_mode=None, suction_cmd_raw: float = None, suction_on: bool = None,
                  pressure_kpa: float = float('nan'), wrist_frame: np.ndarray = None):
-        """Call once per executed step (after _update_obs_buffer)."""
+        """Call once per executed step (after _update_obs_buffer).
+        suction_cmd_raw / suction_on: only for systems with an explicit suction
+        action (baselines). Leave them None for Flowbot/fluxflex -- suction is
+        implicit there, and the fields are then left out of the saved log."""
         d = self.tcp_dims
         now = time.time()
         self._timestamps.append(now)
@@ -195,8 +200,8 @@ class DeploymentLogger:
         self._executed_actions.append(action.copy())
         self._pwm_commanded.append(np.asarray(pwm_commanded).copy())
         self._op_mode.append(np.asarray(op_mode if op_mode is not None else [0, 0], dtype=np.int8))
-        self._suction_cmd_raw.append(float(suction_cmd_raw))
-        self._suction_on.append(bool(suction_on))
+        self._suction_cmd_raw.append(suction_cmd_raw)
+        self._suction_on.append(suction_on)
         self._pressure_kpa.append(float(pressure_kpa))
         if self.record_wrist_video and wrist_frame is not None:
             self._write_video_frame(wrist_frame, now)
@@ -276,14 +281,23 @@ class DeploymentLogger:
         ts = np.array(self._timestamps)
         op = np.array(self._op_mode, dtype=np.int8).reshape(-1, 2)
         pressure = np.array(self._pressure_kpa, dtype=np.float64)
-        suction_on = np.array(self._suction_on, dtype=bool)
+        # Explicit suction action (baselines only): saved only if any step provided it.
+        has_suction = any(v is not None for v in self._suction_on)
+        suction_fields = {}
+        if has_suction:
+            suction_on = np.array([bool(v) for v in self._suction_on], dtype=bool)
+            suction_fields = {
+                'suction_on': suction_on,
+                'suction_cmd_raw': np.array([float('nan') if v is None else float(v)
+                                             for v in self._suction_cmd_raw], dtype=np.float64),
+            }
         threshold = float('nan') if self.seal_threshold_kpa is None else float(self.seal_threshold_kpa)
         sealed = (pressure <= threshold) if self.seal_threshold_kpa is not None \
             else np.zeros(len(pressure), dtype=bool)
         t0 = self._episode_t0
         times = {
             'completion_time_s': _first_time((op[:, 0] == 1) & (op[:, 1] == 1), ts, t0),
-            'time_to_suction_s': _first_time(suction_on, ts, t0),
+            'time_to_suction_s': _first_time(suction_fields['suction_on'], ts, t0) if has_suction else float('nan'),
             'time_to_seal_s': _first_time(sealed, ts, t0),
         }
         outcome = self._outcome or {'outcome_reported': False, 'true_object': '', 'success': False,
@@ -298,8 +312,7 @@ class DeploymentLogger:
             executed_actions=np.array(self._executed_actions),
             pwm_commanded=np.array(self._pwm_commanded),
             op_mode=op,
-            suction_cmd_raw=np.array(self._suction_cmd_raw, dtype=np.float64),
-            suction_on=suction_on,
+            **suction_fields,
             pressure_kpa=pressure,
             sealed=sealed,
             predicted_horizons=np.array(self._predicted_horizons),

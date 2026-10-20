@@ -146,7 +146,6 @@ class RobotDeployment:
         self.current_pwm = np.array([0, 0, 0], dtype=int)
         self.prev_pwm    = np.zeros(3, dtype=np.float32)   # command from previous step
         self.last_wrist_frame_raw = None   # uncropped wrist frame, for the logger's video
-        self.suction_on = False   # 'sf' sent and not yet released (logged)
         # Fixed rotation held when executing XYZ-only (tcp_dims=3) position
         # actions -- arm-specific, since UR5e's and Franka's start
         # orientations differ (ry, rz). See FRANKA_START_POSE/DEFAULT_START_POSE.
@@ -608,7 +607,6 @@ class RobotDeployment:
         if op_mode_pred[1] == 1 and 0< pwm_raw[0] < 2:
             print("check")
             self.fb.suction()
-            self.suction_on = True
 
         pwm_int    = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
 
@@ -756,7 +754,6 @@ class RobotDeployment:
         self.current_op_mode = np.zeros(2, dtype=np.float32)
         self.current_pwm     = np.array([0, 0, 0], dtype=int)
         self.prev_pwm        = np.zeros(3, dtype=np.float32)
-        self.suction_on      = False
 
         print("\n" + "="*30)
         print("Starting episode ...")
@@ -841,7 +838,6 @@ class RobotDeployment:
                         self.current_op_mode = op_mode_pred.astype(np.float32)
                     if op_mode_pred[0] == 1 and op_mode_pred[1] == 1:
                         self.fb.release()   # sends 'r' to Arduino (triggers suction release)
-                        self.suction_on = False
                         print("Resetting Flowbot ...")
                         self.fb.reset()
                         self.current_pwm = np.array([0,0,0])
@@ -869,8 +865,6 @@ class RobotDeployment:
                         logger.log_step(
                             state_raw, action, pwm_int,
                             op_mode=op_mode_pred,
-                            suction_cmd_raw=float('nan'),   # Flowbot: no explicit suction command
-                            suction_on=self.suction_on,
                             pressure_kpa=self.fb.last_pressure_kpa,
                             wrist_frame=self.last_wrist_frame_raw,
                         )

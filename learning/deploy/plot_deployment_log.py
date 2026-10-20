@@ -5,7 +5,9 @@ used by deploy_flowbot_w_policy.py and deploy_baseline_w_policy.py).
 
 Reads one .npz episode log (or every .npz in a directory) and renders one
 figure per episode, on a shared time axis (seconds from episode start):
-    event timeline   phases (UR5 / Flowbot / Release), suction on, sealed
+    event timeline   phases (UR5 / Flowbot / Release), sealed, and suction on
+                     (baselines only -- Flowbot/fluxflex has no suction action,
+                     so nothing about suction on/off is plotted for it)
     vacuum pressure  with the seal threshold and suction / seal / release marks
     suction command  policy's raw suction output (baselines only)
     TCP position, PWM commanded, 3D TCP path, inference latency
@@ -59,6 +61,7 @@ PHASES = {  # op_mode (ur5_active, flowbot_active) -> (label, fill, label ink)
     (0, 0): ('Idle', SURFACE, MUTED_INK),
 }
 STATE_FILL = SECONDARY_INK   # suction-on / sealed bars
+COUPLED_SYSTEMS = ('flowbot', 'fluxflex')   # suction implicit: no suction action to plot
 TCP_AXIS_LABELS = ['x', 'y', 'z', 'rx', 'ry', 'rz']
 FAILURE_LABELS = [
     ('wrong_object', 'wrong object'),
@@ -113,6 +116,12 @@ def load_episode(npz_path):
     tcp_dims = data['tcp_poses'].shape[1]
     if 'op_mode' not in data and actions.shape[1] >= tcp_dims + 5:
         data['op_mode'] = np.clip(np.round(actions[:, tcp_dims + 3:tcp_dims + 5]), 0, 1).astype(int)
+    # Flowbot/fluxflex has no suction action (suction is implicit in the flow):
+    # drop suction fields even if an older log recorded them, so nothing about
+    # suction on/off is plotted or summarized for it.
+    if str(_scalar(data, 'system', '')).lower() in COUPLED_SYSTEMS:
+        data.pop('suction_on', None)
+        data.pop('suction_cmd_raw', None)
     ts = data['timestamps']
     t0 = float(_scalar(data, 'episode_start_time', float('nan')))
     if not np.isfinite(t0):
@@ -179,32 +188,36 @@ def _phase_boundaries(ax, data):
 
 
 def _timeline(ax, data, stats):
-    """Rows: phase segments (labelled), suction on, sealed."""
+    """Rows, top to bottom: phase segments (labelled), suction on (only for
+    systems with an explicit suction action), sealed."""
     t = data['t']
     if len(t) == 0:
         return
     dt = np.diff(t)
     ends = np.append(t[1:], t[-1] + (np.median(dt) if len(dt) else 0.1))
-    rows = [('phase', 2), ('suction on', 1), ('sealed', 0)]
+    state_rows = ([('suction on', data['suction_on'])] if 'suction_on' in data else []) \
+        + [('sealed', stats['sealed'])]
+    top = len(state_rows)   # phase row y; state rows below it
     op = data.get('op_mode')
     if op is not None:
         for s, e, key in _runs(tuple(int(v) for v in row) for row in op):
             label, fill, ink = PHASES.get(key, (str(key), SURFACE, MUTED_INK))
-            ax.broken_barh([(t[s], ends[e - 1] - t[s])], (2 - 0.4, 0.8), facecolors=fill,
+            ax.broken_barh([(t[s], ends[e - 1] - t[s])], (top - 0.4, 0.8), facecolors=fill,
                            edgecolors=SURFACE, linewidth=1.0)
             width = ends[e - 1] - t[s]
             if width > 0.04 * (ends[-1] - t[0]):
-                ax.text(t[s] + width / 2, 2, label, ha='center', va='center', fontsize=7, color=ink)
-    for name, y, mask in (('suction on', 1, data.get('suction_on')), ('sealed', 0, stats['sealed'])):
+                ax.text(t[s] + width / 2, top, label, ha='center', va='center', fontsize=7, color=ink)
+    for i, (name, mask) in enumerate(state_rows):
+        y = top - 1 - i
         if mask is None:
-            ax.text(t[0], y, '  not available', va='center', fontsize=7, color=MUTED_INK)
+            ax.text(t[0], y, '  not available (no seal threshold)', va='center', fontsize=7, color=MUTED_INK)
             continue
         for s, e, on in _runs(mask.tolist()):
             if on:
                 ax.broken_barh([(t[s], ends[e - 1] - t[s])], (y - 0.3, 0.6), facecolors=STATE_FILL)
-    ax.set_yticks([y for _, y in rows])
-    ax.set_yticklabels([n for n, _ in rows])
-    ax.set_ylim(-0.6, 2.6)
+    ax.set_yticks([top] + [top - 1 - i for i in range(len(state_rows))])
+    ax.set_yticklabels(['phase'] + [name for name, _ in state_rows])
+    ax.set_ylim(-0.6, top + 0.6)
     ax.set_facecolor(SURFACE)
     for spine in ax.spines.values():
         spine.set_color(AXIS_COLOR)
@@ -244,7 +257,8 @@ def plot_episode(data, title, save_path=None, show=False, dpi=130, threshold_ove
     key = [Patch(facecolor=PHASES[k][1], edgecolor=AXIS_COLOR, label=PHASES[k][0])
            for k in ((1, 0), (0, 1), (1, 1))]
     key += [Line2D([0], [0], color=MUTED_INK, linewidth=0.9, linestyle=style, label=name)
-            for _, name, style in EVENT_LINES]
+            for key_name, name, style in EVENT_LINES
+            if key_name != 'suction_s' or 'suction_on' in data]
     _top_legend(axes['timeline'], key)
 
     # ── Vacuum pressure ─────────────────────────────────────────────────────
@@ -381,7 +395,7 @@ def _info_lines(data, stats, threshold, threshold_note, video_name):
     lines += [
         '',
         f"Completion:    {_fmt_s(stats['completion_s'])}  (first release)",
-        f"Suction on:    {_fmt_s(stats['suction_s'])}",
+        *([f"Suction cmd:   {_fmt_s(stats['suction_s'])}"] if 'suction_on' in data else []),
         f"Sealed:        {_fmt_s(stats['seal_s'])}",
         f"Seal thresh.:  {f'{threshold:g} kPa' if threshold is not None else '-'} ({threshold_note})",
         f"Duration:      {float(_scalar(data, 'duration_s', 0.0)):.1f} s, "
