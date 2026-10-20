@@ -41,7 +41,8 @@ def reader_logger(ser, writer, buffers, stop_flag, done_event=None):
 
     Arduino CSV column order:
       t_ms, rawFlow1, proc_flow1, rawFlow2, proc_flow2,
-      rawFlow3, proc_flow3, rawPress, pressMPa, pwm1, pwm2, pwm3
+      rawFlow3, proc_flow3, rawPress, press_kPa, pwm1, pwm2, pwm3
+    (press_kPa: vacuum pressure from the MPS-V35R-NCA, negative = vacuum)
 
     done_event : set() whenever a "DONE" line arrives (arduino_controller.ino
                  prints this once a PWM command's ramp has actually reached
@@ -52,7 +53,7 @@ def reader_logger(ser, writer, buffers, stop_flag, done_event=None):
     print("Header:", header_line)
     if not header_line.startswith("t_ms"):
         header_line = ("t_ms,raw_flow1,proc_flow1,raw_flow2,proc_flow2,"
-                       "raw_flow3,proc_flow3,raw_press,press_MPa,"
+                       "raw_flow3,proc_flow3,raw_press,press_kPa,"
                        "pwm1_cur,pwm2_cur,pwm3_cur")
     writer.writerow(["current_time"] + header_line.split(","))
 
@@ -141,7 +142,7 @@ def replay_pwm_csv(ser, csv_path, settle_s, output_path, buffers, done_event,
         wo = csv.writer(fout)
         wo.writerow(["current_time", "set_idx", "cmd_pwm1", "cmd_pwm2", "cmd_pwm3",
                      "t_s", "raw_flow1", "raw_flow2", "raw_flow3",
-                     "proc_flow1", "proc_flow2", "proc_flow3", "press_MPa",
+                     "proc_flow1", "proc_flow2", "proc_flow3", "press_kPa",
                      "opti_x_mm", "opti_y_mm", "opti_z_mm"])
         last_t = [None]
 
@@ -192,15 +193,20 @@ def replay_pwm_csv(ser, csv_path, settle_s, output_path, buffers, done_event,
 
 
 def run_live_plot(buffers, stop_flag, save_fig, name, file_type="eps",
-                  record_path=None, record_fps=15.0, record_fig="proc"):
+                  record_path=None, record_fps=15.0, record_fig="proc",
+                  plot_pressure=False, seal_threshold_kpa=None):
     """
     Live plot — runs on the main thread using FuncAnimation.
-    Updates two figures at ~10 Hz independently of the serial read rate.
+    Updates the figures at ~10 Hz independently of the serial read rate.
 
     record_path : if set, record the chosen figure to this path (.mp4 or .gif)
     record_fps  : target recording frame rate
-    record_fig  : "raw" to record fig1, "proc" to record fig2 (default)
+    record_fig  : "raw" to record fig1, "proc" to record fig2 (default),
+                  "press" to record the pressure figure (turns it on)
+    plot_pressure      : also show a third figure with the vacuum pressure (kPa)
+    seal_threshold_kpa : if set, drawn on the pressure figure as a dashed line
     """
+    plot_pressure = plot_pressure or record_fig == "press"
     fig1, ax_raw = plt.subplots(figsize=(9, 4))
     fig1.canvas.manager.set_window_title("Raw Flow  (press Q to stop)")
     lr1, = ax_raw.plot([], [], label="Module 1 (A0)")
@@ -221,10 +227,24 @@ def run_live_plot(buffers, stop_flag, save_fig, name, file_type="eps",
     ax_proc.set_title("Processed Flow — Module 1 / 2 / 3")
     ax_proc.legend()
 
+    fig3 = ax_press = lpr = None
+    if plot_pressure:
+        fig3, ax_press = plt.subplots(figsize=(9, 4))
+        fig3.canvas.manager.set_window_title("Vacuum Pressure  (press Q to stop)")
+        lpr, = ax_press.plot([], [], color="tab:purple", label="Pressure (A3)")
+        if seal_threshold_kpa is not None:
+            ax_press.axhline(seal_threshold_kpa, color="tab:red", linestyle="--",
+                             label=f"Seal threshold ({seal_threshold_kpa:g} kPa)")
+        ax_press.axhline(0.0, color="gray", linewidth=0.8)
+        ax_press.set_ylabel("Pressure [kPa]")
+        ax_press.set_xlabel("Time [s]")
+        ax_press.set_title("Vacuum Pressure (negative = vacuum)")
+        ax_press.legend(loc="lower left")
+
     # ── Video recorder ────────────────────────────────────────────────────────
     recorder = None
     if record_path is not None and VideoRecorder is not None:
-        rec_fig = fig1 if record_fig == "raw" else fig2
+        rec_fig = {"raw": fig1, "press": fig3}.get(record_fig, fig2)
         recorder = VideoRecorder(record_path, fps=record_fps, fig=rec_fig)
     elif record_path is not None:
         print("[video] VideoRecorder not available — recording skipped.")
@@ -237,6 +257,8 @@ def run_live_plot(buffers, stop_flag, save_fig, name, file_type="eps",
 
     fig1.canvas.mpl_connect("key_press_event", _on_key)
     fig2.canvas.mpl_connect("key_press_event", _on_key)
+    if fig3 is not None:
+        fig3.canvas.mpl_connect("key_press_event", _on_key)
 
     def _update(_):
         t = buffers["t"]
@@ -260,6 +282,15 @@ def run_live_plot(buffers, stop_flag, save_fig, name, file_type="eps",
 
         fig2.canvas.draw_idle()
 
+        if fig3 is not None:
+            pr = buffers["press"][:len(t)]
+            lpr.set_data(t[:len(pr)], pr)
+            ax_press.set_xlim(t[0], max(t[-1], t[0] + 1))
+            lo = min(min(pr), 0.0, seal_threshold_kpa if seal_threshold_kpa is not None else 0.0)
+            hi = max(max(pr), 0.0)
+            ax_press.set_ylim(lo - 2.0, hi + 2.0)
+            fig3.canvas.draw_idle()
+
         if recorder is not None:
             recorder.capture()
 
@@ -281,6 +312,9 @@ def run_live_plot(buffers, stop_flag, save_fig, name, file_type="eps",
         fig1.savefig(f"{name}_raw_flow.{file_type}",  dpi=300, bbox_inches="tight")
         fig2.savefig(f"{name}_proc_flow.{file_type}", dpi=300, bbox_inches="tight")
         print(f"Figures saved: {name}_raw_flow.{file_type}, {name}_proc_flow.{file_type}")
+        if fig3 is not None:
+            fig3.savefig(f"{name}_pressure.{file_type}", dpi=300, bbox_inches="tight")
+            print(f"Figure saved: {name}_pressure.{file_type}")
     
 
 def main():
@@ -294,8 +328,13 @@ def main():
                         help='Record the live plot to a video file alongside the CSV')
     parser.add_argument('--record_fps', type=float, default=15.0,
                         help='Recording frame rate for both figure and camera (default 15)')
-    parser.add_argument('--record_fig', choices=['raw', 'proc'], default='proc',
-                        help='Which figure to record: raw flow or processed flow (default proc)')
+    parser.add_argument('--plot_pressure', action='store_true',
+                        help='Also show a live vacuum-pressure figure (kPa, from the Arduino pressure sensor)')
+    parser.add_argument('--seal_threshold_kpa', type=float, default=7.0,
+                        help='Draw this seal threshold (kPa, negative) as a dashed line on the pressure figure')
+    parser.add_argument('--record_fig', choices=['raw', 'proc', 'press'], default='proc',
+                        help='Which figure to record: raw flow, processed flow (default proc), '
+                             'or pressure (press -- turns on --plot_pressure)')
     parser.add_argument('--camera', action='store_true',
                         help='Record USB camera video alongside the CSV (requires opencv-python)')
     parser.add_argument('--camera_id', type=int, default=1,
@@ -509,7 +548,7 @@ def main():
                         n = _log_elong_rows(pwm_val, args.equil_s)
                         fl = f"{buffers['p1'][-1]:.3f}" if buffers["p1"] else "n/a"
                         pr = f"{buffers['press'][-1]:.5f}" if buffers["press"] else "n/a"
-                        print(f"  → {n} rows  flow1={fl} L/min  press={pr} MPa")
+                        print(f"  → {n} rows  flow1={fl} L/min  press={pr} kPa")
 
                     # Return to rest
                     ser.write(b"0 0 0\n")
@@ -582,7 +621,8 @@ def main():
         rec_path = f"data/{mode}/{plot_file_name}.mp4"
     run_live_plot(buffers, stop_flag, save_fig, plot_file_name,
                   record_path=rec_path, record_fps=args.record_fps,
-                  record_fig=args.record_fig, file_type=args.file_type)
+                  record_fig=args.record_fig, file_type=args.file_type,
+                  plot_pressure=args.plot_pressure, seal_threshold_kpa=args.seal_threshold_kpa)
 
     if camera_rec is not None:
         camera_rec.stop()
