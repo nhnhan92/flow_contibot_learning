@@ -11,7 +11,7 @@ const int FLOW_SENSOR_MODULE3   = A2;  // PF2M711-C8 analog output (1–5 V)
 const int PRESS_PIN  = A3;  // ISE20A analog output   (1–5 V)
 
 // ADC reference (default 5.0 V). If you measure 4.98 V, you can put that here.
-const float VREF = 5.00f;
+const float VREF = 4.72f;
 
 // ---- Flow sensor PF2M711-C8 parameters ----
 const float FLOW_MIN_LPM = 0.0f;   // L/min at 1.0 V
@@ -28,6 +28,11 @@ const float P_MAX_MPA    = 1.0f;   // MPa at 5.0 V
 const float P_ZERO_MPA   = 0.0f;   // MPa at rest (run with valves closed, set to resting value)
 const float PRESS_ALPHA  = 0.15f;  // IIR smoothing — same as FLOW_ALPHA
 
+const float P_V_LOW = 1.0f, P_V_HIGH = 5.0f;            // sensor output span (V) -- datasheet
+const float P_KPA_AT_V_LOW = 0.0f;                       // e.g. atmosphere      -- datasheet
+const float P_KPA_AT_V_HIGH = -101.3f;                   // e.g. full vacuum     -- datasheet
+const float P_ZERO_KPA = -0.05f;                           // reading at atmosphere, recalibrate
+static bool press_init = false;  static float filt_press_kpa = 0.0f;
 // Sampling period
 const unsigned long SAMPLE_PERIOD_MS = 50;  // 100 Hz
 const unsigned long RAMP_PERIOD_MS   = 100;   // PWM ramp update (100 Hz)
@@ -303,8 +308,13 @@ void loop() {
       float processed_flow3 = max(0.0f, iirFlow(filt_flow3, raw3_lpm) - FLOW_ZERO3_LPM);
 
       float rawPressMPa     = voltToLinear(vPress, P_MIN_MPA, P_MAX_MPA);
-      float processed_press = max(0.0f, iirFlow(filt_press, rawPressMPa) - P_ZERO_MPA);
+      float processed_press_MPa = max(0.0f, iirFlow(filt_press, rawPressMPa) - P_ZERO_MPA);
 
+      float v = constrain(vPress, P_V_LOW, P_V_HIGH);
+      float rawPressKPa = P_KPA_AT_V_LOW + (v - P_V_LOW) * (P_KPA_AT_V_HIGH - P_KPA_AT_V_LOW) / (P_V_HIGH - P_V_LOW);
+      if (!press_init) { filt_press_kpa = rawPressKPa; press_init = true; }
+      filt_press_kpa = PRESS_ALPHA * rawPressKPa + (1.0f - PRESS_ALPHA) * filt_press_kpa;
+      float processed_press_kPa = filt_press_kpa - P_ZERO_KPA;   // no clamp: negative = vacuum
       // Print CSV line (note: we log CURRENT PWM values)
       Serial.print(now);         Serial.print(",");
       Serial.print(raw1_lpm);     Serial.print(",");
@@ -313,8 +323,8 @@ void loop() {
       Serial.print(processed_flow2, 3);  Serial.print(",");
       Serial.print(raw3_lpm);     Serial.print(",");
       Serial.print(processed_flow3, 3);  Serial.print(",");
-      Serial.print(rawPress);           Serial.print(",");
-      Serial.print(processed_press, 5); Serial.print(",");
+      Serial.print(vPress);           Serial.print(",");
+      Serial.print(processed_press_kPa, 5); Serial.print(",");
       Serial.print(pwm1_cur);    Serial.print(",");
       Serial.print(pwm2_cur);    Serial.print(",");
       Serial.println(pwm3_cur);

@@ -80,6 +80,9 @@ class flowbot:
         # convention as self.last_pwm.
         self._flow_lock = threading.Lock()
         self.last_flowrate = np.zeros(3, dtype=np.float32)
+        # Latest vacuum pressure (kPa, gauge; negative = vacuum), field 8 of the
+        # same line (processed_press_kPa, MPS-V35R-NCA). NaN until the first line.
+        self.last_pressure_kpa = float('nan')
 
         # ACK-aware reader replaces the old drain_serial thread.
         t_reader = threading.Thread(target=self._serial_reader_thread, daemon=True)
@@ -195,11 +198,13 @@ class flowbot:
                                 [float(fields[2]), float(fields[4]), float(fields[6])],
                                 dtype=np.float32,
                             )
+                            pressure_kpa = float(fields[8])
                         except ValueError:
                             pass  # malformed/torn line (mid-write read) -- drop it, next line recovers
                         else:
                             with self._flow_lock:
                                 self.last_flowrate = flowrate
+                                self.last_pressure_kpa = pressure_kpa
                 # other lines (status/comments) are discarded (drain behaviour)
             except Exception:
                 pass
