@@ -622,6 +622,10 @@ class RobotDeployment:
                 print("  Suction ON (policy command)")
                 self.fb.suction()
                 self.suction_on = True
+            elif action[d+5] <= 0.5 and self.suction_on:
+                print("  Suction OFF (policy command)")
+                self.fb.release()
+                self.suction_on = False
 
         pwm_int    = np.clip(np.round(pwm_raw), PWM_MIN, PWM_MAX).astype(int)
 
